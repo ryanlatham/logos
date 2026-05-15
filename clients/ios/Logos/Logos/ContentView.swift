@@ -7,11 +7,19 @@ struct ContentView: View {
     @State private var newProjectTitle = ""
     @State private var clarifyAnswer = ""
     @StateObject private var voiceInput = VoiceInputController()
-    @FocusState private var composerFocused: Bool
+    @FocusState private var focusedField: FocusedField?
+
+    private enum FocusedField: Hashable {
+        case adapterURL
+        case secret
+        case newProjectTitle
+        case clarifyAnswer
+        case composer
+    }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
+            ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 12) {
                         connectionPanel
@@ -20,12 +28,23 @@ struct ContentView: View {
                         notificationPanel
                         voicePanel
                         interactionCards
-                        messageList
+                        messageListContent
+                    }
+                    .padding()
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: client.messages.count) { _, _ in
+                    if let last = client.messages.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
-                composer
             }
-            .padding()
+            .safeAreaInset(edge: .bottom) {
+                composer
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.thinMaterial)
+            }
             .navigationTitle("Logos")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -73,16 +92,23 @@ struct ContentView: View {
                 set: { client.settings.urlString = $0 }
             ))
             .accessibilityIdentifier("adapterURLField")
+            .focused($focusedField, equals: .adapterURL)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+            .textContentType(.URL)
+            .keyboardType(.URL)
+            .submitLabel(.done)
             .textFieldStyle(.roundedBorder)
             SecureField("Development shared secret", text: Binding(
                 get: { client.settings.secret },
                 set: { client.settings.secret = $0 }
             ))
             .accessibilityIdentifier("secretField")
+            .focused($focusedField, equals: .secret)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+            .textContentType(.password)
+            .submitLabel(.done)
             .textFieldStyle(.roundedBorder)
             HStack {
                 Circle()
@@ -130,11 +156,15 @@ struct ContentView: View {
             HStack {
                 TextField("New project title", text: $newProjectTitle)
                     .accessibilityIdentifier("newProjectTitleField")
+                    .focused($focusedField, equals: .newProjectTitle)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.none)
+                    .submitLabel(.done)
                     .textFieldStyle(.roundedBorder)
+                    .onSubmit { createProjectFromTitleField() }
                 Button("New") {
-                    if client.createProject(title: newProjectTitle) {
-                        newProjectTitle = ""
-                    }
+                    createProjectFromTitleField()
                 }
                 .disabled(client.connectionState != .connected || newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -297,12 +327,14 @@ struct ContentView: View {
                 if clarify.allowFreeText {
                     HStack {
                         TextField("Answer", text: $clarifyAnswer)
+                            .accessibilityIdentifier("clarifyAnswerField")
+                            .focused($focusedField, equals: .clarifyAnswer)
                             .textFieldStyle(.roundedBorder)
+                            .submitLabel(.send)
                             .disabled(responsePending)
+                            .onSubmit { submitClarificationAnswer() }
                         Button(responsePending ? "Sent" : "Send") {
-                            if client.answerClarification(clarifyAnswer) {
-                                clarifyAnswer = ""
-                            }
+                            submitClarificationAnswer()
                         }
                         .disabled(client.connectionState != .connected || responsePending || clarifyAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
@@ -313,20 +345,11 @@ struct ContentView: View {
         }
     }
 
-    private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(client.messages) { message in
-                        messageBubble(message)
-                            .id(message.id)
-                    }
-                }
-            }
-            .onChange(of: client.messages.count) { _, _ in
-                if let last = client.messages.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
+    private var messageListContent: some View {
+        LazyVStack(alignment: .leading, spacing: 10) {
+            ForEach(client.messages) { message in
+                messageBubble(message)
+                    .id(message.id)
             }
         }
     }
@@ -366,9 +389,10 @@ struct ContentView: View {
         HStack {
             TextField("Ask Hermes", text: $draft, axis: .vertical)
                 .accessibilityIdentifier("composerTextField")
-                .focused($composerFocused)
+                .focused($focusedField, equals: .composer)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...4)
+                .submitLabel(.send)
                 .onSubmit { submitDraft() }
             Button("Send") {
                 submitDraft()
@@ -378,10 +402,24 @@ struct ContentView: View {
         }
     }
 
+    private func createProjectFromTitleField() {
+        if client.createProject(title: newProjectTitle) {
+            newProjectTitle = ""
+            focusedField = nil
+        }
+    }
+
+    private func submitClarificationAnswer() {
+        if client.answerClarification(clarifyAnswer) {
+            clarifyAnswer = ""
+            focusedField = nil
+        }
+    }
+
     private func submitDraft() {
         if client.sendText(draft) {
             draft = ""
-            composerFocused = false
+            focusedField = nil
         }
     }
 

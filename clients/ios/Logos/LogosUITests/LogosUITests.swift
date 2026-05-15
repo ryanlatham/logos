@@ -42,6 +42,19 @@ final class LogosUITests: XCTestCase {
         app.buttons["text"].tap()
     }
 
+    func testProjectTitleFieldAcceptsImmediateTyping() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 8))
+
+        let projectTitle = app.textFields["newProjectTitleField"]
+        XCTAssertTrue(projectTitle.waitForExistence(timeout: 8))
+        projectTitle.tap()
+        projectTitle.typeText("scenario two")
+
+        XCTAssertEqual(projectTitle.value as? String, "scenario two")
+        XCTAssertTrue(app.buttons["New"].isEnabled)
+    }
+
     private func launchConfiguredApp() -> XCUIApplication {
         let app = XCUIApplication()
         let environment = ProcessInfo.processInfo.environment
