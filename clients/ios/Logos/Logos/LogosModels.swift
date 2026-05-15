@@ -19,6 +19,23 @@ enum LogosRunStatus: String {
     case error
 }
 
+struct LogosConnectionLifecycle: Equatable {
+    private(set) var activeConnectionID = UUID()
+
+    mutating func startConnection() -> UUID {
+        activeConnectionID = UUID()
+        return activeConnectionID
+    }
+
+    mutating func invalidate() {
+        activeConnectionID = UUID()
+    }
+
+    func accepts(_ connectionID: UUID) -> Bool {
+        connectionID == activeConnectionID
+    }
+}
+
 struct LogosSettings: Equatable {
     private static let urlKey = "logos.adapter.url"
     private static let deviceIDKey = "logos.device.id"

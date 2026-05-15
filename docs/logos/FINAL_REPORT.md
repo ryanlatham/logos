@@ -160,7 +160,7 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 Result:
 
 ```text
-LogosModelTests: 12 tests, 0 failures
+LogosModelTests: 19 tests, 0 failures
 LogosUITests: 2 tests, 0 failures
 ** TEST SUCCEEDED **
 ```

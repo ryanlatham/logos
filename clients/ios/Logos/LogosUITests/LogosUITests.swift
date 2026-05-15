@@ -44,9 +44,10 @@ final class LogosUITests: XCTestCase {
 
     private func launchConfiguredApp() -> XCUIApplication {
         let app = XCUIApplication()
+        let environment = ProcessInfo.processInfo.environment
         app.launchEnvironment = [
-            "LOGOS_WS_URL": "ws://127.0.0.1:8765",
-            "LOGOS_DEVICE_SECRET": "stage-f-secret",
+            "LOGOS_WS_URL": environment["LOGOS_UI_TEST_WS_URL"] ?? "ws://127.0.0.1:8766",
+            "LOGOS_DEVICE_SECRET": environment["LOGOS_UI_TEST_DEVICE_SECRET"] ?? "stage-f-secret",
             "LOGOS_DEVICE_ID": "ios-ui-test-\(UUID().uuidString)",
             "LOGOS_AUTOCONNECT": "1"
         ]

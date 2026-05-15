@@ -51,6 +51,10 @@ struct ContentView: View {
                     client.handleNotificationRoute(route)
                 }
                 voiceInput.refreshAvailability()
+                voiceInput.updateTransportAvailable(client.connectionState == .connected)
+            }
+            .onChange(of: client.connectionState) { _, newState in
+                voiceInput.updateTransportAvailable(newState == .connected)
             }
             .onOpenURL { url in
                 if let route = LogosNotificationRoute.from(url: url) {
@@ -219,14 +223,26 @@ struct ContentView: View {
                             .onChanged { _ in voiceInput.startHold() }
                             .onEnded { _ in voiceInput.endHold() }
                     )
-                    .allowsHitTesting(voiceInput.voiceEnabled && client.connectionState == .connected)
-                    .opacity(voiceInput.voiceEnabled && client.connectionState == .connected ? 1.0 : 0.45)
-                Button(voiceInput.mode == .tap ? "Stop Tap" : "Tap to Talk") {
+                    .allowsHitTesting(VoiceControlPolicy.controlsDisabled(
+                        voiceEnabled: voiceInput.voiceEnabled,
+                        connected: client.connectionState == .connected,
+                        isRecording: voiceInput.isVoiceInteractionActive
+                    ) == false)
+                    .opacity(VoiceControlPolicy.controlsDisabled(
+                        voiceEnabled: voiceInput.voiceEnabled,
+                        connected: client.connectionState == .connected,
+                        isRecording: voiceInput.isVoiceInteractionActive
+                    ) ? 0.45 : 1.0)
+                Button((voiceInput.mode == .tap || voiceInput.pendingMode == .tap) ? "Stop Tap" : "Tap to Talk") {
                     voiceInput.toggleTap()
                 }
                 .accessibilityIdentifier("tapToTalkButton")
                 .buttonStyle(.borderedProminent)
-                .disabled(voiceInput.voiceEnabled == false || client.connectionState != .connected)
+                .disabled(VoiceControlPolicy.controlsDisabled(
+                    voiceEnabled: voiceInput.voiceEnabled,
+                    connected: client.connectionState == .connected,
+                    isRecording: voiceInput.isVoiceInteractionActive
+                ))
             }
         }
         .padding(12)

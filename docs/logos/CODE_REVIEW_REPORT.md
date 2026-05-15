@@ -72,7 +72,7 @@ cd clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
 TEST SUCCEEDED
-Executed 12 unit tests, 0 failures
+Executed 19 unit tests, 0 failures
 Executed 2 UI tests, 0 failures
 ```
 

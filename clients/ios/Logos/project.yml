@@ -52,3 +52,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryan.logos.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Logos
+schemes:
+  Logos:
+    build:
+      targets:
+        Logos: all
+    test:
+      targets:
+        - LogosTests
+        - LogosUITests

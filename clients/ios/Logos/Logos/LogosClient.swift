@@ -24,6 +24,7 @@ final class LogosClient: ObservableObject {
     @Published var ackText: String?
 
     private var task: URLSessionWebSocketTask?
+    private var connectionLifecycle = LogosConnectionLifecycle()
     private let store = SQLiteMessageStore()
     private let audioPlayback = AudioPlaybackController()
     private var didAutoConnect = false
@@ -40,26 +41,40 @@ final class LogosClient: ObservableObject {
     }
 
     func connect() {
-        disconnect()
+        cancelCurrentSocket()
+        lastError = nil
         guard let url = URL(string: settings.urlString) else {
             lastError = "Invalid adapter URL"
             connectionState = .error
             return
         }
+        guard settings.secret.isEmpty == false else {
+            lastError = "Missing Logos device secret"
+            connectionState = .error
+            return
+        }
+        let connectionID = connectionLifecycle.startConnection()
         connectionState = .connecting
         let task = URLSession.shared.webSocketTask(with: url)
         self.task = task
         task.resume()
-        receiveLoop()
+        receiveLoop(connectionID: connectionID)
         sendHello()
         registerDevice(apnsToken: pendingAPNSToken)
         requestProjects()
     }
 
     func disconnect() {
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        cancelCurrentSocket()
+        lastError = nil
         connectionState = .disconnected
+    }
+
+    private func cancelCurrentSocket() {
+        let oldTask = task
+        task = nil
+        connectionLifecycle.invalidate()
+        oldTask?.cancel(with: .goingAway, reason: nil)
     }
 
     @discardableResult
@@ -282,11 +297,6 @@ final class LogosClient: ObservableObject {
     }
 
     private func sendHello() {
-        guard settings.secret.isEmpty == false else {
-            lastError = "Missing Logos device secret"
-            connectionState = .error
-            return
-        }
         let requestID = UUID().uuidString
         let timestampMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
         let nonce = UUID().uuidString
@@ -320,14 +330,24 @@ final class LogosClient: ObservableObject {
             connectionState = .disconnected
             return false
         }
+        let connectionID = connectionLifecycle.activeConnectionID
         do {
             let data = try JSONSerialization.data(withJSONObject: frame, options: [])
             let string = String(decoding: data, as: UTF8.self)
-            task.send(.string(string)) { [weak self] error in
-                guard let error else { return }
+            task.send(.string(string)) { [weak self, weak task] error in
                 Task { @MainActor in
-                    self?.lastError = error.localizedDescription
-                    self?.connectionState = .error
+                    guard
+                        let self,
+                        self.connectionLifecycle.accepts(connectionID),
+                        let task,
+                        task === self.task
+                    else { return }
+                    if let error {
+                        self.lastError = error.localizedDescription
+                        self.connectionState = .error
+                    } else {
+                        self.lastError = nil
+                    }
                 }
             }
             return true
@@ -337,21 +357,33 @@ final class LogosClient: ObservableObject {
         }
     }
 
-    private func receiveLoop() {
-        task?.receive { [weak self] result in
+    private func receiveLoop(connectionID: UUID) {
+        guard let task else { return }
+        task.receive { [weak self, weak task] result in
             Task { @MainActor in
-                guard let self else { return }
+                guard
+                    let self,
+                    self.connectionLifecycle.accepts(connectionID),
+                    let task,
+                    task === self.task
+                else { return }
                 switch result {
                 case .success(let message):
-                    self.connectionState = .connected
+                    self.markConnected()
                     self.handleSocketMessage(message)
-                    self.receiveLoop()
+                    self.receiveLoop(connectionID: connectionID)
                 case .failure(let error):
+                    self.task = nil
                     self.lastError = error.localizedDescription
                     self.connectionState = .error
                 }
             }
         }
+    }
+
+    private func markConnected() {
+        connectionState = .connected
+        lastError = nil
     }
 
     private func handleSocketMessage(_ message: URLSessionWebSocketTask.Message) {
@@ -367,15 +399,18 @@ final class LogosClient: ObservableObject {
         }
     }
 
-    private func handleFrameString(_ string: String) {
+    func handleFrameString(_ string: String) {
         guard
             let data = string.data(using: .utf8),
             let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let type = root["type"] as? String
         else { return }
+        if type != "error" {
+            lastError = nil
+        }
         switch type {
         case "hello", "registered":
-            connectionState = .connected
+            markConnected()
         case "projects_list":
             handleProjectsList(root)
         case "messages_batch":

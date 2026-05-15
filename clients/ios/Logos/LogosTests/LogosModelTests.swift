@@ -88,6 +88,37 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(enabled.requiresOnDeviceRecognition)
     }
 
+    func testVoiceControlsStayEnabledToStopActiveRecordingAfterDisconnect() throws {
+        XCTAssertTrue(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: false, isRecording: false))
+        XCTAssertFalse(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: false, isRecording: true))
+        XCTAssertFalse(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: true, isRecording: false))
+    }
+
+    func testVoiceStartIntentTrackerRejectsReleasedOrSupersededStarts() throws {
+        var tracker = VoiceStartIntentTracker<String>()
+        let first = try XCTUnwrap(tracker.begin(mode: "hold"))
+        XCTAssertTrue(tracker.accepts(id: first, mode: "hold"))
+        XCTAssertNil(tracker.begin(mode: "tap"))
+
+        tracker.cancel(mode: "hold")
+        XCTAssertFalse(tracker.accepts(id: first, mode: "hold"))
+
+        let second = try XCTUnwrap(tracker.begin(mode: "tap"))
+        XCTAssertTrue(tracker.accepts(id: second, mode: "tap"))
+        XCTAssertFalse(tracker.accepts(id: first, mode: "hold"))
+    }
+
+    @MainActor
+    func testVoiceTransportAvailabilityUpdatesIdleStatus() throws {
+        let voice = VoiceInputController()
+        voice.updateTransportAvailable(false)
+        if voice.voiceEnabled {
+            XCTAssertEqual(voice.statusText, "Connect to Logos before using voice")
+        } else {
+            XCTAssertEqual(voice.statusText, "Voice unavailable")
+        }
+    }
+
     func testSpeechFrameIncludesPartialAndFinalMetadata() throws {
         let partial = LogosSpeechFrame.make(
             text: "hello wor",
@@ -157,5 +188,54 @@ final class LogosModelTests: XCTestCase {
         let urlTypes = try XCTUnwrap(Bundle.main.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]])
         let schemes = urlTypes.flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }
         XCTAssertTrue(schemes.contains("logos"))
+    }
+
+    func testConnectionLifecycleRejectsStaleCallbacksAfterDisconnectOrReconnect() throws {
+        var lifecycle = LogosConnectionLifecycle()
+        let first = lifecycle.startConnection()
+        XCTAssertTrue(lifecycle.accepts(first))
+
+        lifecycle.invalidate()
+        XCTAssertFalse(lifecycle.accepts(first))
+
+        let second = lifecycle.startConnection()
+        XCTAssertFalse(lifecycle.accepts(first))
+        XCTAssertTrue(lifecycle.accepts(second))
+    }
+
+    @MainActor
+    func testDisconnectClearsVisibleErrorAndReportsDisconnected() throws {
+        let client = LogosClient()
+        client.lastError = "The socket is not connected."
+
+        client.disconnect()
+
+        XCTAssertNil(client.lastError)
+        XCTAssertEqual(client.connectionState, .disconnected)
+    }
+
+    @MainActor
+    func testSuccessfulInboundFrameClearsVisibleErrorAndMarksConnected() throws {
+        let client = LogosClient()
+        client.lastError = "Cannot reconnect: stale socket failure."
+
+        client.handleFrameString("""
+        {"type":"hello","request_id":"hello-1","payload":{}}
+        """)
+
+        XCTAssertNil(client.lastError)
+        XCTAssertEqual(client.connectionState, .connected)
+    }
+
+    @MainActor
+    func testSuccessfulOperationFrameClearsPriorAdapterError() throws {
+        let client = LogosClient()
+        client.lastError = "Cannot send a message: Logos is not connected."
+
+        client.handleFrameString("""
+        {"type":"projects_list","payload":{"projects":[],"active_project_key":"default"}}
+        """)
+
+        XCTAssertNil(client.lastError)
     }
 }

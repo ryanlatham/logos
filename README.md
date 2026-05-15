@@ -39,4 +39,4 @@ xcodebuild -project Logos.xcodeproj \
   test
 ```
 
-The UI tests expect the mock adapter to be running on `127.0.0.1:8765` with the test-only secret used in `LogosUITests`.
+The UI tests expect the mock adapter to be running on `127.0.0.1:8766` with the test-only secret used in `LogosUITests`. Override with `LOGOS_UI_TEST_WS_URL` and `LOGOS_UI_TEST_DEVICE_SECRET` when needed.

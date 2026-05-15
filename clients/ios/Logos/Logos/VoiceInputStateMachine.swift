@@ -81,6 +81,36 @@ public enum VoiceRecognitionPolicy {
     }
 }
 
+public enum VoiceControlPolicy {
+    public static func controlsDisabled(voiceEnabled: Bool, connected: Bool, isRecording: Bool) -> Bool {
+        if isRecording { return false }
+        return voiceEnabled == false || connected == false
+    }
+}
+
+struct VoiceStartIntentTracker<Mode: Equatable> {
+    private(set) var pendingID: UUID?
+    private(set) var pendingMode: Mode?
+
+    mutating func begin(mode: Mode) -> UUID? {
+        guard pendingID == nil else { return nil }
+        let id = UUID()
+        pendingID = id
+        pendingMode = mode
+        return id
+    }
+
+    mutating func cancel(mode: Mode? = nil) {
+        guard mode == nil || pendingMode == mode else { return }
+        pendingID = nil
+        pendingMode = nil
+    }
+
+    func accepts(id: UUID, mode: Mode) -> Bool {
+        pendingID == id && pendingMode == mode
+    }
+}
+
 public enum LogosSpeechFrame {
     public static func make(
         text: String,

@@ -1059,7 +1059,7 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
   -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
-# succeeded: 12 unit tests + 2 UI tests
+# succeeded: 19 unit tests + 2 UI tests
 
 xcrun simctl push FD91D719-6C01-4917-A654-B81D3465595A \
   com.ryan.logos docs/logos/stage-j-private-push.apns
