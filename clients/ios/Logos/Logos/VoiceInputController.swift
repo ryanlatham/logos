@@ -17,6 +17,7 @@ final class VoiceInputController: ObservableObject {
     @Published private(set) var voiceEnabled: Bool = false
     @Published private(set) var transportAvailable: Bool = false
     @Published private(set) var permissionDenied: Bool = false
+    @Published private(set) var isFinalizingTranscript: Bool = false
 
     var onPartialTranscript: ((String, String, Int, Int64) -> Void)?
     var onFinalTranscript: ((String, String, Int, Int64) -> Void)?
@@ -31,6 +32,10 @@ final class VoiceInputController: ObservableObject {
     private var silenceDetector = TapToTalkSilenceDetector()
     private var startIntent = VoiceStartIntentTracker<Mode>()
     private var didInstallTap = false
+    private var shouldSendFinalAfterRecognition = false
+    private var finalizationTask: Task<Void, Never>?
+    private var recognitionGeneration = UUID()
+    private static let finalizationTimeoutNanoseconds: UInt64 = 2_000_000_000
 
     init(locale: Locale = Locale(identifier: "en-US")) {
         recognizer = SFSpeechRecognizer(locale: locale)
@@ -39,7 +44,7 @@ final class VoiceInputController: ObservableObject {
 
     var isRecording: Bool { mode != .idle }
     var pendingMode: Mode? { startIntent.pendingMode }
-    var isVoiceInteractionActive: Bool { isRecording || pendingMode != nil }
+    var isVoiceInteractionActive: Bool { isRecording || isFinalizingTranscript || pendingMode != nil }
 
     func configureCallbacks(
         partial: @escaping (String, String, Int, Int64) -> Void,
@@ -99,7 +104,7 @@ final class VoiceInputController: ObservableObject {
     }
 
     private func begin(mode targetMode: Mode) {
-        guard mode == .idle, pendingMode == nil else { return }
+        guard mode == .idle, pendingMode == nil, isFinalizingTranscript == false else { return }
         refreshAvailability()
         guard voiceEnabled else { return }
         guard transportAvailable else {
@@ -164,7 +169,13 @@ final class VoiceInputController: ObservableObject {
         inputID = UUID().uuidString
         partialSeq = 0
         partialTranscript = ""
+        shouldSendFinalAfterRecognition = false
+        isFinalizingTranscript = false
+        finalizationTask?.cancel()
+        finalizationTask = nil
         startedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+        recognitionGeneration = UUID()
+        let generation = recognitionGeneration
         silenceDetector.start(at: Date().timeIntervalSinceReferenceDate)
 
         recognitionTask?.cancel()
@@ -212,7 +223,7 @@ final class VoiceInputController: ObservableObject {
 
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor in
-                self?.handleRecognition(result: result, error: error)
+                self?.handleRecognition(result: result, error: error, generation: generation)
             }
         }
     }
@@ -228,37 +239,91 @@ final class VoiceInputController: ObservableObject {
         }
     }
 
-    private func handleRecognition(result: SFSpeechRecognitionResult?, error: Error?) {
+    private func handleRecognition(result: SFSpeechRecognitionResult?, error: Error?, generation: UUID) {
+        guard generation == recognitionGeneration, mode != .idle || isFinalizingTranscript else { return }
         if let result {
             let text = result.bestTranscription.formattedString
             partialTranscript = text
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !result.isFinal, !trimmed.isEmpty {
                 partialSeq += 1
                 onPartialTranscript?(text, inputID, partialSeq, startedAtMilliseconds)
             }
             if result.isFinal {
-                stop(sendFinal: true)
+                if mode != .idle {
+                    stopAudioCapture(endAudio: false, deactivateSession: false)
+                }
+                finishRecognition(sendFinal: shouldSendFinalAfterRecognition || !trimmed.isEmpty, cancelTask: false)
+                return
             }
         }
-        if let error, mode != .idle {
-            statusText = "Speech failed: \(error.localizedDescription)"
-            stop(sendFinal: true)
+        if let error, mode != .idle || isFinalizingTranscript {
+            if isFinalizingTranscript, partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                finishRecognition(sendFinal: shouldSendFinalAfterRecognition, cancelTask: true)
+            } else {
+                statusText = "Speech failed: \(error.localizedDescription)"
+                cancelRecognition(status: "Speech failed: \(error.localizedDescription)")
+            }
         }
     }
 
     private func stop(sendFinal: Bool) {
+        if isFinalizingTranscript {
+            if sendFinal { return }
+            cancelRecognition(status: "Voice cancelled")
+            return
+        }
         guard mode != .idle else { return }
-        let finalText = partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sendFinal {
+            beginFinalizingRecognition()
+        } else {
+            cancelRecognition(status: "Voice cancelled")
+        }
+    }
+
+    private func beginFinalizingRecognition() {
+        shouldSendFinalAfterRecognition = true
+        isFinalizingTranscript = true
+        stopAudioCapture(endAudio: true, deactivateSession: false)
+        statusText = partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Finishing speech recognition…"
+            : "Finishing transcript…"
+        finalizationTask?.cancel()
+        finalizationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.finalizationTimeoutNanoseconds)
+            guard let self, self.isFinalizingTranscript else { return }
+            self.finishRecognition(sendFinal: self.shouldSendFinalAfterRecognition, cancelTask: true)
+        }
+    }
+
+    private func stopAudioCapture(endAudio: Bool, deactivateSession: Bool = true) {
         audioEngine.stop()
         if didInstallTap {
             audioEngine.inputNode.removeTap(onBus: 0)
             didInstallTap = false
         }
-        request?.endAudio()
-        request = nil
-        recognitionTask?.cancel()
+        if endAudio {
+            request?.endAudio()
+        }
+        if deactivateSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+        mode = .idle
+    }
+
+    private func finishRecognition(sendFinal: Bool, cancelTask: Bool) {
+        finalizationTask?.cancel()
+        finalizationTask = nil
+        let finalText = partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cancelTask {
+            recognitionTask?.cancel()
+        }
         recognitionTask = nil
+        request = nil
+        recognitionGeneration = UUID()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        isFinalizingTranscript = false
+        shouldSendFinalAfterRecognition = false
         mode = .idle
         statusText = finalText.isEmpty ? "Voice idle — no speech captured" : "Voice idle"
         if sendFinal, !finalText.isEmpty {
@@ -267,8 +332,21 @@ final class VoiceInputController: ObservableObject {
         }
     }
 
+    private func cancelRecognition(status: String) {
+        finalizationTask?.cancel()
+        finalizationTask = nil
+        stopAudioCapture(endAudio: true)
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        request = nil
+        recognitionGeneration = UUID()
+        isFinalizingTranscript = false
+        shouldSendFinalAfterRecognition = false
+        statusText = status
+    }
+
     private func refreshIdleStatusText() {
-        guard mode == .idle else { return }
+        guard mode == .idle, isFinalizingTranscript == false else { return }
         if voiceEnabled == false {
             statusText = "Voice unavailable"
         } else if transportAvailable == false {

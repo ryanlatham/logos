@@ -1,6 +1,6 @@
 # Logos Device Test Checklist
 
-Last updated: 2026-05-15T06:28:32-07:00
+Last updated: 2026-05-15T12:23:21-07:00
 
 This checklist tracks validation that cannot be completed by Xcode Simulator alone. For an interactive walkthrough with checkboxes, command copy buttons, and a fillable report form, open `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`. Stage I establishes the voice path gates and Stage J adds APNS hardware/credential gates.
 
@@ -24,7 +24,8 @@ Validation steps:
    - speak a short request,
    - verify partial transcript text appears,
    - release,
-   - verify exactly one final `speech` frame reaches Hermes and gets a response.
+   - verify recording stops but the UI briefly shows a finalizing/finishing-transcript state,
+   - verify exactly one final `speech` frame reaches Hermes after ASR finishes and includes the last few words spoken before release.
 6. Hold-to-talk cancellation/error:
    - press with silence, then release,
    - verify no empty final turn is sent.
@@ -32,7 +33,9 @@ Validation steps:
    - tap `Tap to Talk`,
    - speak a short request,
    - stop speaking,
-   - verify energy/silence detection stops recording and sends the final transcript.
+   - verify energy/silence detection stops recording,
+   - verify the UI briefly shows a finalizing/finishing-transcript state,
+   - verify exactly one final transcript is sent after ASR finishes and includes the last few words spoken before silence.
 8. Tap-to-talk initial silence:
    - tap `Tap to Talk` and remain silent,
    - verify the app stops after the initial-silence timeout and sends no empty final turn.
@@ -49,6 +52,25 @@ Validation steps:
     - inspect adapter logs and verify full speech text is not logged unless explicit debug logging is enabled.
 
 Record results in Stage K/L reports with device model, iOS version, locale, recognition availability, pass/fail notes, and any screenshots/logs.
+
+## Stage G — real iPhone audio playback
+
+Prerequisites:
+
+- Adapter running with the same `LOGOS_DEVICE_SECRET` as the app.
+- At least one persisted assistant message visible in the current project.
+- iPhone volume set above zero and output route known (speaker, AirPods, etc.).
+
+Validation steps:
+
+1. Send a text or voice request and wait for the assistant response to render.
+2. Tap the assistant message `Play` button.
+3. Verify the playback status changes through requesting/receiving to `Playing audio`.
+4. Verify the deterministic stub tone is audible on the selected output route.
+5. Toggle the hardware silent switch / Focus mode if relevant and verify playback still uses the app audio route; Logos now sets an explicit playback audio session before starting the player.
+6. If no audio is heard, record whether the UI reports `Playing audio` or an error, and check the iPhone output route/volume before treating it as an adapter issue.
+
+Record pass/fail notes with device model, iOS version, output route, and whether the gateway/play-button path produced audible audio. Do not paste secrets into reports.
 
 ## Stage J — real APNS and notification routing
 

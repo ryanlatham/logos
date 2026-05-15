@@ -23,7 +23,7 @@ final class LogosUITests: XCTestCase {
         XCTAssertTrue(playButtons.firstMatch.waitForExistence(timeout: 8))
         let playButton = playButtons.element(boundBy: max(playButtons.count - 1, 0))
         playButton.tap()
-        XCTAssertTrue(app.staticTexts["Playing audio"].waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForPlaybackStatus(in: app))
     }
 
     func testApprovalAndClarificationCardsRenderFromMockAdapterFixtures() throws {
@@ -74,6 +74,17 @@ final class LogosUITests: XCTestCase {
         XCTAssertTrue(hold.waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["tapToTalkButton"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["voiceAvailabilityLabel"].exists)
+    }
+
+    private func waitForPlaybackStatus(in app: XCUIApplication, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if app.staticTexts["Playing audio"].exists || app.staticTexts["Audio finished"].exists {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
     }
 
     private func send(_ text: String, in app: XCUIApplication) {

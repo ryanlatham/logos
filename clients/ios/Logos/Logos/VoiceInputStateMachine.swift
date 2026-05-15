@@ -82,7 +82,13 @@ public enum VoiceRecognitionPolicy {
 }
 
 public enum VoiceControlPolicy {
-    public static func controlsDisabled(voiceEnabled: Bool, connected: Bool, isRecording: Bool) -> Bool {
+    public static func controlsDisabled(
+        voiceEnabled: Bool,
+        connected: Bool,
+        isRecording: Bool,
+        isFinalizing: Bool = false
+    ) -> Bool {
+        if isFinalizing { return true }
         if isRecording { return false }
         return voiceEnabled == false || connected == false
     }

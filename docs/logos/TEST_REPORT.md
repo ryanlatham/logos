@@ -1,6 +1,6 @@
 # Logos Test Report
 
-Last updated: 2026-05-15T05:47:05-07:00
+Last updated: 2026-05-15T12:23:21-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -26,8 +26,9 @@ What is verified:
 - Typed text from Simulator reaches the adapter and renders a response.
 - Project picker/default project UI is present and usable in the Simulator.
 - Approval and clarification cards render from mock adapter fixtures.
-- Audio playback plumbing is exercised by UI test and reaches `Playing audio` status.
+- Audio playback plumbing is exercised by UI test and reaches `Playing audio` or `Audio finished` status.
 - ASR UI/state-machine code compiles and unit tests cover the local-only recognition policy and tap-to-talk silence behavior.
+- Post-physical-test regression hardening now covers two field bugs: ASR no longer cancels recognition immediately on mic stop, and iOS playback now activates an AVAudioSession playback category before starting audio.
 - Private APNS payload construction is tested and `xcrun simctl push` accepts the private payload fixture.
 - Notification/deep-link route parsing is unit-tested; `logos://` Simulator open triggers the iOS first-open confirmation.
 
@@ -54,7 +55,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Result:
 
 ```text
-45 passed in 0.22s
+45 passed in 0.26s
 ```
 
 ### Python compile check
@@ -112,15 +113,15 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 Result:
 
 ```text
-LogosModelTests: 19 tests, 0 failures
-LogosUITests: 2 tests, 0 failures
+LogosModelTests: 22 tests, 0 failures
+LogosUITests: 3 tests, 0 failures
 ** TEST SUCCEEDED **
 ```
 
-Xcode result bundle:
+Latest Xcode result bundles:
 
 ```text
-/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.15_05-45-05--0700.xcresult
+/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.15_12-22-19--0700.xcresult
 ```
 
 ### Simulator launch
@@ -203,7 +204,7 @@ docs/logos/stage-j-notification-route-simulator.png
 | Clarification card | Pass | UI fixture test passes |
 | Run status | Pass | UI tests observe `Idle`; adapter tests cover run statuses |
 | Stop/cancel path | Pass at protocol level | Stage E tests cover `/stop` mapping; physical long-running cancel remains manual |
-| TTS playback plumbing | Pass | UI test taps play and observes `Playing audio`; Stage G tests cover chunk/end frames |
+| TTS playback plumbing | Pass | UI test taps play and observes `Playing audio` or `Audio finished`; Stage G tests cover chunk/end frames |
 | Fast ack/intent/summary stub | Pass | Stage H tests cover conservative intents and summary metadata |
 | ASR UI/state machine | Simulator-pass | Unit tests cover state machine/policy; UI visible; real mic is hardware-gated |
 | Private APNS payloads | Pass | Stage J tests reject sensitive content in payloads |

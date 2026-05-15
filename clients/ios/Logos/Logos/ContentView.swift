@@ -256,12 +256,14 @@ struct ContentView: View {
                     .allowsHitTesting(VoiceControlPolicy.controlsDisabled(
                         voiceEnabled: voiceInput.voiceEnabled,
                         connected: client.connectionState == .connected,
-                        isRecording: voiceInput.isVoiceInteractionActive
+                        isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
+                        isFinalizing: voiceInput.isFinalizingTranscript
                     ) == false)
                     .opacity(VoiceControlPolicy.controlsDisabled(
                         voiceEnabled: voiceInput.voiceEnabled,
                         connected: client.connectionState == .connected,
-                        isRecording: voiceInput.isVoiceInteractionActive
+                        isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
+                        isFinalizing: voiceInput.isFinalizingTranscript
                     ) ? 0.45 : 1.0)
                 Button((voiceInput.mode == .tap || voiceInput.pendingMode == .tap) ? "Stop Tap" : "Tap to Talk") {
                     voiceInput.toggleTap()
@@ -271,7 +273,8 @@ struct ContentView: View {
                 .disabled(VoiceControlPolicy.controlsDisabled(
                     voiceEnabled: voiceInput.voiceEnabled,
                     connected: client.connectionState == .connected,
-                    isRecording: voiceInput.isVoiceInteractionActive
+                    isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
+                    isFinalizing: voiceInput.isFinalizingTranscript
                 ))
             }
         }

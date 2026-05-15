@@ -1,9 +1,67 @@
 import AVFoundation
 import Foundation
 
-final class AudioPlaybackController {
+protocol AudioSessionManaging {
+    func prepareForPlayback() throws
+    func finishPlayback() throws
+}
+
+struct SystemAudioSessionManager: AudioSessionManaging {
+    func prepareForPlayback() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try session.setActive(true)
+    }
+
+    func finishPlayback() throws {
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+}
+
+protocol AudioPlaying: AnyObject {
+    var delegate: AVAudioPlayerDelegate? { get set }
+
+    @discardableResult
+    func prepareToPlay() -> Bool
+
+    @discardableResult
+    func play() -> Bool
+}
+
+extension AVAudioPlayer: AudioPlaying {}
+
+protocol AudioPlayerMaking {
+    func makePlayer(data: Data) throws -> any AudioPlaying
+}
+
+struct SystemAudioPlayerFactory: AudioPlayerMaking {
+    func makePlayer(data: Data) throws -> any AudioPlaying {
+        try AVAudioPlayer(data: data)
+    }
+}
+
+struct AudioPlaybackResult: Equatable {
+    let byteCount: Int
+    let started: Bool
+}
+
+final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
+    var onPlaybackFinished: ((String, Bool) -> Void)?
+
     private var chunksByAudioID: [String: [Int: Data]] = [:]
-    private var playersByAudioID: [String: AVAudioPlayer] = [:]
+    private var playersByAudioID: [String: any AudioPlaying] = [:]
+    private var audioIDByPlayerID: [ObjectIdentifier: String] = [:]
+    private let sessionManager: any AudioSessionManaging
+    private let playerFactory: any AudioPlayerMaking
+
+    init(
+        sessionManager: any AudioSessionManaging = SystemAudioSessionManager(),
+        playerFactory: any AudioPlayerMaking = SystemAudioPlayerFactory()
+    ) {
+        self.sessionManager = sessionManager
+        self.playerFactory = playerFactory
+        super.init()
+    }
 
     func appendChunk(audioID: String, chunkIndex: Int, base64: String) throws {
         guard let data = Data(base64Encoded: base64) else {
@@ -15,7 +73,7 @@ final class AudioPlaybackController {
     }
 
     @discardableResult
-    func finish(audioID: String, expectedChunkCount: Int? = nil) throws -> Int {
+    func finish(audioID: String, expectedChunkCount: Int? = nil) throws -> AudioPlaybackResult {
         guard let chunks = chunksByAudioID[audioID], chunks.isEmpty == false else {
             throw AudioPlaybackError.noChunks
         }
@@ -26,12 +84,43 @@ final class AudioPlaybackController {
         let data = ordered.reduce(into: Data()) { partial, chunk in
             partial.append(chunk)
         }
-        let player = try AVAudioPlayer(data: data)
-        player.prepareToPlay()
-        player.play()
-        playersByAudioID[audioID] = player
-        chunksByAudioID.removeValue(forKey: audioID)
-        return data.count
+
+        do {
+            try sessionManager.prepareForPlayback()
+            let player = try playerFactory.makePlayer(data: data)
+            player.delegate = self
+            let prepared = player.prepareToPlay()
+            let started = player.play()
+            guard prepared, started else {
+                try? sessionManager.finishPlayback()
+                throw AudioPlaybackError.playbackDidNotStart
+            }
+            playersByAudioID[audioID] = player
+            audioIDByPlayerID[ObjectIdentifier(player)] = audioID
+            chunksByAudioID.removeValue(forKey: audioID)
+            return AudioPlaybackResult(byteCount: data.count, started: started)
+        } catch {
+            if !(error is AudioPlaybackError) {
+                try? sessionManager.finishPlayback()
+            }
+            throw error
+        }
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let playerID = ObjectIdentifier(player)
+        guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
+        playersByAudioID.removeValue(forKey: audioID)
+        try? sessionManager.finishPlayback()
+        onPlaybackFinished?(audioID, flag)
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        let playerID = ObjectIdentifier(player)
+        guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
+        playersByAudioID.removeValue(forKey: audioID)
+        try? sessionManager.finishPlayback()
+        onPlaybackFinished?(audioID, false)
     }
 }
 
@@ -39,6 +128,7 @@ enum AudioPlaybackError: LocalizedError {
     case invalidBase64
     case noChunks
     case missingChunks
+    case playbackDidNotStart
 
     var errorDescription: String? {
         switch self {
@@ -48,6 +138,8 @@ enum AudioPlaybackError: LocalizedError {
             return "No audio chunks were received."
         case .missingChunks:
             return "Audio stream ended before all chunks arrived."
+        case .playbackDidNotStart:
+            return "Audio playback could not start. Check device volume and output route."
         }
     }
 }

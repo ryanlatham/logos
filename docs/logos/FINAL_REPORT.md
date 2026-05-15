@@ -1,6 +1,6 @@
 # Logos Final Report — Simulator Complete / Physical Device Gate
 
-Last updated: 2026-05-15T06:28:32-07:00
+Last updated: 2026-05-15T12:23:21-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -73,13 +73,14 @@ Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 - Run status display and stop button.
 - Approval card UI.
 - Clarification card UI.
-- Playback button and AVFoundation audio chunk assembly/playback.
+- Playback button and AVFoundation audio chunk assembly/playback with explicit `.playback` audio-session activation before starting `AVAudioPlayer`.
 - Ack/playback status surfaces.
 - Voice panel with:
   - `SFSpeechRecognizer` capability check,
   - on-device-only recognition policy,
   - hold-to-talk,
   - tap-to-talk,
+  - microphone-stop finalization that waits for recognizer final output or a bounded timeout before sending to Hermes,
   - partial transcript display,
   - tap-to-talk energy/silence state machine.
 - Notification panel with explicit `Enable` action.
@@ -160,8 +161,8 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 Result:
 
 ```text
-LogosModelTests: 19 tests, 0 failures
-LogosUITests: 2 tests, 0 failures
+LogosModelTests: 22 tests, 0 failures
+LogosUITests: 3 tests, 0 failures
 ** TEST SUCCEEDED **
 ```
 
@@ -173,7 +174,8 @@ The UI tests validate:
 - voice panel/control presence,
 - typed message round trip through the mock adapter,
 - assistant response rendering,
-- playback button/status path,
+- playback button/status path through `Playing audio` or `Audio finished`,
+- immediate project-title text field typing,
 - approval fixture card rendering,
 - clarification fixture card rendering and response submission.
 
@@ -185,7 +187,7 @@ The UI tests validate:
 - Typed text reaches the adapter and response renders in chat.
 - Project picker/default project UI is visible.
 - Approval/clarification cards render from fixtures.
-- Audio playback plumbing reaches `Playing audio` status.
+- Audio playback plumbing reaches `Playing audio` or `Audio finished` status.
 - Voice UI appears; Simulator reports on-device speech recognition availability in the captured run.
 - `xcrun simctl push` accepts the private notification payload fixture.
 - `logos://` open URL reaches the iOS route mechanism far enough for Simulator to display first-open confirmation; parser/route behavior is unit-tested.

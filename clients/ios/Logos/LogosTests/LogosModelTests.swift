@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import Logos
 
 final class LogosModelTests: XCTestCase {
@@ -92,6 +93,12 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: false, isRecording: false))
         XCTAssertFalse(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: false, isRecording: true))
         XCTAssertFalse(VoiceControlPolicy.controlsDisabled(voiceEnabled: true, connected: true, isRecording: false))
+        XCTAssertTrue(VoiceControlPolicy.controlsDisabled(
+            voiceEnabled: true,
+            connected: true,
+            isRecording: false,
+            isFinalizing: true
+        ))
     }
 
     func testVoiceStartIntentTrackerRejectsReleasedOrSupersededStarts() throws {
@@ -237,5 +244,96 @@ final class LogosModelTests: XCTestCase {
         """)
 
         XCTAssertNil(client.lastError)
+    }
+
+    @MainActor
+    func testAudioFramesForOtherDevicesAreIgnored() throws {
+        let client = LogosClient()
+        client.settings.deviceID = "iphone-a"
+
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"iphone-b","payload":{"audio_id":"foreign-audio","chunk_index":0,"data":"not-base64"}}
+        """)
+
+        XCTAssertNil(client.lastError)
+        XCTAssertNil(client.playbackStatus)
+    }
+
+    func testAudioPlaybackPreparesPlaybackSessionBeforeStartingPlayer() throws {
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
+        try controller.appendChunk(audioID: "audio-1", chunkIndex: 1, base64: Data([3, 4]).base64EncodedString())
+        try controller.appendChunk(audioID: "audio-1", chunkIndex: 0, base64: Data([1, 2]).base64EncodedString())
+
+        let result = try controller.finish(audioID: "audio-1", expectedChunkCount: 2)
+
+        XCTAssertEqual(session.prepareCalls, 1)
+        XCTAssertEqual(factory.receivedData, Data([1, 2, 3, 4]))
+        XCTAssertEqual(factory.player.prepareCalls, 1)
+        XCTAssertEqual(factory.player.playCalls, 1)
+        XCTAssertNotNil(factory.player.delegate)
+        XCTAssertEqual(session.finishCalls, 0)
+        XCTAssertEqual(result, AudioPlaybackResult(byteCount: 4, started: true))
+    }
+
+    func testAudioPlaybackReportsPlayerStartFailure() throws {
+        let factory = RecordingAudioPlayerFactory()
+        factory.player.playResult = false
+        let session = RecordingAudioSessionManager()
+        let controller = AudioPlaybackController(
+            sessionManager: session,
+            playerFactory: factory
+        )
+        try controller.appendChunk(audioID: "audio-1", chunkIndex: 0, base64: Data([1, 2]).base64EncodedString())
+
+        XCTAssertThrowsError(try controller.finish(audioID: "audio-1", expectedChunkCount: 1)) { error in
+            guard case AudioPlaybackError.playbackDidNotStart = error else {
+                XCTFail("Expected playbackDidNotStart, got \(error)")
+                return
+            }
+        }
+        XCTAssertEqual(session.finishCalls, 1)
+    }
+}
+
+private final class RecordingAudioSessionManager: AudioSessionManaging {
+    private(set) var prepareCalls = 0
+    private(set) var finishCalls = 0
+
+    func prepareForPlayback() throws {
+        prepareCalls += 1
+    }
+
+    func finishPlayback() throws {
+        finishCalls += 1
+    }
+}
+
+private final class RecordingAudioPlayer: AudioPlaying {
+    weak var delegate: AVAudioPlayerDelegate?
+    var prepareResult = true
+    var playResult = true
+    private(set) var prepareCalls = 0
+    private(set) var playCalls = 0
+
+    func prepareToPlay() -> Bool {
+        prepareCalls += 1
+        return prepareResult
+    }
+
+    func play() -> Bool {
+        playCalls += 1
+        return playResult
+    }
+}
+
+private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
+    let player = RecordingAudioPlayer()
+    private(set) var receivedData = Data()
+
+    func makePlayer(data: Data) throws -> any AudioPlaying {
+        receivedData = data
+        return player
     }
 }

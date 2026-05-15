@@ -27,11 +27,23 @@ final class LogosClient: ObservableObject {
     private var connectionLifecycle = LogosConnectionLifecycle()
     private let store = SQLiteMessageStore()
     private let audioPlayback = AudioPlaybackController()
+    private var requestedAudioIDs = Set<String>()
+    private var activeAudioID: String?
     private var didAutoConnect = false
     private var pendingAPNSToken: String?
 
     init() {
         messages = store.loadMessages(projectKey: activeProjectKey)
+        audioPlayback.onPlaybackFinished = { [weak self] audioID, succeeded in
+            Task { @MainActor in
+                guard let self, self.activeAudioID == audioID else { return }
+                self.activeAudioID = nil
+                self.playbackStatus = succeeded ? "Audio finished" : nil
+                if !succeeded {
+                    self.lastError = "Audio playback ended unexpectedly. Check device volume and output route."
+                }
+            }
+        }
     }
 
     func connectIfRequestedByEnvironment() {
@@ -264,6 +276,8 @@ final class LogosClient: ObservableObject {
 
     func playback(message: LogosMessage) {
         guard ensureConnectedForUserAction("play audio") else { return }
+        let audioID = "ios-\(UUID().uuidString)"
+        requestedAudioIDs.insert(audioID)
         playbackStatus = "Requesting audio"
         sendFrame([
             "type": "playback_audio",
@@ -273,6 +287,7 @@ final class LogosClient: ObservableObject {
             "session_id": message.sessionID,
             "payload": [
                 "message_id": message.messageID,
+                "audio_id": audioID,
                 "mode": "summary",
                 "text": message.content
             ]
@@ -560,13 +575,16 @@ final class LogosClient: ObservableObject {
         guard
             let payload = root["payload"] as? [String: Any],
             let audioID = payload["audio_id"] as? String,
+            shouldAcceptAudioFrame(root, audioID: audioID),
             let data = payload["data"] as? String
         else { return }
         let chunkIndex = payload["chunk_index"] as? Int ?? Int(payload["chunk_index"] as? String ?? "") ?? 0
         do {
+            requestedAudioIDs.insert(audioID)
             try audioPlayback.appendChunk(audioID: audioID, chunkIndex: chunkIndex, base64: data)
             playbackStatus = "Receiving audio"
         } catch {
+            requestedAudioIDs.remove(audioID)
             lastError = error.localizedDescription
             playbackStatus = nil
         }
@@ -575,16 +593,28 @@ final class LogosClient: ObservableObject {
     private func handleAudioEnd(_ root: [String: Any]) {
         guard
             let payload = root["payload"] as? [String: Any],
-            let audioID = payload["audio_id"] as? String
+            let audioID = payload["audio_id"] as? String,
+            shouldAcceptAudioFrame(root, audioID: audioID)
         else { return }
         let chunkCount = payload["chunk_count"] as? Int ?? Int(payload["chunk_count"] as? String ?? "")
         do {
-            _ = try audioPlayback.finish(audioID: audioID, expectedChunkCount: chunkCount)
-            playbackStatus = "Playing audio"
+            let result = try audioPlayback.finish(audioID: audioID, expectedChunkCount: chunkCount)
+            requestedAudioIDs.remove(audioID)
+            activeAudioID = audioID
+            playbackStatus = result.started ? "Playing audio" : "Audio did not start"
         } catch {
+            requestedAudioIDs.remove(audioID)
             lastError = error.localizedDescription
             playbackStatus = nil
         }
+    }
+
+    private func shouldAcceptAudioFrame(_ root: [String: Any], audioID: String) -> Bool {
+        if let frameDeviceID = root["device_id"] as? String, frameDeviceID.isEmpty == false {
+            guard frameDeviceID == settings.deviceID else { return false }
+            return true
+        }
+        return requestedAudioIDs.contains(audioID)
     }
 
     private func upsertProject(_ project: LogosProject) {
