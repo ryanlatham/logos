@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and secrets
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.p8
+*.pem
+*.key
+
+# Xcode / Swift generated artifacts
+build/
+DerivedData/
+*.xcresult
+*.xcuserstate
+xcuserdata/
+
+# XcodeGen output; regenerate with clients/ios/Logos/project.yml
+clients/ios/Logos/Logos.xcodeproj/

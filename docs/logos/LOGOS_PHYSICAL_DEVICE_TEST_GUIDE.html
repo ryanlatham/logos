@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Logos Physical Device Test Guide</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: dark;
+      --bg: #080d18;
+      --panel: #101827;
+      --panel-2: #142033;
+      --panel-3: #0d1422;
+      --text: #f7fbff;
+      --muted: #a8b4c8;
+      --line: rgba(255,255,255,.13);
+      --accent: #76c7ff;
+      --accent-2: #a991ff;
+      --good: #78dfa3;
+      --warn: #ffd36e;
+      --bad: #ff8b8b;
+      --info: #8edbff;
+      --radius: 18px;
+      --shadow: 0 22px 58px rgba(0,0,0,.28);
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 0%, rgba(118,199,255,.23), transparent 34rem),
+        radial-gradient(circle at 88% 6%, rgba(169,145,255,.18), transparent 28rem),
+        var(--bg);
+      overflow-x: hidden;
+    }
+    a { color: var(--accent); }
+    main { width: min(1180px, 100%); margin: 0 auto; padding: 2rem; }
+    header, section { margin-block: 1rem; }
+    h1, h2, h3, p, li, label, dd, dt, td, th { overflow-wrap: break-word; }
+    h1 { font-size: clamp(2.4rem, 7vw, 5.5rem); line-height: .92; margin: .2rem 0 1rem; letter-spacing: -.06em; }
+    h2 { margin: 0 0 .8rem; font-size: clamp(1.45rem, 3.5vw, 2.1rem); letter-spacing: -.025em; }
+    h3 { margin: 0 0 .35rem; font-size: 1.05rem; }
+    p { margin: .4rem 0; }
+    code, pre, .path, .token { overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; max-width: 100%; overflow-x: auto; }
+    button, input, textarea, select { font: inherit; }
+    .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .16em; font-weight: 800; font-size: .78rem; }
+    .muted { color: var(--muted); }
+    .tiny { font-size: .86rem; }
+    .panel, .card, .step, .shot, .callout, .command, .scenario {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: color-mix(in srgb, var(--panel) 94%, black);
+      box-shadow: var(--shadow);
+    }
+    .panel { padding: 1.25rem; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(min(100%, 21rem), .7fr);
+      gap: 1rem;
+      align-items: end;
+    }
+    .hero-card { padding: 1rem; background: linear-gradient(150deg, rgba(118,199,255,.12), rgba(169,145,255,.08)); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+    .wide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: 1rem; }
+    .visual-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 1rem; align-items: start; }
+    .scenario-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+    .card { padding: 1rem; }
+    .shot { padding: .8rem; background: var(--panel-2); }
+    .shot img { display: block; width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); background: #0a0d13; }
+    .shot figcaption { margin-top: .55rem; }
+    .callout { padding: 1rem; border-left: 5px solid var(--info); }
+    .callout.warn { border-left-color: var(--warn); }
+    .callout.bad { border-left-color: var(--bad); }
+    .callout.good { border-left-color: var(--good); }
+    .checkline { display: flex; gap: .65rem; align-items: flex-start; }
+    .checkline input { margin-top: .3rem; flex: 0 0 auto; }
+    .status-row { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin-top: .7rem; }
+    .pill { display: inline-flex; align-items: center; gap: .4rem; padding: .28rem .62rem; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.06); color: var(--muted); font-size: .86rem; }
+    .pill.good { color: var(--good); }
+    .pill.warn { color: var(--warn); }
+    .pill.bad { color: var(--bad); }
+    .command { background: #070c16; padding: .85rem; margin: .75rem 0; }
+    .command-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .6rem; align-items: center; margin-bottom: .5rem; }
+    .copy-btn, .action-btn, .top-link {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #213a61;
+      color: var(--text);
+      padding: .55rem .85rem;
+      cursor: pointer;
+      font-weight: 750;
+      width: auto;
+    }
+    .copy-btn:hover, .action-btn:hover, .top-link:hover { filter: brightness(1.12); }
+    .scenario { padding: 1rem; }
+    .scenario-header { display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; align-items: flex-start; margin-bottom: .75rem; }
+    .scenario-title { display: grid; gap: .15rem; }
+    .scenario select { width: auto; min-width: 9rem; }
+    .steps { counter-reset: step; display: grid; gap: .65rem; margin: .75rem 0; }
+    .step { counter-increment: step; padding: .85rem; display: grid; grid-template-columns: auto minmax(0,1fr); gap: .65rem; align-items: start; background: var(--panel-3); box-shadow: none; }
+    .step::before { content: counter(step); display: grid; place-items: center; width: 1.7rem; height: 1.7rem; border-radius: 999px; background: rgba(118,199,255,.17); color: var(--accent); font-weight: 900; }
+    .step strong { display: block; }
+    .expected { color: var(--muted); display: block; margin-top: .15rem; }
+    .danger { color: var(--bad); font-weight: 800; }
+    .ok { color: var(--good); font-weight: 800; }
+    .warn-text { color: var(--warn); font-weight: 800; }
+    label { display: grid; gap: .35rem; color: var(--muted); }
+    input[type="text"], input[type="datetime-local"], select, textarea {
+      width: 100%;
+      min-width: 0;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0b1220;
+      color: var(--text);
+      padding: .72rem .82rem;
+    }
+    input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+    textarea { resize: vertical; min-height: 7rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+    .actions .action-btn { border-radius: 12px; background: #254674; }
+    .report-preview { background: #060a12; border: 1px solid var(--line); border-radius: 14px; padding: 1rem; margin-top: 1rem; }
+    .toc { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+    .top-link { text-decoration: none; font-size: .9rem; background: rgba(255,255,255,.07); }
+    table { width: 100%; border-collapse: collapse; margin-top: .75rem; }
+    th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: .7rem; }
+    th { color: var(--muted); font-size: .9rem; }
+    details { border: 1px solid var(--line); border-radius: 14px; padding: .8rem; background: rgba(255,255,255,.04); }
+    details + details { margin-top: .65rem; }
+    summary { cursor: pointer; font-weight: 800; }
+    @media (max-width: 900px) {
+      main { padding: 1rem; }
+      .hero { grid-template-columns: 1fr; }
+      .scenario-header { display: grid; }
+      .scenario select { width: 100%; }
+      .step { grid-template-columns: 1fr; }
+      .step::before { width: 1.45rem; height: 1.45rem; }
+      .actions .action-btn, .copy-btn { width: 100%; }
+    }
+    @media (max-width: 700px) {
+      table, thead, tbody, tr, th, td { display: block; width: 100%; }
+      thead { display: none; }
+      tr { border-bottom: 1px solid var(--line); padding: .7rem 0; }
+      th, td { border-bottom: 0; padding: .35rem 0; }
+      td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: .78rem;
+        font-weight: 850;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        margin-bottom: .1rem;
+      }
+    }
+    @media print {
+      body { background: #fff; color: #000; }
+      .panel, .card, .step, .shot, .callout, .command, .scenario { box-shadow: none; break-inside: avoid; }
+      .actions, .copy-btn, .toc { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero" id="top">
+    <div>
+      <p class="eyebrow">Manual validation runbook</p>
+      <h1>Logos physical iPhone test guide</h1>
+      <p class="muted">Use this page to validate the parts Simulator cannot honestly prove: real iPhone install, private-network WebSocket, real microphone/on-device ASR, TTS playback, APNS registration/delivery, notification routing, and live Hermes interaction.</p>
+      <nav class="toc" aria-label="Guide sections">
+        <a class="top-link" href="#prereqs">Prereqs</a>
+        <a class="top-link" href="#commands">Commands</a>
+        <a class="top-link" href="#visuals">Visuals</a>
+        <a class="top-link" href="#scenarios">Scenarios</a>
+        <a class="top-link" href="#troubleshooting">Troubleshooting</a>
+        <a class="top-link" href="#report">Report</a>
+      </nav>
+    </div>
+    <aside class="panel hero-card">
+      <h2>Pass condition</h2>
+      <p>The iPhone can connect to the Mac over a trusted private network, send text and speech through Logos, receive Hermes responses, play audio, handle approval/clarification/stop flows, and route private notifications without leaking secrets or response text.</p>
+      <div class="status-row">
+        <span class="pill good">Simulator path already passed</span>
+        <span class="pill warn">Hardware gate now</span>
+      </div>
+    </aside>
+  </header>
+
+  <section class="callout bad">
+    <h2>Privacy and safety</h2>
+    <p><strong>Do not paste secrets into the report.</strong> Redact API keys, APNS tokens, device tokens, bearer tokens, private messages, raw sensitive transcripts, exact Tailscale identifiers, and unrelated personal data. Report summaries and sanitized snippets only.</p>
+    <p>Keep Logos on Tailscale or a trusted private LAN. Do not expose this WebSocket server to the public internet. That would be bold. Also bad.</p>
+  </section>
+
+  <section class="panel" id="prereqs">
+    <h2>Before you start</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Workspace</h3>
+        <p class="path">/Users/ryan/Development/logos</p>
+        <p class="muted tiny">Final report: <span class="path">docs/logos/FINAL_REPORT.md</span></p>
+      </div>
+      <div class="card">
+        <h3>Device</h3>
+        <p>Physical iPhone, USB or Wi-Fi debugging, Apple Developer signing team, and Tailscale/private LAN reachability to the Mac.</p>
+      </div>
+      <div class="card">
+        <h3>Required secret</h3>
+        <p><code>LOGOS_DEVICE_SECRET</code> must match between the adapter and app. The guide never needs the actual value pasted back.</p>
+      </div>
+      <div class="card">
+        <h3>Optional APNS</h3>
+        <p><code>LOGOS_APNS_*</code> credentials are needed only for live Apple push delivery. The app can still test foreground flows without them.</p>
+      </div>
+    </div>
+    <div class="callout warn" style="margin-top:1rem">
+      <h3>Recommended order</h3>
+      <p>First run the mock adapter over the private address to prove phone ↔ Mac transport and UI. Then enable the real Hermes plugin and repeat the core flows. If the mock path fails, do not waste time debugging Hermes yet; the network/app path is guilty.</p>
+    </div>
+  </section>
+
+  <section class="panel" id="commands">
+    <h2>Setup commands</h2>
+    <p class="muted">Replace placeholders locally. Do not paste concrete secrets back into chat.</p>
+
+    <div class="wide-grid">
+      <div class="command">
+        <div class="command-head"><strong>Find a private Mac address</strong><button class="copy-btn" data-copy="cmd-tailnet">Copy</button></div>
+        <pre id="cmd-tailnet">tailscale ip -4 2>/dev/null || ipconfig getifaddr en0</pre>
+        <p class="muted tiny">Use this address in the iPhone app as <code>ws://&lt;private-mac-ip&gt;:8765</code>.</p>
+      </div>
+
+      <div class="command">
+        <div class="command-head"><strong>Start the mock adapter for hardware transport/UI smoke test</strong><button class="copy-btn" data-copy="cmd-mock">Copy</button></div>
+        <pre id="cmd-mock">cd /Users/ryan/Development/logos
+export LOGOS_DEVICE_SECRET='[REDACTED]'
+PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
+  /Users/ryan/.hermes/hermes-agent/venv/bin/python scripts/run_stage_f_mock_adapter.py \
+  --host &lt;mac-tailnet-or-private-lan-ip&gt; \
+  --port 8765 \
+  --secret "$LOGOS_DEVICE_SECRET" \
+  --store /tmp/logos-physical-smoke.db</pre>
+      </div>
+
+      <div class="command">
+        <div class="command-head"><strong>Generate/open the iOS project</strong><button class="copy-btn" data-copy="cmd-xcode">Copy</button></div>
+        <pre id="cmd-xcode">cd /Users/ryan/Development/logos/clients/ios/Logos
+xcodegen generate --spec project.yml
+open Logos.xcodeproj</pre>
+        <p class="muted tiny">In Xcode: select the Logos app target, set your signing team, select the physical iPhone, then build/run.</p>
+      </div>
+
+      <div class="command">
+        <div class="command-head"><strong>Install/enable real Hermes plugin when ready</strong><button class="copy-btn" data-copy="cmd-real">Copy</button></div>
+        <pre id="cmd-real">mkdir -p /Users/ryan/.hermes/plugins
+ln -sfn /Users/ryan/Development/logos/plugins/logos /Users/ryan/.hermes/plugins/logos
+/Users/ryan/.hermes/hermes-agent/venv/bin/hermes plugins enable logos
+/Users/ryan/.hermes/hermes-agent/venv/bin/hermes config set platforms.logos.enabled true
+
+export LOGOS_DEVICE_SECRET='[REDACTED]'
+export LOGOS_HOST='&lt;mac-tailnet-or-private-lan-ip&gt;'
+export LOGOS_PORT='8765'
+export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
+        <p class="muted tiny">Then run Hermes using the normal gateway/deployment mode for this machine.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="visuals">
+    <h2>Visual state map</h2>
+    <p class="muted">These are real Simulator screenshots from the completed local validation. Physical device UI should match structurally, except permission prompts and device status bars.</p>
+    <div class="visual-grid">
+      <figure class="shot">
+        <img src="stage-k-simulator-app.png" alt="Logos app connected to ws://127.0.0.1:8765, default project active, idle status, notifications panel, voice panel, Hold to Talk and Tap to Talk controls">
+        <figcaption class="muted">Main screen: Adapter connected, default project, Idle, Notifications, Voice, Hold to Talk, Tap to Talk.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="stage-g-playback-simulator.png" alt="Logos Simulator playback state with assistant message and playback status">
+        <figcaption class="muted">Playback path: assistant message exposes Play and should show Receiving/Playing audio.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="stage-i-voice-ui-simulator.png" alt="Logos voice UI showing on-device speech recognition availability and voice controls">
+        <figcaption class="muted">Voice path: on-device availability, Voice ready, hold/tap controls.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="stage-j-notification-route-simulator.png" alt="iOS Simulator showing first-open route confirmation for Logos notification deep link">
+        <figcaption class="muted">Notification/deep-link route: Simulator fixture only; physical APNS still needs hardware validation.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="panel" id="scenarios">
+    <h2>Manual test scenarios</h2>
+    <p class="muted">Run these in order. Mark each status as you go; the report form will include the scenario matrix.</p>
+    <div class="scenario-grid">
+
+      <article class="scenario" data-scenario="Setup and install">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 1</span><h3>Build, sign, and launch on iPhone</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Open <code>Logos.xcodeproj</code> and set signing for the Logos target.</strong><span class="expected">Expected: Xcode accepts the development team and the physical iPhone is a valid run destination.</span></div></div>
+          <div class="step"><div><strong>Build and run Logos on the phone.</strong><span class="expected">Expected: the app launches to the <code>Logos</code> screen with Adapter, Project, Notifications, Voice, and composer panels.</span></div></div>
+          <div class="step"><div><strong>If iOS asks to trust the developer or device, complete the normal Apple trust flow.</strong><span class="expected">Expected: no crash on first launch; no notification, microphone, or speech prompt should be forced until you use those features.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Install/signing notes, device model, iOS version, errors"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Private network connection">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 2</span><h3>Connect over Tailscale/private LAN</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Start the mock adapter bound to the Mac private address.</strong><span class="expected">Expected: terminal prints <code>READY ws://...</code> with <code>secret=[REDACTED]</code>.</span></div></div>
+          <div class="step"><div><strong>In Logos, enter <code>ws://&lt;mac-tailnet-or-private-lan-ip&gt;:8765</code> and the matching shared secret.</strong><span class="expected">Expected: status changes from Connecting to <span class="ok">Connected</span>.</span></div></div>
+          <div class="step"><div><strong>Tap Disconnect, then Reconnect.</strong><span class="expected">Expected: reconnect succeeds without app relaunch and without duplicate project/message spam.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Network notes: Tailscale/LAN, URL used with secrets redacted, failures"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Typed text and slash commands">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 3</span><h3>Typed text, project picker, and slash-command pass-through</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Type <code>phone smoke test</code> and tap Send.</strong><span class="expected">Expected: user bubble appears, then assistant response renders. Mock adapter response should say <code>Mock Hermes received: phone smoke test</code>.</span></div></div>
+          <div class="step"><div><strong>Create a project named <code>phone-smoke</code> using New project title + New.</strong><span class="expected">Expected: project picker can switch to the new project and message history stays scoped.</span></div></div>
+          <div class="step"><div><strong>With the real Hermes plugin later, send a benign slash command such as <code>/status</code>.</strong><span class="expected">Expected: Logos does not swallow the slash command; Hermes responds through the normal gateway path.</span></div></div>
+          <div class="step"><div><strong>With a known titled desktop session, test <code>/resume &lt;title-or-id&gt;</code>.</strong><span class="expected">Expected: Hermes resumes or reports a clear resolution issue. No separate Logos-only resume behavior should appear.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Typed text, project picker, /status, /resume notes"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Approval and clarification">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 4</span><h3>Approval and clarification cards</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Using the mock adapter, send <code>/mock_approval</code>.</strong><span class="expected">Expected: an approval card appears with Approve and Deny. The fixture says no command is executed.</span></div></div>
+          <div class="step"><div><strong>Tap Deny, then repeat and tap Approve.</strong><span class="expected">Expected: the card clears each time; app remains connected.</span></div></div>
+          <div class="step"><div><strong>Send <code>/mock_clarify</code>.</strong><span class="expected">Expected: a clarification card appears with choices and an Answer field.</span></div></div>
+          <div class="step"><div><strong>Answer using both a choice button and free text on repeat.</strong><span class="expected">Expected: the card clears and no duplicate answer appears.</span></div></div>
+          <div class="step"><div><strong>Repeat one real Hermes task that naturally asks for approval/clarification if available.</strong><span class="expected">Expected: the phone card maps back to Hermes semantics. No hidden auto-approval.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Approval/clarification notes, screenshots, whether real Hermes generated one"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="TTS playback">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 5</span><h3>TTS / summary playback</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Generate an assistant message, then tap Play under it.</strong><span class="expected">Expected: playback status changes to <code>Requesting audio</code>, then <code>Receiving audio</code>, then <code>Playing audio</code>.</span></div></div>
+          <div class="step"><div><strong>Listen through phone speaker and, if convenient, Bluetooth output.</strong><span class="expected">Expected: deterministic stub WAV audio plays; it may not sound beautiful. Transport correctness is the point.</span></div></div>
+          <div class="step"><div><strong>Tap Play repeatedly on the same message.</strong><span class="expected">Expected: no crash, no permanent stuck <code>Receiving audio</code> state.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Playback notes: audible? output route? stuck states? latency?"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Hold-to-talk ASR">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 6</span><h3>Hold-to-talk speech recognition</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Press and hold Hold to Talk.</strong><span class="expected">Expected: iOS requests Microphone and Speech Recognition permission if not already granted; Voice status changes to listening/recording.</span></div></div>
+          <div class="step"><div><strong>Say: <code>what is the current project?</code>, then release.</strong><span class="expected">Expected: partial transcript appears while speaking; exactly one final speech message is sent on release.</span></div></div>
+          <div class="step"><div><strong>Hold with silence, then release.</strong><span class="expected">Expected: no empty final turn reaches Hermes.</span></div></div>
+          <div class="step"><div><strong>Deny permissions if you can safely reset them for a second pass.</strong><span class="expected">Expected: app disables voice or shows a clear error; it does <span class="danger">not</span> silently fall back to network recognition.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Hold-to-talk transcript, permission behavior, one-final-message check, privacy notes"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Tap-to-talk ASR">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 7</span><h3>Tap-to-talk silence detection and edge cases</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Tap Tap to Talk, speak a short request, then stop speaking.</strong><span class="expected">Expected: energy/silence detection stops recording and sends one final transcript.</span></div></div>
+          <div class="step"><div><strong>Tap Tap to Talk and stay silent.</strong><span class="expected">Expected: app stops after initial silence timeout and sends no empty final turn.</span></div></div>
+          <div class="step"><div><strong>Tap Tap to Talk, speak, then tap Stop Tap manually.</strong><span class="expected">Expected: final transcript dispatches once.</span></div></div>
+          <div class="step"><div><strong>Rapidly tap voice controls several times.</strong><span class="expected">Expected: only one recording session is active; app does not crash or wedge.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Tap-to-talk and rapid interaction notes"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Run state and cancel">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 8</span><h3>Run status, queue behavior, and stop/cancel</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>With the real Hermes plugin, start a task that runs long enough to observe status.</strong><span class="expected">Expected: status leaves Idle and returns to Idle on completion.</span></div></div>
+          <div class="step"><div><strong>While running, tap Stop.</strong><span class="expected">Expected: <code>run_cancel</code> maps to Hermes <code>/stop</code>; UI reaches cancelling/idle or shows a clear failure.</span></div></div>
+          <div class="step"><div><strong>Send a same-project follow-up while a run is active.</strong><span class="expected">Expected: Hermes queue/guard semantics apply; Logos should not persist fake completed messages.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Status/cancel/queue observations"></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="APNS and notification routing">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 9</span><h3>Private APNS notification and reconnect route</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Start adapter/Hermes with APNS credentials set.</strong><span class="expected">Expected: APNS client initializes for sandbox; missing credentials should skip live sends without breaking normal responses.</span></div></div>
+          <div class="step"><div><strong>Tap Enable in the Notifications panel and allow the iOS prompt.</strong><span class="expected">Expected: app receives a device token and sends <code>register_device</code>; normal logs do not print raw token.</span></div></div>
+          <div class="step"><div><strong>Background the app and trigger an assistant completion.</strong><span class="expected">Expected: notification title <code>Hermes finished</code>, body <code>Open Logos to view the result.</code></span></div></div>
+          <div class="step"><div><strong>Tap the notification.</strong><span class="expected">Expected: Logos opens to the relevant project and performs reconnect + delta sync. Payload contains routing ids only, not response text or command previews.</span></div></div>
+          <div class="step"><div><strong>Repeat for approval and clarification if practical.</strong><span class="expected">Expected: private alert titles <code>Hermes needs approval</code> / <code>Hermes needs clarification</code>, then card fetch after reconnect.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="APNS environment, bundle id, timing, payload privacy notes. Do not paste tokens."></textarea>
+      </article>
+
+      <article class="scenario" data-scenario="Background reconnect and logs">
+        <div class="scenario-header">
+          <div class="scenario-title"><span class="eyebrow">Scenario 10</span><h3>Background reconnect, force-close, and log privacy</h3></div>
+          <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
+        </div>
+        <div class="steps">
+          <div class="step"><div><strong>Send a message, background the app for at least 30 seconds, then reopen.</strong><span class="expected">Expected: app reconnects or shows a clear connection state; missed messages sync without duplicates.</span></div></div>
+          <div class="step"><div><strong>Force-close and relaunch Logos.</strong><span class="expected">Expected: local message store shows recent messages; reconnect + <code>messages_get</code> refreshes state.</span></div></div>
+          <div class="step"><div><strong>Inspect adapter/Hermes logs after the run.</strong><span class="expected">Expected: no raw APNS tokens, no shared secret, no API keys, no unrelated private transcript dumps in normal logs.</span></div></div>
+        </div>
+        <textarea data-notes placeholder="Reconnect/delta sync/log privacy observations"></textarea>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="panel" id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <table>
+      <thead><tr><th>Symptom</th><th>Likely cause</th><th>Check</th></tr></thead>
+      <tbody>
+        <tr><td data-label="Symptom">Phone never connects</td><td data-label="Likely cause">Wrong bind address, firewall, Tailscale/LAN path, or mismatched secret.</td><td data-label="Check">Confirm adapter printed READY on the same IP/port; verify iPhone can reach Mac; retype secret locally without reporting it.</td></tr>
+        <tr><td data-label="Symptom">Connected but Send does nothing</td><td data-label="Likely cause">WebSocket authenticated but frame rejected or adapter crashed.</td><td data-label="Check">Watch adapter terminal for errors; confirm app still shows Connected; retry with mock adapter.</td></tr>
+        <tr><td data-label="Symptom">Voice disabled</td><td data-label="Likely cause">On-device speech recognition unavailable or permissions denied.</td><td data-label="Check">This is acceptable if clearly surfaced. It is a bug only if the app silently falls back to network recognition.</td></tr>
+        <tr><td data-label="Symptom">No APNS notification</td><td data-label="Likely cause">Credentials, signing entitlement, device token registration, sandbox/prod mismatch, or app/background state.</td><td data-label="Check">Record APNS environment and bundle id, but never paste tokens or key material.</td></tr>
+        <tr><td data-label="Symptom">Duplicate messages after reconnect</td><td data-label="Likely cause">Delta sync/server_seq/message_id dedupe bug.</td><td data-label="Check">Record exact sequence: background duration, project, whether force-close occurred, screenshot if sanitized.</td></tr>
+        <tr><td data-label="Symptom">Playback stuck Receiving audio</td><td data-label="Likely cause">Missing <code>audio_end</code>, chunk decode failure, or audio session issue.</td><td data-label="Check">Try another assistant message; note whether status changes to Playing audio.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="report">
+    <h2>Report back</h2>
+    <p class="muted">Fill this while testing. It autosaves locally in this browser and copies a Markdown report suitable for pasting back into Discord. Sanitized notes only.</p>
+    <form id="reportForm">
+      <div class="form-grid">
+        <label>Tester / initials <input name="tester" type="text" autocomplete="off" placeholder="optional"></label>
+        <label>Date/time <input name="datetime" type="datetime-local"></label>
+        <label>Overall result
+          <select name="overall"><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select>
+        </label>
+        <label>Build / commit tested <input name="build" type="text" autocomplete="off" placeholder="git SHA, Xcode build, or local description"></label>
+        <label>iPhone model + iOS version <input name="device" type="text" autocomplete="off" placeholder="e.g. iPhone 15 Pro, iOS 18.x/26.x"></label>
+        <label>Adapter mode <select name="adapterMode"><option>Mock adapter</option><option>Real Hermes plugin</option><option>Both</option><option>Blocked before adapter</option></select></label>
+        <label>Network path <input name="network" type="text" autocomplete="off" placeholder="Tailscale / private LAN; redact exact sensitive identifiers"></label>
+        <label>APNS environment <select name="apns"><option>Not tested</option><option>Sandbox pass</option><option>Sandbox partial/fail</option><option>Credentials unavailable</option><option>Blocked</option></select></label>
+      </div>
+
+      <div class="form-grid" style="margin-top:1rem">
+        <label>What worked? <textarea name="worked" placeholder="Short bullet notes"></textarea></label>
+        <label>What failed or felt wrong? <textarea name="failed" placeholder="Include scenario number and visible behavior"></textarea></label>
+        <label>Reproduction steps for failures <textarea name="repro" placeholder="Keep it deterministic; one action per line is ideal"></textarea></label>
+        <label>Logs/screenshots attached? <textarea name="attachments" placeholder="Filenames only, and say whether screenshots are sanitized"></textarea></label>
+      </div>
+
+      <div class="checkline" style="margin-top:1rem">
+        <input id="sanitized" name="sanitized" type="checkbox">
+        <label for="sanitized">I removed secrets, APNS/device tokens, API keys, private messages, raw sensitive transcripts, exact Tailscale identifiers, and unrelated personal data.</label>
+      </div>
+    </form>
+
+    <div class="actions">
+      <button type="button" class="action-btn" id="saveReport">Save draft</button>
+      <button type="button" class="action-btn" id="copyReport">Copy report</button>
+      <button type="button" class="action-btn" id="clearReport">Clear saved report</button>
+    </div>
+    <p id="saveStatus" class="muted" role="status"></p>
+    <pre class="report-preview" id="reportPreview"></pre>
+  </section>
+</main>
+<script>
+(() => {
+  const storageKey = 'logos-physical-device-test-guide:v1';
+  const form = document.querySelector('#reportForm');
+  const status = document.querySelector('#saveStatus');
+  const preview = document.querySelector('#reportPreview');
+  const scenarioEls = Array.from(document.querySelectorAll('[data-scenario]'));
+
+  function formData() {
+    return Object.fromEntries(new FormData(form).entries());
+  }
+  function scenarioData() {
+    return scenarioEls.map(el => ({
+      name: el.dataset.scenario,
+      status: el.querySelector('[data-status]').value,
+      notes: el.querySelector('[data-notes]').value.trim()
+    }));
+  }
+  function setScenarioData(rows) {
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      const el = scenarioEls.find(item => item.dataset.scenario === row.name);
+      if (!el) continue;
+      if (row.status) el.querySelector('[data-status]').value = row.status;
+      if (row.notes) el.querySelector('[data-notes]').value = row.notes;
+    }
+  }
+  function reportMarkdown() {
+    const d = formData();
+    const scenarios = scenarioData();
+    const scenarioLines = scenarios.map((s, index) => `| ${index + 1}. ${s.name} | ${s.status} | ${String(s.notes || '').replace(/\n/g, '<br>')} |`).join('\n');
+    return `# Logos physical iPhone test report\n\n` +
+      `- Overall: ${d.overall || ''}\n` +
+      `- Tester: ${d.tester || ''}\n` +
+      `- Date/time: ${d.datetime || ''}\n` +
+      `- Build / commit tested: ${d.build || ''}\n` +
+      `- Device / iOS: ${d.device || ''}\n` +
+      `- Adapter mode: ${d.adapterMode || ''}\n` +
+      `- Network path: ${d.network || ''}\n` +
+      `- APNS: ${d.apns || ''}\n` +
+      `- Sanitized: ${form.elements.sanitized.checked ? 'yes' : 'no'}\n\n` +
+      `## Scenario matrix\n\n| Scenario | Status | Notes |\n|---|---|---|\n${scenarioLines}\n\n` +
+      `## What worked\n${d.worked || ''}\n\n` +
+      `## What failed or felt wrong\n${d.failed || ''}\n\n` +
+      `## Reproduction steps\n${d.repro || ''}\n\n` +
+      `## Logs / screenshots\n${d.attachments || ''}\n`;
+  }
+  function refresh() {
+    preview.textContent = reportMarkdown();
+  }
+  function save() {
+    const payload = {
+      form: { ...formData(), sanitized: form.elements.sanitized.checked },
+      scenarios: scenarioData()
+    };
+    localStorage.setItem(storageKey, JSON.stringify(payload));
+    status.textContent = 'Saved locally.';
+    refresh();
+  }
+  function load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+      if (saved.form) {
+        for (const [name, value] of Object.entries(saved.form)) {
+          if (!form.elements[name]) continue;
+          if (name === 'sanitized') form.elements[name].checked = Boolean(value);
+          else form.elements[name].value = value;
+        }
+      }
+      setScenarioData(saved.scenarios);
+    } catch (err) {
+      status.textContent = 'Could not load saved draft.';
+    }
+  }
+  function setDefaultDateTime() {
+    const input = form.elements.datetime;
+    if (input.value) return;
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    input.value = now.toISOString().slice(0, 16);
+  }
+  document.querySelectorAll('[data-copy]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const target = document.getElementById(button.dataset.copy);
+      if (!target) return;
+      await navigator.clipboard.writeText(target.textContent.trim());
+      button.textContent = 'Copied';
+      setTimeout(() => button.textContent = 'Copy', 1200);
+    });
+  });
+  form.addEventListener('input', save);
+  scenarioEls.forEach(el => el.addEventListener('input', save));
+  document.querySelector('#saveReport').addEventListener('click', save);
+  document.querySelector('#copyReport').addEventListener('click', async () => {
+    refresh();
+    await navigator.clipboard.writeText(preview.textContent);
+    status.textContent = 'Copied report.';
+  });
+  document.querySelector('#clearReport').addEventListener('click', () => {
+    if (!confirm('Clear saved report draft?')) return;
+    localStorage.removeItem(storageKey);
+    form.reset();
+    scenarioEls.forEach(el => {
+      el.querySelector('[data-status]').value = 'Not run';
+      el.querySelector('[data-notes]').value = '';
+    });
+    setDefaultDateTime();
+    status.textContent = 'Cleared saved draft.';
+    refresh();
+  });
+  load();
+  setDefaultDateTime();
+  refresh();
+})();
+</script>
+</body>
+</html>

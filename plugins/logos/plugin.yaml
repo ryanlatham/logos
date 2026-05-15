@@ -1,0 +1,53 @@
+name: logos
+label: Logos
+kind: platform
+version: 0.1.0
+description: >
+  Personal iPhone voice-and-tap WebSocket platform adapter for Hermes Agent.
+author: Ada
+requires_env:
+  - name: LOGOS_DEVICE_SECRET
+    description: "Development shared secret required by Logos WebSocket clients"
+    prompt: "Logos device shared secret"
+    password: true
+optional_env:
+  - name: LOGOS_HOST
+    description: "Host/interface for the Logos WebSocket server (default: 127.0.0.1)"
+    prompt: "Logos WebSocket host"
+    password: false
+  - name: LOGOS_PORT
+    description: "Port for the Logos WebSocket server (default: 8765)"
+    prompt: "Logos WebSocket port"
+    password: false
+  - name: LOGOS_ALLOWED_USERS
+    description: "Comma-separated Logos device/user ids allowed through Hermes gateway auth"
+    prompt: "Allowed Logos device ids"
+    password: false
+  - name: LOGOS_ALLOW_ALL_USERS
+    description: "Allow any authenticated Logos device id through gateway auth (dev only)"
+    prompt: "Allow all Logos users? (true/false)"
+    password: false
+  - name: LOGOS_STORE_PATH
+    description: "SQLite path for Logos adapter metadata/store"
+    prompt: "Logos store path"
+    password: false
+  - name: LOGOS_APNS_KEY_ID
+    description: "Apple APNS key id for token-based auth"
+    prompt: "APNS key id"
+    password: false
+  - name: LOGOS_APNS_TEAM_ID
+    description: "Apple Developer Team ID for APNS token-based auth"
+    prompt: "APNS team id"
+    password: false
+  - name: LOGOS_APNS_BUNDLE_ID
+    description: "Logos iOS app bundle id for APNS topic"
+    prompt: "APNS bundle id"
+    password: false
+  - name: LOGOS_APNS_AUTH_KEY_PATH
+    description: "Path to APNS AuthKey .p8 file"
+    prompt: "APNS auth key path"
+    password: true
+  - name: LOGOS_APNS_ENV
+    description: "APNS environment: sandbox or production"
+    prompt: "APNS environment"
+    password: false

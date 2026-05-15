@@ -1,0 +1,15 @@
+{
+  "Simulator Target Bundle": "com.ryan.logos",
+  "aps": {
+    "alert": {
+      "title": "Hermes finished",
+      "body": "Open Logos to view the result."
+    },
+    "sound": "default"
+  },
+  "kind": "finished",
+  "project_key": "default",
+  "session_id": "project:default",
+  "message_id": "simulated-message",
+  "server_seq": 1
+}
