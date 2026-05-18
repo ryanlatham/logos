@@ -1,6 +1,6 @@
-# Logos Final Report — v1 Manual Gate Complete
+# Logos Status Report — Mock/Simulator Gate Complete, Real Architecture Open
 
-Last updated: 2026-05-18T06:34:24-07:00
+Last updated: 2026-05-18T06:42:03-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -14,9 +14,11 @@ Bundle id: `com.ryan.logos`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 
-2026-05-18 update: Ryan completed the physical/manual validation pass after the post-redesign UI and voice fixes. The remaining repository work is now closure/hardening, not a v1 physical-device blocker. Detailed per-device manual-test metadata was not captured in this repo; do not invent it retroactively.
+2026-05-18 correction: this project is **not** complete against the original Logos architecture. The prior closure validated the iOS client, protocol/store plumbing, deterministic fixtures, Stage F mock adapter, deterministic fast-model fallback, and deterministic non-speech WAV playback. It did **not** validate the full live architecture: a real Hermes gateway/plugin deployment serving the phone, final input flowing through the live Hermes gateway/AIAgent path, a real local fast LLM, real intelligible TTS, and real approval/clarification/progress events from live Hermes runs.
 
-2026-05-18 closure rerun update: final automated verification exposed a brittle playback-status accessibility lookup in `LogosUITests`; the app now exposes `playbackStatusLabel` on the audio status strip and the UI test waits on that explicit element. Full Python and Xcode verification passed after the fix.
+The manual gate Ryan completed should be treated as a mock/simulator/client gate, not the final v1 architecture gate. The Kanban board has been reopened with real-architecture tasks under `Correction — Reopen Logos v1 real-architecture completion`.
+
+2026-05-18 closure rerun note: automated verification exposed a brittle playback-status accessibility lookup in `LogosUITests`; the app now exposes `playbackStatusLabel` on the audio status strip and the UI test waits on that explicit element. Full Python and Xcode verification passed after that fix, but this remains mock/simulator verification.
 
 ## 1. What was implemented
 

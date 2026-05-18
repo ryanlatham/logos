@@ -1,6 +1,6 @@
 # Logos Test Report
 
-Last updated: 2026-05-18T06:34:24-07:00
+Last updated: 2026-05-18T06:42:03-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -12,7 +12,7 @@ Server secret used in Simulator tests: `[REDACTED]`
 
 ## Summary
 
-Stage K validation passed for the simulator-verifiable Logos path, and Ryan has since completed/accepted the physical/manual validation gate after direct code fixes to the remaining observed field issues.
+Stage K validation passed for the simulator-verifiable Logos path and the Stage F mock adapter path. This is **not** proof that Logos is complete against the original architecture. The current automated tests do not exercise a live Hermes gateway/plugin deployment with real Hermes agent work, a real local fast LLM, real intelligible TTS, or live Hermes-origin approval/clarification/progress callbacks.
 
 What is verified:
 
@@ -26,7 +26,7 @@ What is verified:
 - Typed text from Simulator reaches the adapter and renders a response.
 - Project picker/default project UI is present and usable in the Simulator.
 - Approval and clarification cards render from mock adapter fixtures.
-- Audio playback plumbing is exercised by UI test and reaches `Playing audio` or `Audio finished` status.
+- Audio playback plumbing is exercised by UI test and reaches `Playing audio` or `Audio finished` status using deterministic non-speech WAV output, not real TTS.
 - ASR UI/state-machine code compiles and unit tests cover the local-only recognition policy, tap-to-talk silence behavior, natural pauses, quiet speech, ASR-progress extension, and maximum recording duration.
 - Post-physical-test regression hardening now covers two field bugs: ASR no longer cancels recognition immediately on mic stop, and iOS playback now activates an AVAudioSession playback category before starting audio.
 - Private APNS payload construction is tested and `xcrun simctl push` accepts the private payload fixture.
@@ -34,7 +34,7 @@ What is verified:
 
 ## Manual gate outcome
 
-Ryan reports the physical/manual gate is finished after the follow-up field fixes. Detailed hardware metadata was not captured in this repository, so this report records the gate as accepted rather than fabricating per-device measurements. Apple Watch relay remains deferred/post-v1.
+Ryan reports the tested client/mock flow issues were fixed by a separate AI-app coding pass. Treat that as acceptance of the client/mock validation gate only. The real v1 architecture gate remains open until the app talks to the live Logos Hermes plugin/gateway path, receives real Hermes responses, uses real TTS, and handles live approval/clarification/progress events. Detailed hardware metadata was not captured in this repository, so do not fabricate per-device measurements. Apple Watch relay remains deferred/post-v1.
 
 ## Commands and results
 

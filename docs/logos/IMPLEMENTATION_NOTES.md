@@ -1,6 +1,24 @@
 # Logos Implementation Notes
 
-Last updated: 2026-05-18T06:34:24-07:00
+Last updated: 2026-05-18T06:42:03-07:00
+
+## Architecture-completion correction
+
+The previous Kanban/project closure overstated completion. Current implementation includes a source Logos platform plugin scaffold and the adapter does construct `MessageEvent` and call `self.handle_message(...)`, but the end-to-end validation that was repeatedly run used `scripts/run_stage_f_mock_adapter.py`, not the live Hermes gateway/plugin deployment. Several architecture-critical components are still stubs or unproven in live operation:
+
+- `plugins/logos/fast_llm.py` uses `DeterministicFastModel`, a regex/deterministic fallback rather than a real local fast LLM runtime/client.
+- `plugins/logos/tts.py` uses `DeterministicStubTTS`, explicitly non-speech WAV beeps rather than real TTS.
+- UI tests exercise mock adapter fixtures such as `/mock_approval` and `/mock_clarify`, not necessarily live Hermes-origin approval/clarification callbacks.
+- Physical/manual validation was performed against the mock/client flow, not the full live Logos architecture.
+
+The `logos-agent-voice-app` Kanban board has been reopened with corrective tasks:
+
+- `t_770be11f` — Correction parent: reopen Logos v1 real-architecture completion.
+- `t_76133bd4` — Implement live Logos gateway plugin end-to-end path.
+- `t_e7efd02c` — Replace deterministic fast-model stub with real configurable local fast LLM.
+- `t_21b1d429` — Replace deterministic beep WAV TTS with real TTS runtime/client.
+- `t_7d9c8fed` — Wire real Hermes approval, clarification, run progress, and tool progress to Logos.
+- `t_7629f3e0` — Run physical/manual validation against real plugin, not mock adapter.
 
 ## Closure verification follow-up — playback status accessibility
 
