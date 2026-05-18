@@ -3,6 +3,7 @@ import Foundation
 public enum TapToTalkAutoStopReason: Equatable {
     case initialSilence
     case trailingSilence
+    case maximumDuration
 }
 
 public enum TapToTalkDecision: Equatable {
@@ -14,10 +15,12 @@ public struct TapToTalkSilenceDetector {
     public static let defaultEnergyThreshold = 0.015
     public static let defaultTrailingSilenceSeconds: TimeInterval = 2.2
     public static let defaultInitialSilenceSeconds: TimeInterval = 4.0
+    public static let defaultMaximumRecordingSeconds: TimeInterval = 45.0
 
     public let energyThreshold: Double
     public let trailingSilenceSeconds: TimeInterval
     public let initialSilenceSeconds: TimeInterval
+    public let maximumRecordingSeconds: TimeInterval
 
     private var startedAt: TimeInterval?
     private var lastSpeechAt: TimeInterval?
@@ -27,11 +30,13 @@ public struct TapToTalkSilenceDetector {
     public init(
         energyThreshold: Double = Self.defaultEnergyThreshold,
         trailingSilenceSeconds: TimeInterval = Self.defaultTrailingSilenceSeconds,
-        initialSilenceSeconds: TimeInterval = Self.defaultInitialSilenceSeconds
+        initialSilenceSeconds: TimeInterval = Self.defaultInitialSilenceSeconds,
+        maximumRecordingSeconds: TimeInterval = Self.defaultMaximumRecordingSeconds
     ) {
         self.energyThreshold = energyThreshold
         self.trailingSilenceSeconds = trailingSilenceSeconds
         self.initialSilenceSeconds = initialSilenceSeconds
+        self.maximumRecordingSeconds = maximumRecordingSeconds
     }
 
     public mutating func start(at timestamp: TimeInterval) {
@@ -51,6 +56,11 @@ public struct TapToTalkSilenceDetector {
     public mutating func observe(energy: Double, at timestamp: TimeInterval) -> TapToTalkDecision {
         if stopped { return .continueListening }
         if startedAt == nil { start(at: timestamp) }
+
+        if let startedAt, timestamp - startedAt >= maximumRecordingSeconds {
+            stopped = true
+            return .autoStop(reason: .maximumDuration)
+        }
 
         if energy >= energyThreshold {
             heardSpeech = true

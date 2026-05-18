@@ -121,11 +121,26 @@ final class LogosModelTests: XCTestCase {
         var detector = TapToTalkSilenceDetector(
             energyThreshold: 0.05,
             trailingSilenceSeconds: 0.8,
-            initialSilenceSeconds: 1.2
+            initialSilenceSeconds: 1.2,
+            maximumRecordingSeconds: 10.0
         )
         detector.start(at: 20.0)
         XCTAssertEqual(detector.observe(energy: 0.01, at: 21.0), .continueListening)
         XCTAssertEqual(detector.observe(energy: 0.01, at: 21.3), .autoStop(reason: .initialSilence))
+    }
+
+    func testTapToTalkStopsAtMaximumDurationDuringContinuousAudio() throws {
+        var detector = TapToTalkSilenceDetector(
+            energyThreshold: 0.05,
+            trailingSilenceSeconds: 0.8,
+            initialSilenceSeconds: 1.2,
+            maximumRecordingSeconds: 3.0
+        )
+        detector.start(at: 70.0)
+
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 70.5), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 72.5), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 73.1), .autoStop(reason: .maximumDuration))
     }
 
     func testSpeechRecognitionPolicyDoesNotSilentlyUseNetworkRecognition() throws {
@@ -349,6 +364,96 @@ final class LogosModelTests: XCTestCase {
         XCTAssertFalse(PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: assistant))
     }
 
+    func testPendingMessageBufferKeepsPendingAcrossRefreshUntilPersistedEcho() throws {
+        var buffer = PendingMessageBuffer()
+        let pending = LogosMessage.pending(projectKey: "default", messageID: "voice-turn-1", content: "hello Hermes")
+
+        buffer.add(pending)
+        XCTAssertEqual(buffer.merged(with: [], projectKey: "default"), [pending])
+
+        let persisted = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "voice-turn-1",
+            serverSeq: 7,
+            role: "user",
+            content: "hello Hermes",
+            timestamp: 123,
+            status: "persisted"
+        )
+        buffer.reconcile(with: persisted)
+
+        XCTAssertEqual(buffer.merged(with: [persisted], projectKey: "default"), [persisted])
+    }
+
+    @MainActor
+    func testFinalSpeechPendingAppearsOnlyAfterSocketSendCompletes() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let sent = client.sendSpeech(
+            text: "hello Hermes",
+            isFinal: true,
+            inputID: "voice-turn-queued",
+            partialSeq: 2,
+            startedAtMilliseconds: 123
+        )
+
+        XCTAssertTrue(sent)
+        XCTAssertFalse(client.messages.contains { $0.messageID == "voice-turn-queued" })
+
+        socket.completeLastSend(error: nil)
+        await Task.yield()
+
+        XCTAssertEqual(client.messages.last?.messageID, "voice-turn-queued")
+        XCTAssertEqual(client.messages.last?.status, "pending")
+        XCTAssertNil(client.undeliveredSpeechDraft)
+    }
+
+    @MainActor
+    func testFinalSpeechSocketFailureRestoresUndeliveredDraftWithoutPendingMessage() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let sent = client.sendSpeech(
+            text: "restore this transcript",
+            isFinal: true,
+            inputID: "voice-turn-failed",
+            partialSeq: 2,
+            startedAtMilliseconds: 123
+        )
+
+        XCTAssertTrue(sent)
+
+        socket.completeLastSend(error: RecordingSocketError())
+        await Task.yield()
+
+        XCTAssertEqual(client.undeliveredSpeechDraft?.id, "voice-turn-failed")
+        XCTAssertEqual(client.undeliveredSpeechDraft?.text, "restore this transcript")
+        XCTAssertFalse(client.messages.contains { $0.messageID == "voice-turn-failed" })
+        XCTAssertEqual(client.connectionState, .error)
+    }
+
+    @MainActor
+    func testDisconnectRestoresInFlightFinalSpeechDraftBeforeSendCompletion() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let sent = client.sendSpeech(
+            text: "save this before disconnect",
+            isFinal: true,
+            inputID: "voice-turn-disconnect",
+            partialSeq: 2,
+            startedAtMilliseconds: 123
+        )
+
+        XCTAssertTrue(sent)
+
+        client.disconnect()
+        await Task.yield()
+
+        XCTAssertEqual(client.undeliveredSpeechDraft?.id, "voice-turn-disconnect")
+        XCTAssertEqual(client.undeliveredSpeechDraft?.text, "save this before disconnect")
+        XCTAssertFalse(client.messages.contains { $0.messageID == "voice-turn-disconnect" })
+    }
+
     func testNotificationRouteParsesPrivatePushPayload() throws {
         let route = try XCTUnwrap(LogosNotificationRoute.from(userInfo: [
             "kind": "finished",
@@ -482,8 +587,18 @@ final class LogosModelTests: XCTestCase {
 }
 
 private final class RecordingAudioSessionManager: AudioSessionManaging {
+    private(set) var prepareRecordingCalls = 0
+    private(set) var finishRecordingCalls = 0
     private(set) var prepareCalls = 0
     private(set) var finishCalls = 0
+
+    func prepareForRecording() throws {
+        prepareRecordingCalls += 1
+    }
+
+    func finishRecording() throws {
+        finishRecordingCalls += 1
+    }
 
     func prepareForPlayback() throws {
         prepareCalls += 1
@@ -519,5 +634,60 @@ private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
     func makePlayer(data: Data) throws -> any AudioPlaying {
         receivedData = data
         return player
+    }
+}
+
+@MainActor
+private func makeSocketBackedClient(socket: RecordingWebSocketTask) -> LogosClient {
+    let client = LogosClient(
+        store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+        socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+    )
+    client.settings.urlString = "ws://127.0.0.1:8765"
+    client.settings.secret = "test-secret"
+    client.connect()
+    client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)
+    return client
+}
+
+private final class RecordingWebSocketTaskFactory: WebSocketTaskMaking {
+    private let socket: RecordingWebSocketTask
+
+    init(socket: RecordingWebSocketTask) {
+        self.socket = socket
+    }
+
+    func webSocketTask(with url: URL) -> any WebSocketTasking {
+        socket
+    }
+}
+
+private final class RecordingWebSocketTask: WebSocketTasking {
+    private(set) var sentMessages: [URLSessionWebSocketTask.Message] = []
+    private var sendCompletions: [@Sendable (Error?) -> Void] = []
+    private var receiveCompletions: [@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void] = []
+
+    func resume() {}
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {}
+
+    func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void) {
+        sentMessages.append(message)
+        sendCompletions.append(completionHandler)
+    }
+
+    func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
+        receiveCompletions.append(completionHandler)
+    }
+
+    func completeLastSend(error: Error?) {
+        let completion = sendCompletions.removeLast()
+        completion(error)
+    }
+}
+
+private struct RecordingSocketError: LocalizedError {
+    var errorDescription: String? {
+        "socket send failed"
     }
 }

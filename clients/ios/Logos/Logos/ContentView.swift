@@ -76,6 +76,9 @@ struct ContentView: View {
             voiceInput.updateTransportAvailable(newState == .connected)
             if newState == .connected { pushEnabled = notifications.authorizationStatus.contains("allowed") }
         }
+        .onChange(of: client.undeliveredSpeechDraft?.id) { _, _ in
+            restoreUndeliveredSpeechDraft()
+        }
         .onChange(of: voiceInput.mode) { _, newMode in
             if newMode == .idle { syncComposerWithVoiceState() }
         }
@@ -964,6 +967,26 @@ struct ContentView: View {
             }
         }
         return sent
+    }
+
+    private func restoreUndeliveredSpeechDraft() {
+        guard let failedDraft = client.undeliveredSpeechDraft else { return }
+        let restoredText = failedDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard restoredText.isEmpty == false else {
+            client.clearUndeliveredSpeechDraft(id: failedDraft.id)
+            return
+        }
+        let existingDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if existingDraft.isEmpty {
+            draft = restoredText
+        } else if existingDraft.contains(restoredText) == false {
+            draft = "\(draft)\n\(restoredText)"
+        }
+        focusedField = .composer
+        withAnimation(.easeOut(duration: 0.18)) {
+            composerMode = .text
+        }
+        client.clearUndeliveredSpeechDraft(id: failedDraft.id)
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {

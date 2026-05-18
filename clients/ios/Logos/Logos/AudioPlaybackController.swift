@@ -2,11 +2,23 @@ import AVFoundation
 import Foundation
 
 protocol AudioSessionManaging {
+    func prepareForRecording() throws
+    func finishRecording() throws
     func prepareForPlayback() throws
     func finishPlayback() throws
 }
 
 struct SystemAudioSessionManager: AudioSessionManaging {
+    func prepareForRecording() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .allowBluetoothHFP])
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+    }
+
+    func finishRecording() throws {
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     func prepareForPlayback() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])

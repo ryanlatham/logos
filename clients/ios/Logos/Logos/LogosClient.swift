@@ -1,6 +1,25 @@
 import Foundation
 import UIKit
 
+protocol WebSocketTasking: AnyObject {
+    func resume()
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void)
+    func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void)
+}
+
+extension URLSessionWebSocketTask: WebSocketTasking {}
+
+protocol WebSocketTaskMaking {
+    func webSocketTask(with url: URL) -> any WebSocketTasking
+}
+
+struct URLSessionWebSocketTaskFactory: WebSocketTaskMaking {
+    func webSocketTask(with url: URL) -> any WebSocketTasking {
+        URLSession.shared.webSocketTask(with: url)
+    }
+}
+
 @MainActor
 final class LogosClient: ObservableObject {
     @Published var settings = LogosSettings() {
@@ -10,7 +29,7 @@ final class LogosClient: ObservableObject {
     @Published private(set) var projects: [LogosProject] = []
     @Published var activeProjectKey: String = "default" {
         didSet {
-            messages = store.loadMessages(projectKey: activeProjectKey)
+            refreshMessages()
             clearCardsNotMatchingActiveProject()
         }
     }
@@ -22,17 +41,26 @@ final class LogosClient: ObservableObject {
     @Published var lastError: String?
     @Published var playbackStatus: String?
     @Published var ackText: String?
+    @Published private(set) var undeliveredSpeechDraft: UndeliveredSpeechDraft?
 
-    private var task: URLSessionWebSocketTask?
+    private var task: (any WebSocketTasking)?
     private var connectionLifecycle = LogosConnectionLifecycle()
-    private let store = SQLiteMessageStore()
+    private let store: SQLiteMessageStore
+    private let socketFactory: any WebSocketTaskMaking
     private let audioPlayback = AudioPlaybackController()
     private var requestedAudioIDs = Set<String>()
     private var activeAudioID: String?
     private var didAutoConnect = false
     private var pendingAPNSToken: String?
+    private var pendingMessages = PendingMessageBuffer()
+    private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
 
-    init() {
+    init(
+        store: SQLiteMessageStore = SQLiteMessageStore(),
+        socketFactory: any WebSocketTaskMaking = URLSessionWebSocketTaskFactory()
+    ) {
+        self.store = store
+        self.socketFactory = socketFactory
         messages = store.loadMessages(projectKey: activeProjectKey)
         audioPlayback.onPlaybackFinished = { [weak self] audioID, succeeded in
             Task { @MainActor in
@@ -67,7 +95,7 @@ final class LogosClient: ObservableObject {
         }
         let connectionID = connectionLifecycle.startConnection()
         connectionState = .connecting
-        let task = URLSession.shared.webSocketTask(with: url)
+        let task = socketFactory.webSocketTask(with: url)
         self.task = task
         task.resume()
         receiveLoop(connectionID: connectionID)
@@ -86,6 +114,7 @@ final class LogosClient: ObservableObject {
         let oldTask = task
         task = nil
         connectionLifecycle.invalidate()
+        restoreInFlightFinalSpeechDrafts(reason: "The socket closed before Logos confirmed the final speech frame was sent.")
         oldTask?.cancel(with: .goingAway, reason: nil)
     }
 
@@ -106,7 +135,9 @@ final class LogosClient: ObservableObject {
                 "is_final": true
             ]
         ])
-        if sent { messages.append(pending) }
+        if sent {
+            addPendingMessage(pending)
+        }
         return sent
     }
 
@@ -115,6 +146,17 @@ final class LogosClient: ObservableObject {
         guard ensureConnectedForUserAction(isFinal ? "send speech" : "stream speech") else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        let projectKey = activeProjectKey
+        let pending = LogosMessage.pending(projectKey: projectKey, messageID: inputID, content: trimmed)
+        let failedDraft = UndeliveredSpeechDraft(
+            inputID: inputID,
+            projectKey: projectKey,
+            text: trimmed,
+            reason: "The socket closed before Logos confirmed the final speech frame was sent."
+        )
+        if isFinal {
+            inFlightFinalSpeechDrafts[inputID] = failedDraft
+        }
         let sent = sendFrame(LogosSpeechFrame.make(
             text: trimmed,
             isFinal: isFinal,
@@ -122,12 +164,25 @@ final class LogosClient: ObservableObject {
             partialSeq: partialSeq,
             startedAtMilliseconds: startedAtMilliseconds,
             deviceID: settings.deviceID,
-            projectKey: activeProjectKey
-        ))
-        if sent, isFinal {
-            messages.append(LogosMessage.pending(projectKey: activeProjectKey, messageID: inputID, content: trimmed))
+            projectKey: projectKey
+        )) { [weak self] result in
+            guard isFinal else { return }
+            switch result {
+            case .success:
+                self?.handleFinalSpeechSendSuccess(inputID: inputID, pending: pending)
+            case .failure(let error):
+                self?.handleFinalSpeechSendFailure(failedDraft, error: error)
+            }
+        }
+        if sent == false, isFinal {
+            inFlightFinalSpeechDrafts.removeValue(forKey: inputID)
         }
         return sent
+    }
+
+    func clearUndeliveredSpeechDraft(id: String) {
+        guard undeliveredSpeechDraft?.id == id else { return }
+        undeliveredSpeechDraft = nil
     }
 
     func requestProjects() {
@@ -341,7 +396,10 @@ final class LogosClient: ObservableObject {
     }
 
     @discardableResult
-    private func sendFrame(_ frame: [String: Any]) -> Bool {
+    private func sendFrame(
+        _ frame: [String: Any],
+        onCompletion: ((Result<Void, Error>) -> Void)? = nil
+    ) -> Bool {
         guard let task else {
             lastError = "Not connected to Logos adapter. Reconnect before sending."
             connectionState = .disconnected
@@ -353,17 +411,18 @@ final class LogosClient: ObservableObject {
             let string = String(decoding: data, as: UTF8.self)
             task.send(.string(string)) { [weak self, weak task] error in
                 Task { @MainActor in
-                    guard
-                        let self,
-                        self.connectionLifecycle.accepts(connectionID),
-                        let task,
-                        task === self.task
-                    else { return }
+                    guard let self else { return }
+                    guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else {
+                        onCompletion?(.failure(LogosSocketSendError.staleConnection))
+                        return
+                    }
                     if let error {
                         self.lastError = error.localizedDescription
                         self.connectionState = .error
+                        onCompletion?(.failure(error))
                     } else {
                         self.lastError = nil
+                        onCompletion?(.success(()))
                     }
                 }
             }
@@ -377,25 +436,27 @@ final class LogosClient: ObservableObject {
     private func receiveLoop(connectionID: UUID) {
         guard let task else { return }
         task.receive { [weak self, weak task] result in
-            Task { @MainActor in
-                guard
-                    let self,
-                    self.connectionLifecycle.accepts(connectionID),
-                    let task,
-                    task === self.task
-                else { return }
-                switch result {
-                case .success(let message):
-                    self.markConnected()
+                Task { @MainActor in
+                    guard let self else { return }
+                    guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else { return }
+                    switch result {
+                    case .success(let message):
+                        self.markConnected()
                     self.handleSocketMessage(message)
                     self.receiveLoop(connectionID: connectionID)
-                case .failure(let error):
-                    self.task = nil
-                    self.lastError = error.localizedDescription
-                    self.connectionState = .error
+                    case .failure(let error):
+                        self.restoreInFlightFinalSpeechDrafts(reason: error.localizedDescription)
+                        self.task = nil
+                        self.lastError = error.localizedDescription
+                        self.connectionState = .error
                 }
             }
         }
+    }
+
+    private func isCurrentTask(_ candidate: any WebSocketTasking) -> Bool {
+        guard let task else { return false }
+        return ObjectIdentifier(candidate) == ObjectIdentifier(task)
     }
 
     private func markConnected() {
@@ -466,9 +527,11 @@ final class LogosClient: ObservableObject {
     private func handleMessagesBatch(_ root: [String: Any]) {
         guard let payload = root["payload"] as? [String: Any] else { return }
         let rawMessages = payload["messages"] as? [[String: Any]] ?? []
-        for message in rawMessages.compactMap(LogosMessage.from(dictionary:)) {
+        let decodedMessages = rawMessages.compactMap(LogosMessage.from(dictionary:))
+        for message in decodedMessages {
             store.upsert(message)
         }
+        pendingMessages.reconcile(with: decodedMessages)
         let pending = payload["pending_interactions"] as? [[String: Any]] ?? []
         for interaction in pending {
             handlePendingInteraction(interaction)
@@ -476,7 +539,7 @@ final class LogosClient: ObservableObject {
         if payload.keys.contains("pending_interactions") {
             reconcilePendingInteractionCards(pending, projectKey: root["project_key"] as? String ?? activeProjectKey)
         }
-        messages = store.loadMessages(projectKey: activeProjectKey)
+        refreshMessages()
     }
 
     private func reconcilePendingInteractionCards(_ pending: [[String: Any]], projectKey: String) {
@@ -516,8 +579,8 @@ final class LogosClient: ObservableObject {
         }
         if let messageDict = payload["message"] as? [String: Any], let message = LogosMessage.from(dictionary: messageDict) {
             store.upsert(message)
-            messages.removeAll { PendingMessageReconciliation.shouldRemove(pending: $0, whenPersisted: message) }
-            messages = store.loadMessages(projectKey: activeProjectKey)
+            pendingMessages.reconcile(with: message)
+            refreshMessages()
         }
     }
 
@@ -629,5 +692,63 @@ final class LogosClient: ObservableObject {
 
     private func latestServerSeq() -> Int {
         messages.map(\.serverSeq).max() ?? 0
+    }
+
+    private func addPendingMessage(_ message: LogosMessage) {
+        pendingMessages.add(message, persisted: store.loadMessages(projectKey: message.projectKey))
+        refreshMessages()
+    }
+
+    private func handleFinalSpeechSendSuccess(inputID: String, pending: LogosMessage) {
+        inFlightFinalSpeechDrafts.removeValue(forKey: inputID)
+        addPendingMessage(pending)
+    }
+
+    private func handleFinalSpeechSendFailure(_ draft: UndeliveredSpeechDraft, error: Error) {
+        inFlightFinalSpeechDrafts.removeValue(forKey: draft.inputID)
+        pendingMessages.remove(messageID: draft.inputID)
+        refreshMessages()
+        undeliveredSpeechDraft = UndeliveredSpeechDraft(
+            inputID: draft.inputID,
+            projectKey: draft.projectKey,
+            text: draft.text,
+            reason: error.localizedDescription
+        )
+        lastError = "Speech was not sent: \(error.localizedDescription)"
+    }
+
+    private func restoreInFlightFinalSpeechDrafts(reason: String) {
+        guard inFlightFinalSpeechDrafts.isEmpty == false else { return }
+        let drafts = inFlightFinalSpeechDrafts.values.sorted { $0.inputID < $1.inputID }
+        for draft in drafts {
+            pendingMessages.remove(messageID: draft.inputID)
+        }
+        inFlightFinalSpeechDrafts.removeAll()
+        refreshMessages()
+        if let draft = drafts.last {
+            undeliveredSpeechDraft = UndeliveredSpeechDraft(
+                inputID: draft.inputID,
+                projectKey: draft.projectKey,
+                text: draft.text,
+                reason: reason
+            )
+        }
+    }
+
+    private func refreshMessages() {
+        let persisted = store.loadMessages(projectKey: activeProjectKey)
+        pendingMessages.reconcile(with: persisted)
+        messages = pendingMessages.merged(with: persisted, projectKey: activeProjectKey)
+    }
+}
+
+private enum LogosSocketSendError: LocalizedError {
+    case staleConnection
+
+    var errorDescription: String? {
+        switch self {
+        case .staleConnection:
+            return "The socket changed before the frame send completed."
+        }
     }
 }

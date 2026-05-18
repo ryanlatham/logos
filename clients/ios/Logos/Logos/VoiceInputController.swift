@@ -39,11 +39,13 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
     private var bestTranscriptFallbackTask: Task<Void, Never>?
     private var finalizationTask: Task<Void, Never>?
     private var recognitionGeneration = UUID()
+    private let audioSessionManager: any AudioSessionManaging
     private static let bestTranscriptGraceNanoseconds = VoiceFinalizationPolicy.bestTranscriptGraceNanoseconds
     private static let finalizationTimeoutNanoseconds = VoiceFinalizationPolicy.hardTimeoutNanoseconds
 
-    init(locale: Locale = Locale(identifier: "en-US")) {
+    init(locale: Locale = Locale(identifier: "en-US"), audioSessionManager: any AudioSessionManaging = SystemAudioSessionManager()) {
         recognizer = SFSpeechRecognizer(locale: locale)
+        self.audioSessionManager = audioSessionManager
         super.init()
         recognizer?.delegate = self
         observeAudioSessionNotifications()
@@ -217,12 +219,10 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
 
-        let audioSession = AVAudioSession.sharedInstance()
         do {
-            try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            try audioSessionManager.prepareForRecording()
         } catch {
-            statusText = "Audio session failed: \(error.localizedDescription)"
+            cleanupFailedRecognitionStart(status: "Audio session failed: \(error.localizedDescription)", endAudio: true)
             return
         }
 
@@ -245,9 +245,7 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
         do {
             try audioEngine.start()
         } catch {
-            statusText = "Microphone failed: \(error.localizedDescription)"
-            inputNode.removeTap(onBus: 0)
-            didInstallTap = false
+            cleanupFailedRecognitionStart(status: "Microphone failed: \(error.localizedDescription)", endAudio: true)
             return
         }
 
@@ -362,8 +360,12 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
     private func scheduleBestTranscriptFallback(generation: UUID) {
         bestTranscriptFallbackTask?.cancel()
         bestTranscriptFallbackTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.bestTranscriptGraceNanoseconds)
-            guard let self, self.isFinalizingTranscript else { return }
+            do {
+                try await Task.sleep(nanoseconds: Self.bestTranscriptGraceNanoseconds)
+            } catch {
+                return
+            }
+            guard let self, Task.isCancelled == false, self.isFinalizingTranscript else { return }
             self.applyFinalizationDecision(
                 self.finalizationState.timerFired(.bestTranscriptGrace),
                 generation: generation,
@@ -376,8 +378,12 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
     private func scheduleHardFinalizationTimeout(generation: UUID) {
         finalizationTask?.cancel()
         finalizationTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.finalizationTimeoutNanoseconds)
-            guard let self, self.isFinalizingTranscript else { return }
+            do {
+                try await Task.sleep(nanoseconds: Self.finalizationTimeoutNanoseconds)
+            } catch {
+                return
+            }
+            guard let self, Task.isCancelled == false, self.isFinalizingTranscript else { return }
             self.applyFinalizationDecision(
                 self.finalizationState.timerFired(.hardTimeout),
                 generation: generation,
@@ -421,7 +427,7 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
             request?.endAudio()
         }
         if deactivateSession {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            try? audioSessionManager.finishRecording()
         }
         mode = .idle
     }
@@ -439,7 +445,7 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
         recognitionTask = nil
         request = nil
         recognitionGeneration = UUID()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        try? audioSessionManager.finishRecording()
         isFinalizingTranscript = false
         shouldSendFinalAfterRecognition = false
         finalizationState.reset()
@@ -462,6 +468,18 @@ final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizer
         finalizationTask?.cancel()
         finalizationTask = nil
         stopAudioCapture(endAudio: true)
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        request = nil
+        recognitionGeneration = UUID()
+        isFinalizingTranscript = false
+        shouldSendFinalAfterRecognition = false
+        finalizationState.reset()
+        statusText = status
+    }
+
+    private func cleanupFailedRecognitionStart(status: String, endAudio: Bool) {
+        stopAudioCapture(endAudio: endAudio)
         recognitionTask?.cancel()
         recognitionTask = nil
         request = nil

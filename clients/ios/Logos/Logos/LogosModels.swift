@@ -209,10 +209,62 @@ struct LogosMessage: Identifiable, Hashable {
     }
 }
 
+struct UndeliveredSpeechDraft: Identifiable, Equatable {
+    var id: String { inputID }
+    let inputID: String
+    let projectKey: String
+    let text: String
+    let reason: String
+}
+
 enum PendingMessageReconciliation {
     static func shouldRemove(pending: LogosMessage, whenPersisted persisted: LogosMessage) -> Bool {
         guard pending.status == "pending", pending.role == persisted.role else { return false }
         return pending.messageID == persisted.messageID || pending.content == persisted.content
+    }
+}
+
+struct PendingMessageBuffer: Equatable {
+    private var pendingByID: [String: LogosMessage] = [:]
+
+    var isEmpty: Bool { pendingByID.isEmpty }
+
+    mutating func add(_ message: LogosMessage, persisted: [LogosMessage] = []) {
+        guard message.status == "pending" else { return }
+        guard persisted.contains(where: { PendingMessageReconciliation.shouldRemove(pending: message, whenPersisted: $0) }) == false else {
+            pendingByID.removeValue(forKey: message.messageID)
+            return
+        }
+        pendingByID[message.messageID] = message
+    }
+
+    mutating func remove(messageID: String) {
+        pendingByID.removeValue(forKey: messageID)
+    }
+
+    mutating func reconcile(with persisted: LogosMessage) {
+        pendingByID = pendingByID.filter { _, pending in
+            PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: persisted) == false
+        }
+    }
+
+    mutating func reconcile(with persisted: [LogosMessage]) {
+        for message in persisted {
+            reconcile(with: message)
+        }
+    }
+
+    func merged(with persisted: [LogosMessage], projectKey: String) -> [LogosMessage] {
+        let pending = pendingByID.values
+            .filter { $0.projectKey == projectKey }
+            .filter { pending in
+                persisted.contains(where: { PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: $0) }) == false
+            }
+            .sorted { lhs, rhs in
+                if lhs.timestamp == rhs.timestamp { return lhs.messageID < rhs.messageID }
+                return lhs.timestamp < rhs.timestamp
+            }
+        return persisted + pending
     }
 }
 
