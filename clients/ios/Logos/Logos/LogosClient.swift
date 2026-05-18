@@ -50,7 +50,6 @@ final class LogosClient: ObservableObject {
     private let audioPlayback = AudioPlaybackController()
     private var requestedAudioIDs = Set<String>()
     private var activeAudioID: String?
-    private var didAutoConnect = false
     private var pendingAPNSToken: String?
     private var pendingMessages = PendingMessageBuffer()
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
@@ -75,8 +74,15 @@ final class LogosClient: ObservableObject {
     }
 
     func connectIfRequestedByEnvironment() {
-        guard settings.autoConnect, didAutoConnect == false else { return }
-        didAutoConnect = true
+        connectIfAutoConnectEnabled()
+    }
+
+    func connectIfAutoConnectEnabled() {
+        guard LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: settings.autoConnect,
+            hasCompletedFirstConnection: settings.hasCompletedFirstConnection,
+            connectionState: connectionState
+        ) else { return }
         connect()
     }
 
@@ -460,6 +466,9 @@ final class LogosClient: ObservableObject {
     }
 
     private func markConnected() {
+        if settings.hasCompletedFirstConnection == false {
+            settings.hasCompletedFirstConnection = true
+        }
         connectionState = .connected
         lastError = nil
     }

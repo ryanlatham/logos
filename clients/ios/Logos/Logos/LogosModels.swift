@@ -42,11 +42,13 @@ struct LogosSettings: Equatable {
     private static let urlKey = "logos.adapter.url"
     private static let deviceIDKey = "logos.device.id"
     private static let autoConnectKey = "logos.autoconnect"
+    private static let hasCompletedFirstConnectionKey = "logos.hasCompletedFirstConnection"
 
     var urlString: String
     var deviceID: String
     var secret: String
     var autoConnect: Bool
+    var hasCompletedFirstConnection: Bool
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment, userDefaults: UserDefaults = .standard) {
         self.urlString = environment["LOGOS_WS_URL"]
@@ -60,8 +62,10 @@ struct LogosSettings: Equatable {
             ?? ""
         if let envAutoConnect = environment["LOGOS_AUTOCONNECT"] {
             self.autoConnect = envAutoConnect == "1" || envAutoConnect.lowercased() == "true"
+            self.hasCompletedFirstConnection = self.autoConnect || userDefaults.bool(forKey: Self.hasCompletedFirstConnectionKey)
         } else {
-            self.autoConnect = userDefaults.bool(forKey: Self.autoConnectKey)
+            self.autoConnect = Self.storedBool(forKey: Self.autoConnectKey, userDefaults: userDefaults, defaultValue: true)
+            self.hasCompletedFirstConnection = userDefaults.bool(forKey: Self.hasCompletedFirstConnectionKey)
         }
     }
 
@@ -69,10 +73,32 @@ struct LogosSettings: Equatable {
         userDefaults.set(urlString, forKey: Self.urlKey)
         userDefaults.set(deviceID, forKey: Self.deviceIDKey)
         userDefaults.set(autoConnect, forKey: Self.autoConnectKey)
+        userDefaults.set(hasCompletedFirstConnection, forKey: Self.hasCompletedFirstConnectionKey)
         if secret.isEmpty {
             LogosKeychain.deleteSecret()
         } else {
             LogosKeychain.saveSecret(secret)
+        }
+    }
+
+    private static func storedBool(forKey key: String, userDefaults: UserDefaults, defaultValue: Bool) -> Bool {
+        guard userDefaults.object(forKey: key) != nil else { return defaultValue }
+        return userDefaults.bool(forKey: key)
+    }
+}
+
+enum LogosAutoConnectPolicy {
+    static func shouldAttempt(
+        autoConnect: Bool,
+        hasCompletedFirstConnection: Bool,
+        connectionState: LogosConnectionState
+    ) -> Bool {
+        guard autoConnect, hasCompletedFirstConnection else { return false }
+        switch connectionState {
+        case .disconnected, .error:
+            return true
+        case .connecting, .connected:
+            return false
         }
     }
 }

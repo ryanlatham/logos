@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var client: LogosClient
     @EnvironmentObject private var notifications: NotificationCoordinator
 
@@ -72,6 +73,11 @@ struct ContentView: View {
         .animation(.easeOut(duration: 0.22), value: showAttachSheet)
         .animation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28), value: showSettings)
         .onAppear(perform: configureRuntime)
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                client.connectIfAutoConnectEnabled()
+            }
+        }
         .onChange(of: client.connectionState) { _, newState in
             voiceInput.updateTransportAvailable(newState == .connected)
             if newState == .connected { pushEnabled = notifications.authorizationStatus.contains("allowed") }
@@ -223,6 +229,12 @@ struct ContentView: View {
                 .animation(.timingCurve(0.2, 0.7, 0.2, 1, duration: 0.26), value: composerMode)
             }
             .scrollDismissesKeyboard(.interactively)
+            .onAppear {
+                scrollToBottomAfterLayout(proxy, animated: false)
+            }
+            .onChange(of: client.activeProjectKey) { _, _ in
+                scrollToBottomAfterLayout(proxy, animated: false)
+            }
             .onChange(of: client.messages.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: voiceInput.partialTranscript) { _, _ in scrollToBottom(proxy) }
             .onChange(of: client.approvalCard?.id) { _, _ in scrollToBottom(proxy) }
@@ -684,6 +696,7 @@ struct ContentView: View {
                 }
 
                 adapterURLRow
+                autoConnectRow
                 deviceKeyRow
 
                 ExpandableSelectRow(
@@ -698,6 +711,38 @@ struct ContentView: View {
                 )
             }
             .settingsGroup()
+        }
+    }
+
+    private var autoConnectRow: some View {
+        SettingRowChrome(isLast: false) {
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.horizontal.circle")
+                    .settingsIcon()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Auto connect")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel)
+                    Text(autoConnectDetail)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.logosLabel3)
+                        .lineLimit(2)
+                }
+                Spacer()
+                LogosToggle(
+                    isOn: Binding(
+                        get: { client.settings.autoConnect },
+                        set: { newValue in
+                            client.settings.autoConnect = newValue
+                            if newValue {
+                                client.connectIfAutoConnectEnabled()
+                            }
+                        }
+                    ),
+                    label: "Auto connect"
+                )
+                .accessibilityIdentifier("autoConnectToggle")
+            }
         }
     }
 
@@ -989,8 +1034,8 @@ struct ContentView: View {
         client.clearUndeliveredSpeechDraft(id: failedDraft.id)
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.18)) {
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        let action = {
             if client.playbackStatus != nil {
                 proxy.scrollTo("playback", anchor: .bottom)
             } else if client.ackText != nil {
@@ -1006,6 +1051,18 @@ struct ContentView: View {
             } else if let last = client.messages.last {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
+        }
+        if animated {
+            withAnimation(.easeOut(duration: 0.18), action)
+        } else {
+            action()
+        }
+    }
+
+    private func scrollToBottomAfterLayout(_ proxy: ScrollViewProxy, animated: Bool) {
+        Task { @MainActor in
+            await Task.yield()
+            scrollToBottom(proxy, animated: animated)
         }
     }
 
@@ -1275,6 +1332,13 @@ struct ContentView: View {
             return "via Tailscale"
         }
         return client.settings.urlString
+    }
+
+    private var autoConnectDetail: String {
+        if client.settings.hasCompletedFirstConnection {
+            return client.settings.autoConnect ? "On launch and resume" : "Off"
+        }
+        return "Starts after first connection"
     }
 
     private var connectionActionTitle: String {

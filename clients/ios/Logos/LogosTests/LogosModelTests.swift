@@ -53,6 +53,56 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(settings.urlString, "ws://ryans-mac-studio:8765")
     }
 
+    func testAutoConnectDefaultsOnButWaitsForFirstSuccessfulConnection() throws {
+        let suiteName = "LogosSettingsAutoConnectDefault-\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = LogosSettings(environment: [:], userDefaults: userDefaults)
+
+        XCTAssertTrue(settings.autoConnect)
+        XCTAssertFalse(settings.hasCompletedFirstConnection)
+        XCTAssertFalse(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: settings.autoConnect,
+            hasCompletedFirstConnection: settings.hasCompletedFirstConnection,
+            connectionState: .disconnected
+        ))
+    }
+
+    func testAutoConnectPolicyAttemptsOnlyAfterFirstConnectionWhenDisconnected() throws {
+        XCTAssertTrue(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: true,
+            hasCompletedFirstConnection: true,
+            connectionState: .disconnected
+        ))
+        XCTAssertTrue(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: true,
+            hasCompletedFirstConnection: true,
+            connectionState: .error
+        ))
+        XCTAssertFalse(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: true,
+            hasCompletedFirstConnection: true,
+            connectionState: .connecting
+        ))
+        XCTAssertFalse(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: false,
+            hasCompletedFirstConnection: true,
+            connectionState: .disconnected
+        ))
+    }
+
+    func testEnvironmentAutoConnectBypassesFirstConnectionGateForUITests() throws {
+        let suiteName = "LogosSettingsAutoConnectEnvironment-\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = LogosSettings(environment: ["LOGOS_AUTOCONNECT": "1"], userDefaults: userDefaults)
+
+        XCTAssertTrue(settings.autoConnect)
+        XCTAssertTrue(settings.hasCompletedFirstConnection)
+    }
+
     func testHelloSignatureMatchesServerCanonicalHMAC() throws {
         let signature = LogosAuthentication.signHello(
             secret: "dev-secret",
@@ -387,6 +437,14 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testSuccessfulConnectionMarksFirstConnectionComplete() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, autoConnect: false)
+
+        XCTAssertTrue(client.settings.hasCompletedFirstConnection)
+    }
+
+    @MainActor
     func testFinalSpeechPendingAppearsOnlyAfterSocketSendCompletes() async throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
@@ -638,13 +696,14 @@ private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
 }
 
 @MainActor
-private func makeSocketBackedClient(socket: RecordingWebSocketTask) -> LogosClient {
+private func makeSocketBackedClient(socket: RecordingWebSocketTask, autoConnect: Bool = true) -> LogosClient {
     let client = LogosClient(
         store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
         socketFactory: RecordingWebSocketTaskFactory(socket: socket)
     )
     client.settings.urlString = "ws://127.0.0.1:8765"
     client.settings.secret = "test-secret"
+    client.settings.autoConnect = autoConnect
     client.connect()
     client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)
     return client
