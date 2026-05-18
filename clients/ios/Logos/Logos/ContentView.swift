@@ -1024,8 +1024,13 @@ struct ContentView: View {
         let existingDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if existingDraft.isEmpty {
             draft = restoredText
-        } else if existingDraft.contains(restoredText) == false {
-            draft = "\(draft)\n\(restoredText)"
+        } else {
+            let existingLines = existingDraft
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            if existingLines.contains(restoredText) == false {
+                draft = "\(draft)\n\(restoredText)"
+            }
         }
         focusedField = .composer
         withAnimation(.easeOut(duration: 0.18)) {

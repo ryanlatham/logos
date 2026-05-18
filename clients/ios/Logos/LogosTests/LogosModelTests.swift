@@ -103,6 +103,18 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(settings.hasCompletedFirstConnection)
     }
 
+    func testMessageStoreFilenameCanBeIsolatedByLaunchEnvironment() throws {
+        XCTAssertEqual(
+            SQLiteMessageStore.resolvedFilename(environment: ["LOGOS_MESSAGE_STORE_FILENAME": "LogosUITests-one.sqlite3"]),
+            "LogosUITests-one.sqlite3"
+        )
+        XCTAssertEqual(
+            SQLiteMessageStore.resolvedFilename(environment: ["LOGOS_MESSAGE_STORE_FILENAME": "../escape.sqlite3"]),
+            "escape.sqlite3"
+        )
+        XCTAssertEqual(SQLiteMessageStore.resolvedFilename(environment: [:]), "LogosMessages.sqlite3")
+    }
+
     func testHelloSignatureMatchesServerCanonicalHMAC() throws {
         let signature = LogosAuthentication.signHello(
             secret: "dev-secret",

@@ -4,6 +4,10 @@ Last updated: 2026-05-18
 
 This checklist tracks validation that cannot be completed by Xcode Simulator alone. For an interactive walkthrough with checkboxes, command copy buttons, and a fillable report form, open `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`. Stage I establishes the voice path gates and Stage J adds APNS hardware/credential gates.
 
+## Manual gate status
+
+2026-05-18: Ryan reports the physical/manual gate is finished after the follow-up code fixes. This file remains the checklist/template for future reruns. Detailed device model, iOS version, locale, APNS environment, and route metadata were not captured in this repository; do not backfill guesses. No secrets, APNS tokens, or device keys should be pasted here.
+
 ## Stage I — real iPhone ASR and speech state machine
 
 Prerequisites:

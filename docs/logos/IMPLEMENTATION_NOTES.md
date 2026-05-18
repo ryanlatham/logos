@@ -1131,7 +1131,53 @@ Stage L conclusion:
 - Stage K test report is complete.
 - Device checklist is complete enough for first hardware pass and should be filled in during real iPhone testing.
 - No Apple Watch relay work was started.
-- Next meaningful work requires physical iPhone / Apple Developer signing / APNS credentials / Tailscale hardware validation.
+- Physical/manual gate has now been accepted complete by Ryan; no v1 implementation blocker remains.
+
+## Post-physical/manual closure — 2026-05-18
+
+Status: accepted complete by Ryan after direct code fixes to the remaining field issues.
+
+Post-manual code changes reviewed in this closure pass:
+
+- `53d6a47` — hardens iOS speech delivery:
+  - configures recording through the audio-session manager,
+  - preserves/recovers undelivered final speech drafts on socket failure or disconnect,
+  - adds pending-message reconciliation for final speech send confirmation.
+- `36dc581` — adds iOS auto-connect and initial scroll hardening:
+  - auto-connect resumes only after first successful connection unless launch environment explicitly forces it,
+  - thread scrolls to the latest item on first layout and project switch.
+- Follow-up verification fixes in this pass:
+  - `tests/test_stage_f_mock_adapter.py` imports the mock adapter under the documented pytest command,
+  - `LogosUITests.testTextMessageRoundTripThroughMockAdapter` now verifies playback status after tapping Play instead of requiring the Play button to remain visible.
+
+Fresh verification from this pass:
+
+```bash
+PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
+  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+# 49 passed
+
+PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
+  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins scripts tests
+# passed
+
+xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
+  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -only-testing:LogosTests test
+# LogosModelTests: 50 passed
+
+LOGOS_UI_TEST_WS_URL=ws://127.0.0.1:8766 \
+  xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
+  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' test
+# LogosUITests: 5 passed against Stage F mock adapter
+```
+
+Process hygiene after verification:
+
+- Hermes background process registry empty.
+- No listener on `127.0.0.1:8766`.
+
+No v1 implementation blocker remains. Remaining ideas are post-v1 hardening/deferred scope: real TTS engine, real fast local model, Apple Watch relay, durable run recovery, and larger product-surface expansion.
 
 Smoke verification after report generation:
 

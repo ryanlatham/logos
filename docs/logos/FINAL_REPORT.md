@@ -1,6 +1,6 @@
-# Logos Final Report — Simulator Complete / Physical Device Gate
+# Logos Final Report — v1 Manual Gate Complete
 
-Last updated: 2026-05-15T12:23:21-07:00
+Last updated: 2026-05-18T01:26:51-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -13,6 +13,8 @@ Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 15 Pro
 Bundle id: `com.ryan.logos`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
+
+2026-05-18 update: Ryan completed the physical/manual validation pass after the post-redesign UI and voice fixes. The remaining repository work is now closure/hardening, not a v1 physical-device blocker. Detailed per-device manual-test metadata was not captured in this repo; do not invent it retroactively.
 
 ## 1. What was implemented
 
@@ -65,7 +67,7 @@ Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 ### iOS side
 
 - SwiftUI iOS app under `clients/ios/Logos` using XcodeGen.
-- Native `URLSessionWebSocketTask` client.
+- Native `URLSessionWebSocketTask` client with reconnect/auto-connect policy.
 - HMAC signing compatible with the Python WebSocket server.
 - Local SQLite message store.
 - Text chat UI.
@@ -74,6 +76,7 @@ Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 - Approval card UI.
 - Clarification card UI.
 - Playback button and AVFoundation audio chunk assembly/playback with explicit `.playback` audio-session activation before starting `AVAudioPlayer`.
+- Undelivered final speech drafts are restored into the composer if the socket closes before send confirmation.
 - Ack/playback status surfaces.
 - Voice panel with:
   - `SFSpeechRecognizer` capability check,
@@ -82,7 +85,7 @@ Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
   - tap-to-talk,
   - microphone-stop finalization that waits for recognizer final output or a bounded timeout before sending to Hermes,
   - partial transcript display,
-  - tap-to-talk energy/silence state machine.
+  - tap-to-talk energy/silence state machine with natural-pause, quiet-speech, ASR-progress, and maximum-duration handling.
 - Notification panel with explicit `Enable` action.
 - iOS APNS registration delegate.
 - Notification route parsing from APNS `userInfo`.
@@ -120,7 +123,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Result:
 
 ```text
-45 passed
+49 passed
 ```
 
 Coverage includes:
@@ -161,8 +164,8 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 Result:
 
 ```text
-LogosModelTests: 22 tests, 0 failures
-LogosUITests: 3 tests, 0 failures
+LogosModelTests: 50 tests, 0 failures
+LogosUITests: 5 tests, 0 failures
 ** TEST SUCCEEDED **
 ```
 
@@ -194,18 +197,20 @@ The UI tests validate:
 
 Primary report: `docs/logos/TEST_REPORT.md`.
 
-## 4. What could not be verified without physical device / credentials
+## 4. Physical/manual gate outcome
 
-- Real iPhone microphone quality, latency, and interruption behavior.
-- Real `SFSpeechRecognizer` on-device recognition quality and locale support on hardware.
-- Real permission-prompt flows for microphone, speech recognition, and notifications.
-- iPhone-to-Mac connectivity over Tailscale/private network.
-- Real iOS foreground/background WebSocket suspension and reconnect behavior.
-- Real APNS device-token registration.
-- Real APNS delivery from Apple servers.
-- Notification tap routing after app background/suspend.
-- Apple Developer signing/provisioning setup.
-- Apple Watch relay. This remains intentionally out of scope until physical iPhone validation passes.
+Ryan completed the physical/manual validation gate after fixing the observed field issues directly in code. The codebase now treats the iPhone path as accepted for v1.
+
+Post-manual hardening that landed or was verified after the original simulator-only report:
+
+- HMAC-authenticated WebSocket hello remains in place; mock-adapter traffic logs redact keyed secrets and summarize text by default.
+- Final speech delivery waits for send completion before showing a pending user message.
+- If a final speech frame fails or the socket closes before confirmation, Logos restores the transcript into the composer instead of pretending it was sent.
+- Auto-connect now resumes only after the first successful connection unless explicitly forced by test/launch environment.
+- Initial thread scroll and project-switch scroll behavior were hardened.
+- Playback tests now assert the playback-status transition instead of assuming the play button remains visible after tap.
+
+Explicitly still deferred from v1: Apple Watch relay and broader post-v1 feature expansion listed in Section 11.
 
 ## 5. Exact commands to run the adapter
 
@@ -374,15 +379,13 @@ Minimum physical gate checklist:
 15. Stop/cancel during a running task.
 16. Inspect logs for secret/token/transcript leakage; none should appear in normal logs.
 
-## 9. Known issues and suggested next fixes
+## 9. Known limitations and post-v1 follow-ups
 
-- **Physical install not performed**: no iPhone/Apple signing validation yet. Next: provision bundle id and install from Xcode.
-- **Live APNS not verified**: APNS client is scaffolded and private-payload tested, but no credentials/device token were available. Next: set `LOGOS_APNS_*`, enable notifications on iPhone, and run the Stage J checklist.
-- **TTS is stubbed**: Kokoro was unavailable in the Hermes venv. Next: install/benchmark Kokoro or keep the stub until the real iPhone loop is stable. Do not let voice prettiness outrank transport correctness.
-- **Fast model is stubbed**: MLX/Qwen packages were unavailable. Next: add a real local model behind `fast_llm.py` only after phone path is stable; preserve deterministic fallback.
-- **Simulator URL route confirmation**: first `logos://` open prompts `Open in “Logos”?`. Unit parser/reconnect path is covered; hardware notification tap still needs validation.
-- **Plugin not enabled in live Hermes profile**: implementation source exists and install commands are documented. Next: install/enable when ready to test with the phone. I avoided altering the active live gateway without hardware ready.
-- **Mock adapter vs real gateway**: Simulator UI tests use deterministic mock Hermes responses. Python tests cover adapter/gateway semantics, but a real Hermes end-to-end task from phone should be the first physical-device smoke test.
+- **TTS is still deterministic/stubbed**: Kokoro was unavailable in the Hermes venv. Replace it only after the stable iPhone loop matters more than transport correctness.
+- **Fast model is still deterministic/stubbed**: MLX/Qwen packages were unavailable. Add a real local model behind `fast_llm.py` only as post-v1 polish; preserve deterministic fallback.
+- **Simulator URL route confirmation remains expected**: first `logos://` open prompts `Open in “Logos”?`; route parser/reconnect behavior remains unit-covered.
+- **Mock adapter vs real gateway**: Simulator UI tests use deterministic mock Hermes responses. Python tests cover adapter/gateway semantics; live gateway smoke-testing is operational validation, not a code scaffold blocker.
+- **Apple Watch relay remains deferred** until the iPhone path has enough field mileage to justify carrying it onto the watch.
 
 ## 10. Kanban board summary
 
@@ -404,7 +407,7 @@ Completed stages:
 - Stage K — End-to-end Simulator validation
 - Stage L — Physical-device gate and final report
 
-Feature-note tasks on the board remain as ledger/backlog notes, not implementation blockers:
+Feature-note tasks on the board were ledger/backlog notes, not implementation blockers. They should be closed or archived as covered by the completed stages:
 
 - plugin loading and gateway message routing
 - slash command pass-through
@@ -416,13 +419,7 @@ Feature-note tasks on the board remain as ledger/backlog notes, not implementati
 - physical device validation checklist
 - deferred / not v1
 
-Physical-device-gated items:
-
-- real iPhone/Tailscale connection,
-- real mic/on-device ASR,
-- real APNS registration/delivery,
-- real iOS foreground/background socket behavior,
-- Apple Watch relay after iPhone path passes.
+Physical/manual gate: accepted complete by Ryan on 2026-05-18. Apple Watch relay remains deferred.
 
 ## 11. Intentionally deferred scope
 
@@ -438,6 +435,4 @@ Physical-device-gated items:
 
 ## Final gate
 
-The next meaningful validation requires physical user/device action: a signed physical iPhone build, Tailscale/private-network testing, APNS credentials/device token registration, and real microphone/on-device ASR validation.
-
-Stop condition reached. The simulator path is as far as it can honestly go. Anything beyond this without hardware would be theater, and theater does not ship reliable software.
+V1 manual gate accepted complete on 2026-05-18. The remaining work is either operational rollout or explicitly deferred post-v1 scope. No open v1 implementation blocker remains in this report.

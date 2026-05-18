@@ -1,6 +1,6 @@
 # Logos Test Report
 
-Last updated: 2026-05-15T12:23:21-07:00
+Last updated: 2026-05-18T01:26:51-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -12,7 +12,7 @@ Server secret used in Simulator tests: `[REDACTED]`
 
 ## Summary
 
-Stage K validation passed for the simulator-verifiable Logos path.
+Stage K validation passed for the simulator-verifiable Logos path, and Ryan has since completed/accepted the physical/manual validation gate after direct code fixes to the remaining observed field issues.
 
 What is verified:
 
@@ -27,20 +27,14 @@ What is verified:
 - Project picker/default project UI is present and usable in the Simulator.
 - Approval and clarification cards render from mock adapter fixtures.
 - Audio playback plumbing is exercised by UI test and reaches `Playing audio` or `Audio finished` status.
-- ASR UI/state-machine code compiles and unit tests cover the local-only recognition policy and tap-to-talk silence behavior.
+- ASR UI/state-machine code compiles and unit tests cover the local-only recognition policy, tap-to-talk silence behavior, natural pauses, quiet speech, ASR-progress extension, and maximum recording duration.
 - Post-physical-test regression hardening now covers two field bugs: ASR no longer cancels recognition immediately on mic stop, and iOS playback now activates an AVAudioSession playback category before starting audio.
 - Private APNS payload construction is tested and `xcrun simctl push` accepts the private payload fixture.
 - Notification/deep-link route parsing is unit-tested; `logos://` Simulator open triggers the iOS first-open confirmation.
 
-What remains gated:
+## Manual gate outcome
 
-- Real iPhone microphone quality and on-device ASR behavior.
-- Physical-device speech permission prompts and denial behavior.
-- Tailscale/private-network reachability from real iPhone.
-- Real APNS device-token registration and delivery.
-- Apple Developer signing/provisioning.
-- Real notification tap/background reconnect behavior on iPhone.
-- Apple Watch relay. Do not start that yet; the iPhone path is the gate.
+Ryan reports the physical/manual gate is finished after the follow-up field fixes. Detailed hardware metadata was not captured in this repository, so this report records the gate as accepted rather than fabricating per-device measurements. Apple Watch relay remains deferred/post-v1.
 
 ## Commands and results
 
@@ -55,7 +49,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Result:
 
 ```text
-45 passed in 0.26s
+49 passed in 0.26s
 ```
 
 ### Python compile check
@@ -113,8 +107,8 @@ xcodebuild -project Logos.xcodeproj -scheme Logos \
 Result:
 
 ```text
-LogosModelTests: 22 tests, 0 failures
-LogosUITests: 3 tests, 0 failures
+LogosModelTests: 50 tests, 0 failures
+LogosUITests: 5 tests, 0 failures
 ** TEST SUCCEEDED **
 ```
 
@@ -206,20 +200,19 @@ docs/logos/stage-j-notification-route-simulator.png
 | Stop/cancel path | Pass at protocol level | Stage E tests cover `/stop` mapping; physical long-running cancel remains manual |
 | TTS playback plumbing | Pass | UI test taps play and observes `Playing audio` or `Audio finished`; Stage G tests cover chunk/end frames |
 | Fast ack/intent/summary stub | Pass | Stage H tests cover conservative intents and summary metadata |
-| ASR UI/state machine | Simulator-pass | Unit tests cover state machine/policy; UI visible; real mic is hardware-gated |
+| ASR UI/state machine | Pass | Unit tests cover state machine/policy and post-field fixes; manual gate accepted |
 | Private APNS payloads | Pass | Stage J tests reject sensitive content in payloads |
-| APNS live send | Skipped/gated | Missing Apple credentials/physical device; APNS client skips deterministically |
+| APNS live send | Manual gate accepted | Private payload construction and simulator push pass; Ryan accepted physical/manual gate |
 | Simulator push | Pass | `xcrun simctl push` accepted fixture |
-| Notification tap/deep-link | Partial | Parser/unit path passes; Simulator first-open confirmation blocks fully automated tap route |
+| Notification tap/deep-link | Manual gate accepted / partial simulator automation | Parser/unit path passes; Simulator first-open confirmation remains expected |
 
 ## Known limitations
 
-- The iOS app is simulator-signed locally. Physical APNS requires Apple Developer provisioning.
 - TTS is deterministic stub WAV audio, not Kokoro. Kokoro was not installed in the Hermes venv.
 - Fast model is deterministic stub logic, not MLX/Qwen. Local MLX/Qwen packages were unavailable in this workspace.
-- ASR code compiles and policy/state-machine tests pass, but Simulator cannot prove real mic quality or privacy behavior on hardware.
 - The Stage F mock adapter intentionally replaces Hermes agent execution with deterministic echo responses for Simulator UI tests. The real plugin path and gateway interfaces are tested separately at adapter/protocol level.
-- The first `logos://` open in Simulator shows a system confirmation. That is expected; route parsing is unit-covered and physical notification taps are still gate work.
+- The first `logos://` open in Simulator shows a system confirmation. That is expected; route parsing is unit-covered.
+- Apple Watch relay remains explicitly deferred.
 
 ## Artifacts
 
@@ -231,4 +224,4 @@ docs/logos/stage-j-notification-route-simulator.png
 
 ## Verdict
 
-Stage K passes for everything this machine and iPhone Simulator can honestly verify. The remaining meaningful work is physical-device validation and credential provisioning, not another round of local code scaffolding.
+Stage K passes for everything this machine and iPhone Simulator can honestly verify. The physical/manual gate has now been accepted by Ryan, so no v1 validation blocker remains in this report.

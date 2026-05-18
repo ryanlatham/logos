@@ -4,14 +4,20 @@ import SQLite3
 final class SQLiteMessageStore {
     private var db: OpaquePointer?
 
-    init(filename: String = "LogosMessages.sqlite3") {
+    init(filename: String? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Logos", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent(filename)
+        let url = directory.appendingPathComponent(Self.resolvedFilename(filename: filename, environment: environment))
         if sqlite3_open(url.path, &db) == SQLITE_OK {
             createSchema()
         }
+    }
+
+    static func resolvedFilename(filename: String? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        let candidate = filename ?? environment["LOGOS_MESSAGE_STORE_FILENAME"] ?? "LogosMessages.sqlite3"
+        let lastPathComponent = URL(fileURLWithPath: candidate).lastPathComponent
+        return lastPathComponent.isEmpty ? "LogosMessages.sqlite3" : lastPathComponent
     }
 
     deinit {
