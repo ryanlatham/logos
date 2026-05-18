@@ -1,413 +1,1056 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var client: LogosClient
     @EnvironmentObject private var notifications: NotificationCoordinator
+
     @State private var draft = ""
-    @State private var newProjectTitle = ""
     @State private var clarifyAnswer = ""
     @StateObject private var voiceInput = VoiceInputController()
+
+    @State private var composerMode: ComposerMode = .paused
+    @State private var showProjectSwitcher = false
+    @State private var showAttachSheet = false
+    @State private var showSettings = false
+    @State private var switcherSearch = ""
+    @State private var isCreatingProject = false
+    @State private var newProjectTitle = ""
+    @State private var createSource: ProjectCreateSource = .blank
+    @State private var justCreatedProject = false
+
+    @State private var editingAdapterURL = false
+    @State private var adapterURLDraft = ""
+    @State private var generatedDeviceKey: String?
+    @State private var copiedDeviceKey = false
+    @State private var expandedSettingsPicker: SettingsPickerKind?
+    @State private var hermesProfile = "default"
+    @State private var defaultInput = "tap"
+    @State private var speakMode = "summary"
+    @State private var onDeviceSpeech = true
+    @State private var pushEnabled = false
+    @State private var notifyDone = true
+    @State private var notifyApproval = true
+    @State private var notifySummary = false
+    @State private var suppressNextHoldButtonAction = false
+
     @FocusState private var focusedField: FocusedField?
 
-    private enum FocusedField: Hashable {
-        case adapterURL
-        case secret
-        case newProjectTitle
-        case clarifyAnswer
-        case composer
-    }
-
     var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 12) {
-                        connectionPanel
-                        projectPanel
-                        statusPanel
-                        notificationPanel
-                        voicePanel
-                        interactionCards
-                        messageListContent
-                    }
-                    .padding()
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: client.messages.count) { _, _ in
-                    if let last = client.messages.last {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
-                }
+        ZStack(alignment: .top) {
+            Color.logosBG.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                navBar
+                thread
             }
             .safeAreaInset(edge: .bottom) {
-                composer
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .background(.thinMaterial)
+                composerBar
             }
-            .navigationTitle("Logos")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(client.connectionState == .connected ? "Reconnect" : "Connect") {
-                        client.connect()
+
+            if showProjectSwitcher {
+                projectSwitcherLayer
+                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                    .zIndex(10)
+            }
+
+            if showAttachSheet {
+                attachSheetLayer
+                    .transition(.opacity)
+                    .zIndex(20)
+            }
+
+            if showSettings {
+                settingsOverlay
+                    .transition(.move(edge: .trailing))
+                    .zIndex(30)
+            }
+        }
+        .preferredColorScheme(.dark)
+        .tint(.logosAmber)
+        .animation(.easeOut(duration: 0.22), value: showProjectSwitcher)
+        .animation(.easeOut(duration: 0.22), value: showAttachSheet)
+        .animation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28), value: showSettings)
+        .onAppear(perform: configureRuntime)
+        .onChange(of: client.connectionState) { _, newState in
+            voiceInput.updateTransportAvailable(newState == .connected)
+            if newState == .connected { pushEnabled = notifications.authorizationStatus.contains("allowed") }
+        }
+        .onChange(of: voiceInput.mode) { _, newMode in
+            if newMode == .idle { syncComposerWithVoiceState() }
+        }
+        .onChange(of: voiceInput.pendingMode) { _, _ in
+            syncComposerWithVoiceState()
+        }
+        .onChange(of: voiceInput.isFinalizingTranscript) { _, _ in
+            syncComposerWithVoiceState()
+        }
+        .onOpenURL { url in
+            if let route = LogosNotificationRoute.from(url: url) {
+                notifications.route(route)
+            }
+        }
+    }
+
+    private var navBar: some View {
+        ZStack(alignment: .center) {
+            VStack(alignment: .center, spacing: 6) {
+                Button {
+                    withAnimation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28)) {
+                        closeTransientOverlays(exceptProjectSwitcher: true)
+                        showProjectSwitcher.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(activeProjectTitle)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .rotationEffect(.degrees(showProjectSwitcher ? 180 : 0))
+                    }
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(Color.logosLabel)
+                    .padding(.leading, 14)
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(red: 120 / 255, green: 120 / 255, blue: 128 / 255, opacity: 0.18), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("projectPicker")
+
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(statusChipColor)
+                        .frame(width: 6, height: 6)
+                    Text(statusChipText)
+                        .font(.system(size: 11, weight: .semibold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(statusChipColor)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("connectionStatusLabel")
+                        .accessibilityLabel(connectionTitle)
+                        .accessibilityValue(statusChipText)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(.horizontal, 62)
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            HStack {
+                Spacer(minLength: 0)
+
+                Button {
+                    closeTransientOverlays()
+                    adapterURLDraft = client.settings.urlString
+                    withAnimation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28)) {
+                        showSettings = true
+                    }
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
+            }
+        }
+        .frame(height: 56)
+        .padding(.horizontal, 14)
+        .background(Color.logosGlass)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.logosHairline)
+                .frame(height: 0.5)
+        }
+    }
+
+    private var thread: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    timePill
+
+                    if client.messages.isEmpty, client.approvalCard == nil, client.clarifyCard == nil {
+                        EmptyThreadGreeting(connectionState: client.connectionState)
+                    }
+
+                    ForEach(client.messages) { message in
+                        messageBubble(message)
+                            .id(message.id)
+                    }
+
+                    if voiceInput.isRecording || voiceInput.isFinalizingTranscript {
+                        DraftUserBubble(text: voiceInput.partialTranscript.isEmpty ? "Listening…" : voiceInput.partialTranscript)
+                            .id("voice-draft")
+                    }
+
+                    if shouldShowRunControl {
+                        RunControlStrip(
+                            statusText: runStatusDisplayText,
+                            canStop: client.connectionState == .connected && client.runStatus != .cancelling,
+                            onStop: { client.cancelRun() }
+                        )
+                        .id("run-control")
+                    }
+
+                    interactionCards
+
+                    if let ackText = client.ackText, ackText.isEmpty == false {
+                        ThinkingBubble(text: ackText)
+                            .id("ack")
+                    }
+
+                    if let playbackStatus = client.playbackStatus, playbackStatus.isEmpty == false {
+                        ToolStrip(label: "audio", detail: playbackStatus)
+                            .id("playback")
+                    }
+
+                    if let error = client.lastError, error.isEmpty == false {
+                        ErrorStrip(text: error)
+                            .id("error")
                     }
                 }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, composerMode == .text ? 16 : 28)
+                .animation(.timingCurve(0.2, 0.7, 0.2, 1, duration: 0.26), value: composerMode)
             }
-            .onAppear {
-                client.connectIfRequestedByEnvironment()
-                voiceInput.configureCallbacks(
-                    partial: { text, inputID, partialSeq, startedAt in
-                        client.sendSpeech(text: text, isFinal: false, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
-                    },
-                    final: { text, inputID, partialSeq, startedAt in
-                        client.sendSpeech(text: text, isFinal: true, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
-                    }
-                )
-                notifications.onDeviceToken = { token in
-                    client.registerDevice(apnsToken: token)
-                }
-                notifications.onRoute = { route in
-                    client.handleNotificationRoute(route)
-                }
-                voiceInput.refreshAvailability()
-                voiceInput.updateTransportAvailable(client.connectionState == .connected)
-            }
-            .onChange(of: client.connectionState) { _, newState in
-                voiceInput.updateTransportAvailable(newState == .connected)
-            }
-            .onOpenURL { url in
-                if let route = LogosNotificationRoute.from(url: url) {
-                    notifications.route(route)
-                }
-            }
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: client.messages.count) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: voiceInput.partialTranscript) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.approvalCard?.id) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.clarifyCard?.id) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.playbackStatus) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.ackText) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.lastError) { _, _ in scrollToBottom(proxy) }
         }
     }
 
-    private var connectionPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Adapter")
-                .font(.headline)
-            TextField("ws://127.0.0.1:8765", text: Binding(
-                get: { client.settings.urlString },
-                set: { client.settings.urlString = $0 }
-            ))
-            .accessibilityIdentifier("adapterURLField")
-            .focused($focusedField, equals: .adapterURL)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .textContentType(.URL)
-            .keyboardType(.URL)
-            .submitLabel(.done)
-            .textFieldStyle(.roundedBorder)
-            SecureField("Development shared secret", text: Binding(
-                get: { client.settings.secret },
-                set: { client.settings.secret = $0 }
-            ))
-            .accessibilityIdentifier("secretField")
-            .focused($focusedField, equals: .secret)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .textContentType(.password)
-            .submitLabel(.done)
-            .textFieldStyle(.roundedBorder)
-            HStack {
-                Circle()
-                    .fill(connectionColor)
-                    .frame(width: 10, height: 10)
-                Text(client.connectionState.rawValue.capitalized)
-                    .font(.caption)
-                    .accessibilityIdentifier("connectionStatusLabel")
-                Spacer()
-                Button("Disconnect") { client.disconnect() }
-                    .disabled(client.connectionState == .disconnected)
-            }
-            if let error = client.lastError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var projectPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Project")
-                    .font(.headline)
-                Spacer()
-                Button("Refresh") { client.requestProjects() }
-            }
-            Picker("Active project", selection: Binding(
-                get: { client.activeProjectKey },
-                set: { client.switchProject($0) }
-            )) {
-                if client.projects.isEmpty {
-                    Text("default").tag("default")
-                }
-                ForEach(client.projects) { project in
-                    Text(project.title).tag(project.projectKey)
-                }
-            }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("projectPicker")
-            HStack {
-                TextField("New project title", text: $newProjectTitle)
-                    .accessibilityIdentifier("newProjectTitleField")
-                    .focused($focusedField, equals: .newProjectTitle)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textContentType(.none)
-                    .submitLabel(.done)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { createProjectFromTitleField() }
-                Button("New") {
-                    createProjectFromTitleField()
-                }
-                .disabled(client.connectionState != .connected || newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var statusPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Label(client.runStatus.rawValue.replacingOccurrences(of: "_", with: " ").capitalized, systemImage: statusIcon)
-                    .font(.subheadline)
-                Spacer()
-                Button("Stop") { client.cancelRun() }
-                    .disabled(client.connectionState != .connected || client.runStatus == .idle || client.runStatus == .cancelling)
-            }
-            if let playbackStatus = client.playbackStatus {
-                Label(playbackStatus, systemImage: "speaker.wave.2")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("playbackStatusLabel")
-            }
-            if let ackText = client.ackText {
-                Label(ackText, systemImage: "bolt.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("ackStatusLabel")
-            }
-        }
-    }
-
-    private var notificationPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Notifications")
-                    .font(.headline)
-                Spacer()
-                Button("Enable") { notifications.requestAuthorizationAndRegister() }
-                    .accessibilityIdentifier("enableNotificationsButton")
-            }
-            Text(notifications.authorizationStatus)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("notificationStatusLabel")
-            if let route = notifications.lastRoute {
-                Text("Last route: \(route.kind) → \(route.projectKey)")
-                    .font(.caption)
-                    .accessibilityIdentifier("notificationRouteLabel")
-            }
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var voicePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Voice")
-                .font(.headline)
-            Text(voiceInput.availabilityMessage)
-                .font(.caption)
-                .foregroundStyle(voiceInput.voiceEnabled ? Color.secondary : Color.orange)
-                .accessibilityIdentifier("voiceAvailabilityLabel")
-            Label(voiceInput.statusText, systemImage: voiceInput.isRecording ? "waveform" : "mic")
-                .font(.caption)
-                .accessibilityIdentifier("voiceStatusLabel")
-            if voiceInput.partialTranscript.isEmpty == false {
-                Text(voiceInput.partialTranscript)
-                    .font(.caption)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityIdentifier("partialTranscriptLabel")
-            }
-            HStack {
-                Text("Hold to Talk")
-                    .font(.callout.weight(.semibold))
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity)
-                    .background(voiceInput.mode == .hold ? Color.red.opacity(0.22) : Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                    .accessibilityIdentifier("holdToTalkButton")
-                    .accessibilityAddTraits(.isButton)
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { _ in voiceInput.startHold() }
-                            .onEnded { _ in voiceInput.endHold() }
-                    )
-                    .allowsHitTesting(VoiceControlPolicy.controlsDisabled(
-                        voiceEnabled: voiceInput.voiceEnabled,
-                        connected: client.connectionState == .connected,
-                        isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
-                        isFinalizing: voiceInput.isFinalizingTranscript
-                    ) == false)
-                    .opacity(VoiceControlPolicy.controlsDisabled(
-                        voiceEnabled: voiceInput.voiceEnabled,
-                        connected: client.connectionState == .connected,
-                        isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
-                        isFinalizing: voiceInput.isFinalizingTranscript
-                    ) ? 0.45 : 1.0)
-                Button((voiceInput.mode == .tap || voiceInput.pendingMode == .tap) ? "Stop Tap" : "Tap to Talk") {
-                    voiceInput.toggleTap()
-                }
-                .accessibilityIdentifier("tapToTalkButton")
-                .buttonStyle(.borderedProminent)
-                .disabled(VoiceControlPolicy.controlsDisabled(
-                    voiceEnabled: voiceInput.voiceEnabled,
-                    connected: client.connectionState == .connected,
-                    isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
-                    isFinalizing: voiceInput.isFinalizingTranscript
-                ))
-            }
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    private var timePill: some View {
+        Text("Today \(Date().formatted(date: .omitted, time: .shortened))")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.logosLabel3)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.logosBG2.opacity(0.72), in: Capsule())
     }
 
     @ViewBuilder
     private var interactionCards: some View {
         if let approval = client.approvalCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(approval.title).font(.headline)
-                Text(approval.summary).font(.subheadline)
-                Text("Project: \(approval.projectKey)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if approval.commandPreview.isEmpty == false {
-                    Text(approval.commandPreview)
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-                }
-                if approval.risk.isEmpty == false {
-                    Text(approval.risk).font(.caption).foregroundStyle(.secondary)
-                }
-                HStack {
-                    let responsePending = client.pendingInteractionResponseID == approval.id
-                    Button("Deny", role: .destructive) { client.denyCurrentRequest() }
-                        .disabled(client.connectionState != .connected || responsePending)
-                    Spacer()
-                    Button(responsePending ? "Sent" : "Approve") { client.approveCurrentRequest() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(client.connectionState != .connected || responsePending)
-                }
-            }
-            .padding(12)
-            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
+            ApprovalCardView(
+                approval: approval,
+                isPending: client.pendingInteractionResponseID == approval.id,
+                isConnected: client.connectionState == .connected,
+                onApprove: { client.approveCurrentRequest() },
+                onDeny: { client.denyCurrentRequest() }
+            )
+            .id(approval.id)
         }
-        if let clarify = client.clarifyCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Hermes needs clarification").font(.headline)
-                Text("Project: \(clarify.projectKey)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(clarify.question).font(.subheadline)
-                let responsePending = client.pendingInteractionResponseID == clarify.id
-                ForEach(clarify.choices, id: \.self) { choice in
-                    Button(choice) { client.answerClarification(choice) }
-                        .buttonStyle(.bordered)
-                        .disabled(client.connectionState != .connected || responsePending)
-                }
-                if clarify.allowFreeText {
-                    HStack {
-                        TextField("Answer", text: $clarifyAnswer)
-                            .accessibilityIdentifier("clarifyAnswerField")
-                            .focused($focusedField, equals: .clarifyAnswer)
-                            .textFieldStyle(.roundedBorder)
-                            .submitLabel(.send)
-                            .disabled(responsePending)
-                            .onSubmit { submitClarificationAnswer() }
-                        Button(responsePending ? "Sent" : "Send") {
-                            submitClarificationAnswer()
-                        }
-                        .disabled(client.connectionState != .connected || responsePending || clarifyAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-            }
-            .padding(12)
-            .background(Color.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
-        }
-    }
 
-    private var messageListContent: some View {
-        LazyVStack(alignment: .leading, spacing: 10) {
-            ForEach(client.messages) { message in
-                messageBubble(message)
-                    .id(message.id)
-            }
+        if let clarify = client.clarifyCard {
+            ClarifyCardView(
+                clarify: clarify,
+                answer: $clarifyAnswer,
+                isPending: client.pendingInteractionResponseID == clarify.id,
+                isConnected: client.connectionState == .connected,
+                focused: $focusedField,
+                onChoice: { client.answerClarification($0) },
+                onFreeText: submitClarificationAnswer
+            )
+            .id(clarify.id)
         }
     }
 
     private func messageBubble(_ message: LogosMessage) -> some View {
-        HStack {
-            if message.role == "user" { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(message.role.capitalized)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .bottom) {
+            if message.role == "user" { Spacer(minLength: 48) }
+
+            VStack(alignment: .leading, spacing: 7) {
                 Text(message.content)
-                    .font(.body)
-                if message.role != "user" && message.status == "persisted" {
-                    Button {
-                        client.playback(message: message)
-                    } label: {
-                        Label("Play", systemImage: "play.circle")
+                    .font(.system(size: 16, weight: message.role == "user" ? .medium : .regular))
+                    .lineSpacing(1)
+                    .foregroundStyle(message.role == "user" ? Color.logosAmberOn : Color.logosLabel)
+                    .textSelection(.enabled)
+                    .accessibilityLabel(message.content)
+
+                HStack(spacing: 8) {
+                    if message.status != "persisted" {
+                        Text(message.status)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(message.role == "user" ? Color.logosAmberOn.opacity(0.55) : Color.logosLabel3)
                     }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("playMessageButton")
-                    .disabled(client.connectionState != .connected)
-                }
-                if message.status != "persisted" {
-                    Text(message.status)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+
+                    if message.role != "user", message.status == "persisted" {
+                        Button {
+                            client.playback(message: message)
+                        } label: {
+                            Label("Play", systemImage: "play.circle")
+                                .labelStyle(.titleAndIcon)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.logosLabel2)
+                        .accessibilityIdentifier("playMessageButton")
+                        .disabled(client.connectionState != .connected)
+                    }
                 }
             }
-            .padding(10)
-            .background(message.role == "user" ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-            if message.role != "user" { Spacer(minLength: 40) }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
+            .background(message.role == "user" ? Color.logosAmber : Color.logosBG2)
+            .clipShape(ChatBubbleShape(isUser: message.role == "user"))
+            .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
+
+            if message.role != "user" { Spacer(minLength: 48) }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var composerBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                closeTransientOverlays(exceptAttachSheet: true)
+                withAnimation(.timingCurve(0.2, 0.8, 0.2, 1, duration: 0.22)) {
+                    showAttachSheet.toggle()
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                    .frame(width: 36, height: 36)
+                    .background(Color(red: 120 / 255, green: 120 / 255, blue: 128 / 255, opacity: 0.22), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Attach")
+
+            Group {
+                switch composerMode {
+                case .text:
+                    TextField("Message Hermes", text: $draft, axis: .vertical)
+                        .accessibilityIdentifier("composerTextField")
+                        .focused($focusedField, equals: .composer)
+                        .font(.system(size: 16))
+                        .foregroundStyle(Color.logosLabel)
+                        .lineLimit(1...4)
+                        .submitLabel(.send)
+                        .textInputAutocapitalization(.sentences)
+                        .onSubmit { submitDraft() }
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 44)
+                        .background(Color.logosBG2, in: Capsule())
+                        .overlay(Capsule().stroke(Color.logosHairline, lineWidth: 0.5))
+                case .paused:
+                    recordPill(isRecording: false)
+                case .recording:
+                    recordPill(isRecording: true)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            Button {
+                handleComposerModeButton()
+            } label: {
+                Image(systemName: composerActionSystemImage)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(Color.logosAmberOn)
+                    .frame(width: 44, height: 44)
+                    .background(Color.logosAmber, in: Circle())
+                    .shadow(color: Color.logosAmberGlow.opacity(composerMode == .text ? 0.25 : 0), radius: 14, x: 0, y: 0)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(composerActionAccessibilityID)
+            .accessibilityLabel(composerActionAccessibilityLabel)
+            .disabled(composerActionDisabled)
+            .opacity(composerActionDisabled ? 0.45 : 1)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in startHoldIfNeeded() }
+                    .onEnded { _ in endHoldIfNeeded() }
+            )
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 34)
+        .background(Color.logosGlass)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.logosHairline)
+                .frame(height: 0.5)
         }
     }
 
-    private var composer: some View {
-        HStack {
-            TextField("Ask Hermes", text: $draft, axis: .vertical)
-                .accessibilityIdentifier("composerTextField")
-                .focused($focusedField, equals: .composer)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...4)
-                .submitLabel(.send)
-                .onSubmit { submitDraft() }
-            Button("Send") {
+    private func recordPill(isRecording: Bool) -> some View {
+        Button {
+            if isRecording {
+                if voiceInput.mode == .hold || voiceInput.pendingMode == .hold {
+                    voiceInput.endHold()
+                } else {
+                    voiceInput.toggleTap()
+                }
+                syncComposerWithVoiceState()
+            } else {
+                voiceInput.toggleTap()
+                if voiceInput.pendingMode != nil || voiceInput.isRecording {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        composerMode = .recording
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isRecording ? "stop.fill" : "circle.fill")
+                    .font(.system(size: isRecording ? 10 : 9, weight: .bold))
+                Text(isRecording ? "Stop" : "Record")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .foregroundStyle(isRecording ? Color.white : Color.logosRed)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+            .background(isRecording ? Color.logosRed : Color.logosRed.opacity(0.14), in: Capsule())
+            .overlay(Capsule().stroke(Color.logosRed.opacity(isRecording ? 0 : 1), lineWidth: 1))
+            .shadow(color: Color.logosRed.opacity(isRecording ? 0.34 : 0), radius: 18, x: 0, y: 0)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(isRecording ? "stopTapToTalkButton" : "recordButton")
+        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+        .disabled(voiceControlsDisabled && !voiceInput.isVoiceInteractionActive)
+        .opacity((voiceControlsDisabled && !voiceInput.isVoiceInteractionActive) ? 0.55 : 1)
+    }
+
+    private var projectSwitcherLayer: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.36)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    closeProjectSwitcher()
+                }
+
+            switcherDropdown
+                .padding(.top, 66)
+                .padding(.horizontal, 12)
+        }
+    }
+
+    private var switcherDropdown: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if isCreatingProject == false {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel3)
+                    TextField("Search projects", text: $switcherSearch)
+                        .focused($focusedField, equals: .switcherSearch)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.logosLabel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text("⌘K")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.logosLabel3)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Color.logosBG3, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .padding(12)
+                .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+            }
+
+            VStack(spacing: 6) {
+                ForEach(displayedProjects) { project in
+                    Button {
+                        client.switchProject(project.projectKey)
+                        closeProjectSwitcher()
+                    } label: {
+                        ProjectRowView(
+                            project: project,
+                            isSelected: project.projectKey == client.activeProjectKey
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(client.connectionState != .connected && project.projectKey != client.activeProjectKey)
+                }
+            }
+
+            Divider().overlay(Color.logosHairline)
+
+            if isCreatingProject {
+                createProjectCard
+            } else {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isCreatingProject = true
+                        switcherSearch = ""
+                    }
+                    focusedField = .newProjectTitle
+                } label: {
+                    Label("New project", systemImage: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.logosAmber)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(Color.logosGlass)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosHairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.42), radius: 24, x: 0, y: 14)
+    }
+
+    private var createProjectCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Project title", text: $newProjectTitle)
+                .accessibilityIdentifier("newProjectTitleField")
+                .focused($focusedField, equals: .newProjectTitle)
+                .font(.system(size: 15, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.logosLabel)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textContentType(.none)
+                .submitLabel(.done)
+                .onSubmit { createProjectFromTitleField() }
+                .padding(.horizontal, 12)
+                .frame(height: 42)
+                .background(Color.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosAmber, lineWidth: 1))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Start from")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel3)
+                    .textCase(.uppercase)
+                HStack(spacing: 6) {
+                    ForEach(ProjectCreateSource.allCases) { source in
+                        Button {
+                            createSource = source
+                        } label: {
+                            Text(source.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(createSource == source ? Color.logosAmberOn : Color.logosLabel2)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 7)
+                                .background(createSource == source ? Color.logosAmber : Color.logosBG2.opacity(0.8), in: Capsule())
+                                .overlay(Capsule().stroke(createSource == source ? Color.clear : Color.logosHairline, lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Cancel") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isCreatingProject = false
+                        newProjectTitle = ""
+                    }
+                }
+                .buttonStyle(SecondaryPillButtonStyle())
+
+                Button("Create & open") {
+                    createProjectFromTitleField()
+                }
+                .buttonStyle(AmberPillButtonStyle())
+                .accessibilityIdentifier("createProjectButton")
+                .disabled(client.connectionState != .connected || newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(12)
+        .background(Color.logosBG1.opacity(0.86), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+    }
+
+    private var attachSheetLayer: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.30)
+                .ignoresSafeArea()
+                .onTapGesture { showAttachSheet = false }
+
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHead(title: "Attach to message")
+                VStack(spacing: 0) {
+                    AttachRow(icon: "photo.on.rectangle", title: "Photo Library", detail: "Stubbed until attachments ship")
+                    AttachRow(icon: "camera", title: "Take Photo", detail: "Stubbed until camera capture ships")
+                    AttachRow(icon: "doc", title: "Files", detail: "Stubbed until file upload ships")
+                    AttachRow(icon: "terminal", title: "Paste code", detail: "Stubbed until rich snippets ship", isLast: true)
+                }
+                .background(Color.logosBG2, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+            }
+            .padding(14)
+            .background(Color.logosGlass)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosHairline, lineWidth: 0.5))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 106)
+            .shadow(color: .black.opacity(0.45), radius: 24, x: 0, y: 12)
+        }
+    }
+
+    private var settingsOverlay: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button {
+                    closeSettings()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                        Text("Logos")
+                            .font(.system(size: 17, weight: .medium))
+                    }
+                    .foregroundStyle(Color.logosAmber)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Text("Settings")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+
+                Spacer()
+                Color.clear.frame(width: 72, height: 1)
+            }
+            .frame(height: 56)
+            .padding(.horizontal, 14)
+            .background(Color.logosGlass)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color.logosHairline).frame(height: 0.5)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    hermesAdapterSection
+                    voiceSettingsSection
+                    notificationSettingsSection
+                    settingsFooter
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 22)
+                .padding(.bottom, 44)
+            }
+            .scrollDismissesKeyboard(.interactively)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.logosBG.ignoresSafeArea())
+        .onAppear {
+            adapterURLDraft = client.settings.urlString
+            pushEnabled = notifications.authorizationStatus.contains("allowed")
+            onDeviceSpeech = voiceInput.voiceEnabled
+        }
+    }
+
+    private var hermesAdapterSection: some View {
+        SettingsSection(title: "Hermes Adapter") {
+            VStack(spacing: 0) {
+                SettingRowChrome(isLast: false) {
+                    HStack(spacing: 12) {
+                        BreathingDot(color: connectionColor, isActive: client.connectionState == .connecting)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(connectionTitle)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Color.logosLabel)
+                                .accessibilityIdentifier("connectionStatusText")
+                            Text(connectionDetail)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.logosLabel3)
+                        }
+                        Spacer()
+                        if client.connectionState == .connected {
+                            Button(connectionActionTitle) { client.disconnect() }
+                                .buttonStyle(RedChipButtonStyle())
+                        } else {
+                            Button(connectionActionTitle) { client.connect() }
+                                .buttonStyle(AmberChipButtonStyle())
+                                .disabled(client.connectionState == .connecting)
+                        }
+                    }
+                }
+
+                adapterURLRow
+                deviceKeyRow
+
+                ExpandableSelectRow(
+                    kind: .hermesProfile,
+                    title: "Hermes profile",
+                    detail: selectedLabel(for: hermesProfile, in: hermesProfileOptions),
+                    selectedValue: $hermesProfile,
+                    expanded: $expandedSettingsPicker,
+                    options: hermesProfileOptions,
+                    monoLabels: true,
+                    isLast: true
+                )
+            }
+            .settingsGroup()
+        }
+    }
+
+    private var adapterURLRow: some View {
+        SettingRowChrome(isLast: false) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Image(systemName: "link")
+                        .settingsIcon()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Adapter")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel)
+                        Text(client.settings.urlString)
+                            .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Button(editingAdapterURL ? "Cancel" : "Edit") {
+                        if editingAdapterURL {
+                            editingAdapterURL = false
+                            adapterURLDraft = client.settings.urlString
+                            focusedField = nil
+                        } else {
+                            adapterURLDraft = client.settings.urlString
+                            editingAdapterURL = true
+                            focusedField = .adapterURL
+                        }
+                    }
+                    .buttonStyle(NeutralChipButtonStyle())
+                }
+
+                if editingAdapterURL {
+                    HStack(spacing: 8) {
+                        TextField(LogosSettings.defaultURLString, text: $adapterURLDraft)
+                            .accessibilityIdentifier("adapterURLField")
+                            .focused($focusedField, equals: .adapterURL)
+                            .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel)
+                            .keyboardType(.URL)
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.done)
+                            .onSubmit { saveAdapterURL() }
+                            .padding(.horizontal, 10)
+                            .frame(height: 38)
+                            .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.logosAmber, lineWidth: 1))
+                        Button("Save") { saveAdapterURL() }
+                            .buttonStyle(AmberChipButtonStyle())
+                    }
+                }
+            }
+        }
+    }
+
+    private var deviceKeyRow: some View {
+        SettingRowChrome(isLast: false) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: "lock.shield")
+                        .settingsIcon()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Device key")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel)
+                        Text(maskedDeviceKey)
+                            .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel3)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        generateDeviceKey()
+                    } label: {
+                        Label("Generate", systemImage: "plus")
+                    }
+                    .buttonStyle(AmberChipButtonStyle())
+                }
+
+                if let generatedDeviceKey {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Save this key — it won't be shown again")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.logosAmber)
+                        Text(groupedSecret(generatedDeviceKey))
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel)
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.black, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.logosAmber.opacity(0.45), lineWidth: 0.8))
+                        HStack(spacing: 8) {
+                            if copiedDeviceKey {
+                                Button("✓ Copied") {
+                                    UIPasteboard.general.string = generatedDeviceKey
+                                }
+                                .buttonStyle(GreenChipButtonStyle())
+                            } else {
+                                Button("Copy key") {
+                                    UIPasteboard.general.string = generatedDeviceKey
+                                    copiedDeviceKey = true
+                                    Task { @MainActor in
+                                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                                        copiedDeviceKey = false
+                                    }
+                                }
+                                .buttonStyle(AmberChipButtonStyle())
+                            }
+                            Button("Done") {
+                                self.generatedDeviceKey = nil
+                                copiedDeviceKey = false
+                            }
+                            .buttonStyle(SecondaryPillButtonStyle())
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.logosAmberSoft2, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.45), lineWidth: 0.8))
+                }
+            }
+        }
+    }
+
+    private var voiceSettingsSection: some View {
+        SettingsSection(title: "Voice") {
+            VStack(spacing: 0) {
+                ExpandableSelectRow(
+                    kind: .defaultInput,
+                    title: "Default input",
+                    detail: selectedLabel(for: defaultInput, in: defaultInputOptions),
+                    selectedValue: $defaultInput,
+                    expanded: $expandedSettingsPicker,
+                    options: defaultInputOptions,
+                    monoLabels: false,
+                    isLast: false
+                )
+
+                SettingRowChrome(isLast: false) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("On-device speech")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Color.logosLabel)
+                            Text(voiceInput.voiceEnabled ? "Available" : voiceInput.availabilityMessage)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.logosLabel3)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        LogosToggle(isOn: $onDeviceSpeech, label: "On-device speech")
+                            .disabled(true)
+                            .opacity(0.65)
+                    }
+                }
+
+                ExpandableSelectRow(
+                    kind: .speakResponses,
+                    title: "Speak responses",
+                    detail: selectedLabel(for: speakMode, in: speakModeOptions),
+                    selectedValue: $speakMode,
+                    expanded: $expandedSettingsPicker,
+                    options: speakModeOptions,
+                    monoLabels: false,
+                    isLast: true
+                )
+            }
+            .settingsGroup()
+        }
+    }
+
+    private var notificationSettingsSection: some View {
+        SettingsSection(title: "Notifications") {
+            VStack(spacing: 0) {
+                SettingRowChrome(isLast: false) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "bell")
+                            .settingsIcon()
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Push notifications")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Color.logosLabel)
+                            Text(pushEnabled ? "Enabled" : notifications.authorizationStatus)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.logosLabel3)
+                                .lineLimit(2)
+                                .accessibilityIdentifier("notificationStatusLabel")
+                        }
+                        Spacer()
+                        LogosToggle(isOn: Binding(
+                            get: { pushEnabled },
+                            set: { newValue in
+                                pushEnabled = newValue
+                                if newValue { notifications.requestAuthorizationAndRegister() }
+                            }
+                        ), label: "Push notifications")
+                        .accessibilityIdentifier("enableNotificationsButton")
+                    }
+                }
+
+                NotificationToggleRow(title: "When Hermes finishes a run", detail: nil, isOn: $notifyDone, enabled: pushEnabled, isLast: false)
+                NotificationToggleRow(title: "When Hermes needs approval", detail: nil, isOn: $notifyApproval, enabled: pushEnabled, isLast: false)
+                NotificationToggleRow(title: "Include summary in push", detail: notifySummary ? "On" : "Off — fetch on reconnect", isOn: $notifySummary, enabled: pushEnabled, isLast: true)
+            }
+            .settingsGroup()
+        }
+    }
+
+    private var settingsFooter: some View {
+        VStack(spacing: 5) {
+            Text("Logos · v0.4.2")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.logosLabel3)
+            Text("plugin · loaded into hermes gateway")
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(Color.logosLabel4)
+            if let route = notifications.lastRoute {
+                Text("last route · \(route.kind) → \(route.projectKey)")
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.logosLabel4)
+                    .accessibilityIdentifier("notificationRouteLabel")
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 2)
+    }
+
+    private func configureRuntime() {
+        client.connectIfRequestedByEnvironment()
+        voiceInput.configureCallbacks(
+            partial: { text, inputID, partialSeq, startedAt in
+                client.sendSpeech(text: text, isFinal: false, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
+            },
+            final: { text, inputID, partialSeq, startedAt in
+                handleFinalVoiceTranscript(text: text, inputID: inputID, partialSeq: partialSeq, startedAt: startedAt)
+            }
+        )
+        notifications.onDeviceToken = { token in
+            client.registerDevice(apnsToken: token)
+        }
+        notifications.onRoute = { route in
+            client.handleNotificationRoute(route)
+        }
+        voiceInput.refreshAvailability()
+        voiceInput.updateTransportAvailable(client.connectionState == .connected)
+        onDeviceSpeech = voiceInput.voiceEnabled
+        pushEnabled = notifications.authorizationStatus.contains("allowed")
+    }
+
+    private func handleFinalVoiceTranscript(text: String, inputID: String, partialSeq: Int, startedAt: Int64) -> Bool {
+        let sent = client.sendSpeech(
+            text: text,
+            isFinal: true,
+            inputID: inputID,
+            partialSeq: partialSeq,
+            startedAtMilliseconds: startedAt
+        )
+        if sent == false {
+            draft = text
+            focusedField = .composer
+            withAnimation(.easeOut(duration: 0.18)) {
+                composerMode = .text
+            }
+        }
+        return sent
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            if client.playbackStatus != nil {
+                proxy.scrollTo("playback", anchor: .bottom)
+            } else if client.ackText != nil {
+                proxy.scrollTo("ack", anchor: .bottom)
+            } else if let error = client.lastError, error.isEmpty == false {
+                proxy.scrollTo("error", anchor: .bottom)
+            } else if voiceInput.isRecording || voiceInput.isFinalizingTranscript {
+                proxy.scrollTo("voice-draft", anchor: .bottom)
+            } else if let approvalID = client.approvalCard?.id {
+                proxy.scrollTo(approvalID, anchor: .bottom)
+            } else if let clarifyID = client.clarifyCard?.id {
+                proxy.scrollTo(clarifyID, anchor: .bottom)
+            } else if let last = client.messages.last {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
+    }
+
+    private func startHoldIfNeeded() {
+        guard defaultInput == "hold", composerMode == .text, hasComposerDraft == false else { return }
+        guard voiceControlsDisabled == false || voiceInput.isVoiceInteractionActive else { return }
+        if voiceInput.isRecording == false, voiceInput.pendingMode == nil {
+            voiceInput.startHold()
+            if voiceInput.pendingMode != nil || voiceInput.isRecording {
+                withAnimation(.easeOut(duration: 0.18)) { composerMode = .recording }
+            }
+        }
+    }
+
+    private func endHoldIfNeeded() {
+        guard defaultInput == "hold" else { return }
+        if voiceInput.isRecording || voiceInput.pendingMode == .hold {
+            suppressNextHoldButtonAction = true
+            voiceInput.endHold()
+        }
+        syncComposerWithVoiceState()
+    }
+
+    private func syncComposerWithVoiceState() {
+        guard composerMode == .recording else { return }
+        if voiceInput.mode == .idle, voiceInput.pendingMode == nil, voiceInput.isFinalizingTranscript == false {
+            withAnimation(.easeOut(duration: 0.18)) {
+                composerMode = ComposerModePolicy.modeAfterVoiceFinished(current: composerMode)
+            }
+        }
+    }
+
+    private func handleComposerModeButton() {
+        if suppressNextHoldButtonAction {
+            suppressNextHoldButtonAction = false
+            return
+        }
+        switch composerMode {
+        case .text:
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                 submitDraft()
+                return
             }
-            .accessibilityIdentifier("sendButton")
-            .disabled(client.connectionState != .connected || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            focusedField = nil
+            if defaultInput == "hold" {
+                if voiceInput.isRecording || voiceInput.pendingMode == .hold {
+                    voiceInput.endHold()
+                    syncComposerWithVoiceState()
+                } else {
+                    voiceInput.startHold()
+                    if voiceInput.pendingMode != nil || voiceInput.isRecording {
+                        withAnimation(.easeOut(duration: 0.18)) { composerMode = .recording }
+                    }
+                }
+                return
+            }
+            withAnimation(.easeOut(duration: 0.18)) { composerMode = .paused }
+        case .paused:
+            withAnimation(.easeOut(duration: 0.18)) { composerMode = .text }
+        case .recording:
+            voiceInput.cancel()
+            withAnimation(.easeOut(duration: 0.18)) { composerMode = .text }
         }
     }
 
-    private func createProjectFromTitleField() {
-        if client.createProject(title: newProjectTitle) {
-            newProjectTitle = ""
+    private func submitDraft() {
+        if client.sendText(draft) {
+            draft = ""
             focusedField = nil
         }
     }
@@ -419,35 +1062,1074 @@ struct ContentView: View {
         }
     }
 
-    private func submitDraft() {
-        if client.sendText(draft) {
-            draft = ""
-            focusedField = nil
+    private func createProjectFromTitleField() {
+        if client.createProject(title: newProjectTitle) {
+            let createdTitle = newProjectTitle
+            newProjectTitle = ""
+            isCreatingProject = false
+            closeProjectSwitcher()
+            justCreatedProject = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_800_000_000)
+                if justCreatedProject || activeProjectTitle == createdTitle {
+                    justCreatedProject = false
+                }
+            }
+        }
+    }
+
+    private func saveAdapterURL() {
+        let trimmed = adapterURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        client.settings.urlString = trimmed
+        editingAdapterURL = false
+        focusedField = nil
+    }
+
+    private func generateDeviceKey() {
+        let key = (0..<32).map { _ in String(format: "%x", Int.random(in: 0..<16)) }.joined()
+        client.settings.secret = key
+        generatedDeviceKey = key
+        copiedDeviceKey = false
+    }
+
+    private func closeProjectSwitcher() {
+        withAnimation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.24)) {
+            showProjectSwitcher = false
+            isCreatingProject = false
+            switcherSearch = ""
+        }
+        focusedField = nil
+    }
+
+    private func closeSettings() {
+        withAnimation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.26)) {
+            showSettings = false
+            expandedSettingsPicker = nil
+            editingAdapterURL = false
+            generatedDeviceKey = nil
+            copiedDeviceKey = false
+        }
+        focusedField = nil
+    }
+
+    private func closeTransientOverlays(exceptProjectSwitcher: Bool = false, exceptAttachSheet: Bool = false) {
+        if !exceptProjectSwitcher { showProjectSwitcher = false }
+        if !exceptAttachSheet { showAttachSheet = false }
+    }
+
+    private var shouldShowRunControl: Bool {
+        switch client.runStatus {
+        case .running, .queued, .awaitingApproval, .awaitingClarification:
+            return true
+        case .idle, .cancelling, .error:
+            return false
+        }
+    }
+
+    private var runStatusDisplayText: String {
+        client.runStatus.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    private var hasComposerDraft: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private var composerActionSystemImage: String {
+        switch composerMode {
+        case .text:
+            return hasComposerDraft ? "arrow.up" : "mic"
+        case .paused, .recording:
+            return "keyboard"
+        }
+    }
+
+    private var composerActionAccessibilityID: String {
+        switch composerMode {
+        case .text:
+            return hasComposerDraft ? "sendButton" : "tapToTalkButton"
+        case .paused, .recording:
+            return "keyboardModeButton"
+        }
+    }
+
+    private var composerActionAccessibilityLabel: String {
+        switch composerMode {
+        case .text:
+            if hasComposerDraft { return "Send message" }
+            return defaultInput == "hold" ? "Hold to talk" : "Start voice mode"
+        case .paused:
+            return "Switch to keyboard"
+        case .recording:
+            return "Cancel voice input and switch to keyboard"
+        }
+    }
+
+    private var composerActionDisabled: Bool {
+        composerMode == .text && hasComposerDraft == false && defaultInput == "text"
+    }
+
+    private var voiceControlsDisabled: Bool {
+        VoiceControlPolicy.controlsDisabled(
+            voiceEnabled: voiceInput.voiceEnabled,
+            connected: client.connectionState == .connected,
+            isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
+            isFinalizing: voiceInput.isFinalizingTranscript
+        )
+    }
+
+    private var activeProjectTitle: String {
+        client.projects.first(where: { $0.projectKey == client.activeProjectKey })?.title
+            ?? client.activeProjectKey
+    }
+
+    private var allProjects: [LogosProject] {
+        if client.projects.isEmpty {
+            return [LogosProject(projectKey: client.activeProjectKey, title: client.activeProjectKey, currentSessionID: nil, lastPreview: "Current session")]
+        }
+        if client.projects.contains(where: { $0.projectKey == client.activeProjectKey }) {
+            return client.projects
+        }
+        return [LogosProject(projectKey: client.activeProjectKey, title: client.activeProjectKey, currentSessionID: nil, lastPreview: "Current session")] + client.projects
+    }
+
+    private var displayedProjects: [LogosProject] {
+        let base = isCreatingProject ? Array(allProjects.prefix(3)) : allProjects
+        let query = switcherSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard query.isEmpty == false, isCreatingProject == false else { return base }
+        return base.filter { project in
+            project.title.lowercased().contains(query)
+                || project.projectKey.lowercased().contains(query)
+                || (project.lastPreview?.lowercased().contains(query) ?? false)
+        }
+    }
+
+    private var statusChipText: String {
+        if justCreatedProject { return "Project created · ready" }
+        switch client.runStatus {
+        case .idle:
+            return client.connectionState == .connected ? "Idle · live" : "Idle · disconnected"
+        case .running, .queued:
+            return "Hermes is working…"
+        case .awaitingApproval:
+            return "Approval needed"
+        case .awaitingClarification:
+            return "Clarification needed"
+        case .cancelling:
+            return "Stopping run…"
+        case .error:
+            return "Run error"
+        }
+    }
+
+    private var statusChipColor: Color {
+        if justCreatedProject { return .logosGreen }
+        switch client.runStatus {
+        case .idle:
+            return client.connectionState == .connected ? .logosGreen : .logosLabel3
+        case .running, .queued, .cancelling:
+            return .logosAmber
+        case .awaitingApproval, .awaitingClarification:
+            return .logosYellow
+        case .error:
+            return .logosRed
+        }
+    }
+
+    private var connectionTitle: String {
+        switch client.connectionState {
+        case .connected: return "Connected"
+        case .connecting: return "Connecting…"
+        case .disconnected: return "Disconnected"
+        case .error: return "Error"
+        }
+    }
+
+    private var connectionDetail: String {
+        if client.settings.urlString.contains("tail")
+            || client.settings.urlString.contains(".ts")
+            || client.settings.urlString.contains("ryans-mac-studio") {
+            return "via Tailscale"
+        }
+        return client.settings.urlString
+    }
+
+    private var connectionActionTitle: String {
+        switch client.connectionState {
+        case .connected: return "Disconnect"
+        case .connecting: return "Connecting…"
+        case .disconnected, .error: return "Connect"
         }
     }
 
     private var connectionColor: Color {
         switch client.connectionState {
-        case .connected: return .green
-        case .connecting: return .orange
-        case .error: return .red
-        case .disconnected: return .gray
+        case .connected: return .logosGreen
+        case .connecting: return .logosAmber
+        case .disconnected: return .logosLabel3
+        case .error: return .logosRed
         }
     }
 
-    private var statusIcon: String {
-        switch client.runStatus {
-        case .idle: return "checkmark.circle"
-        case .running, .queued: return "hourglass"
-        case .awaitingApproval: return "exclamationmark.triangle"
-        case .awaitingClarification: return "questionmark.circle"
-        case .cancelling: return "xmark.circle"
-        case .error: return "exclamationmark.octagon"
+    private var maskedDeviceKey: String {
+        let suffix = String(client.settings.secret.suffix(4))
+        let shownSuffix = suffix.isEmpty ? "none" : suffix
+        return "\(client.settings.deviceID) · ••••••\(shownSuffix)"
+    }
+
+    private func groupedSecret(_ secret: String) -> String {
+        stride(from: 0, to: secret.count, by: 4).map { index in
+            let start = secret.index(secret.startIndex, offsetBy: index)
+            let end = secret.index(start, offsetBy: min(4, secret.distance(from: start, to: secret.endIndex)), limitedBy: secret.endIndex) ?? secret.endIndex
+            return String(secret[start..<end])
+        }.joined(separator: " ")
+    }
+
+    private func selectedLabel(for value: String, in options: [PickerOption]) -> String {
+        options.first(where: { $0.value == value })?.label ?? value
+    }
+
+    private var hermesProfileOptions: [PickerOption] {
+        [
+            PickerOption(value: "default", label: "default", subtitle: "Balanced · safe defaults"),
+            PickerOption(value: "focused-coding", label: "focused-coding", subtitle: "Long-running tasks · less chatter"),
+            PickerOption(value: "planner", label: "planner", subtitle: "Thinks before acting · proposes plans"),
+            PickerOption(value: "ops", label: "ops", subtitle: "Shell + infra · extra approvals"),
+            PickerOption(value: "research", label: "research", subtitle: "Reads widely · cites sources")
+        ]
+    }
+
+    private var defaultInputOptions: [PickerOption] {
+        [
+            PickerOption(value: "tap", label: "Tap to talk", subtitle: "Tap mic, tap Record, tap Stop"),
+            PickerOption(value: "hold", label: "Hold to talk", subtitle: "Press and hold the mic to record"),
+            PickerOption(value: "always", label: "Always listening", subtitle: "Wake word · \"Hey Logos\""),
+            PickerOption(value: "text", label: "Text only", subtitle: "Hide the mic from the composer")
+        ]
+    }
+
+    private var speakModeOptions: [PickerOption] {
+        [
+            PickerOption(value: "off", label: "Off", subtitle: "Silent · text only"),
+            PickerOption(value: "summary", label: "Short summary only", subtitle: "One-line spoken recap"),
+            PickerOption(value: "full", label: "Full response", subtitle: "Read every assistant turn aloud"),
+            PickerOption(value: "urgent", label: "Only approvals", subtitle: "Speak when Hermes needs you")
+        ]
+    }
+}
+
+private enum FocusedField: Hashable {
+    case composer
+    case switcherSearch
+    case newProjectTitle
+    case adapterURL
+    case clarifyAnswer
+}
+
+enum ComposerMode: Equatable {
+    case text
+    case paused
+    case recording
+}
+
+enum ComposerModePolicy {
+    static func modeAfterVoiceFinished(current: ComposerMode) -> ComposerMode {
+        .paused
+    }
+}
+
+private enum ProjectCreateSource: String, CaseIterable, Identifiable {
+    case blank
+    case resume
+    case lastDesktop
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .blank: return "Blank"
+        case .resume: return "Resume by title"
+        case .lastDesktop: return "Last desktop session"
         }
     }
+}
+
+private enum SettingsPickerKind: Hashable {
+    case hermesProfile
+    case defaultInput
+    case speakResponses
+}
+
+private struct PickerOption: Identifiable, Hashable {
+    var id: String { value }
+    let value: String
+    let label: String
+    let subtitle: String
+}
+
+private struct EmptyThreadGreeting: View {
+    let connectionState: LogosConnectionState
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(connectionState == .connected ? "Hermes is on the line." : "Connect Logos to Hermes.")
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(Color.logosLabel)
+                Text(connectionState == .connected ? "Send a message or tap the mic to start a turn." : "Open Settings to set the adapter URL and device key.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.logosLabel2)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.logosBG2, in: ChatBubbleShape(isUser: false))
+            Spacer(minLength: 48)
+        }
+    }
+}
+
+private struct DraftUserBubble: View {
+    let text: String
+    @State private var shimmerPhase = false
+    @State private var caretVisible = true
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            Spacer(minLength: 48)
+            HStack(alignment: .lastTextBaseline, spacing: 3) {
+                Text(text)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.logosAmberOn)
+                    .overlay {
+                        LinearGradient(
+                            colors: [Color.logosAmberOn.opacity(0.55), Color.white.opacity(0.85), Color.logosAmberOn.opacity(0.55)],
+                            startPoint: shimmerPhase ? .trailing : .leading,
+                            endPoint: shimmerPhase ? .leading : .trailing
+                        )
+                        .blendMode(.screen)
+                        .mask(Text(text).font(.system(size: 16, weight: .medium)))
+                    }
+                Rectangle()
+                    .fill(Color.logosAmberOn)
+                    .frame(width: 2, height: 16)
+                    .opacity(caretVisible ? 1 : 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
+            .background(Color.logosAmber, in: ChatBubbleShape(isUser: true))
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 2.4).repeatForever(autoreverses: false)) { shimmerPhase.toggle() }
+            withAnimation(.easeInOut(duration: 0.65).repeatForever(autoreverses: true)) { caretVisible.toggle() }
+        }
+    }
+}
+
+private struct ThinkingBubble: View {
+    let text: String
+    @State private var shimmerPhase = false
+
+    var body: some View {
+        HStack {
+            Text(text)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.logosLabel3)
+                .overlay {
+                    LinearGradient(
+                        colors: [Color.logosLabel3, Color.logosLabel, Color.logosLabel3],
+                        startPoint: shimmerPhase ? .trailing : .leading,
+                        endPoint: shimmerPhase ? .leading : .trailing
+                    )
+                    .mask(Text(text).font(.system(size: 13, weight: .medium)))
+                }
+                .onAppear {
+                    withAnimation(.linear(duration: 2.4).repeatForever(autoreverses: false)) { shimmerPhase.toggle() }
+                }
+            Spacer(minLength: 48)
+        }
+        .padding(.horizontal, 2)
+    }
+}
+
+private struct ToolStrip: View {
+    let label: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color.logosLabel2)
+            Text("·")
+                .foregroundStyle(Color.logosLabel3)
+            Text(detail)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.logosLabel3)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.clear)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.5))
+    }
+}
+
+private struct ErrorStrip: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(Color.logosRed)
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.logosRed)
+                .lineLimit(3)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.logosRed.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosRed.opacity(0.25), lineWidth: 0.5))
+    }
+}
+
+private struct RunControlStrip: View {
+    let statusText: String
+    let canStop: Bool
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(statusText, systemImage: "hourglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.logosAmber)
+            Spacer()
+            Button {
+                onStop()
+            } label: {
+                Label("Stop", systemImage: "stop.fill")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(RedChipButtonStyle())
+            .accessibilityIdentifier("stopRunButton")
+            .accessibilityLabel("Stop current Hermes run")
+            .disabled(!canStop)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.logosAmberSoft2, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.24), lineWidth: 0.5))
+    }
+}
+
+private struct ApprovalCardView: View {
+    let approval: ApprovalCard
+    let isPending: Bool
+    let isConnected: Bool
+    let onApprove: () -> Void
+    let onDeny: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 7) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Hermes needs approval")
+                    .font(.system(size: 12, weight: .bold))
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(Color.logosAmber)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(approval.title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                Text(approval.summary)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color.logosLabel2)
+                Text("Project: \(approval.projectKey)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.logosLabel3)
+            }
+
+            if approval.commandPreview.isEmpty == false {
+                CommandPreview(command: approval.commandPreview)
+            }
+
+            if approval.risk.isEmpty == false {
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text(approval.risk)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.logosYellow)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.logosYellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+            }
+
+            HStack(spacing: 10) {
+                Button(isPending ? "Sent" : "Deny") { onDeny() }
+                    .buttonStyle(SecondaryPillButtonStyle())
+                    .disabled(!isConnected || isPending)
+                Button(isPending ? "Waiting…" : "Approve") { onApprove() }
+                    .buttonStyle(AmberPillButtonStyle())
+                    .disabled(!isConnected || isPending)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.logosBG2, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosAmber.opacity(0.28), lineWidth: 0.7))
+        .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 8)
+    }
+}
+
+private struct ClarifyCardView: View {
+    let clarify: ClarifyCard
+    @Binding var answer: String
+    let isPending: Bool
+    let isConnected: Bool
+    var focused: FocusState<FocusedField?>.Binding
+    let onChoice: (String) -> Void
+    let onFreeText: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 7) {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Clarification")
+                    .font(.system(size: 12, weight: .bold))
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(Color.logosTeal)
+
+            Text(clarify.question)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.logosLabel)
+            Text("Project: \(clarify.projectKey)")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.logosLabel3)
+
+            VStack(spacing: 6) {
+                ForEach(clarify.choices, id: \.self) { choice in
+                    Button {
+                        onChoice(choice)
+                    } label: {
+                        HStack {
+                            Text(choice)
+                                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.logosLabel)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color.logosBG3.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isConnected || isPending)
+                }
+            }
+
+            if clarify.allowFreeText {
+                HStack(spacing: 8) {
+                    TextField("Answer", text: $answer)
+                        .accessibilityIdentifier("clarifyAnswerField")
+                        .focused(focused, equals: .clarifyAnswer)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.logosLabel)
+                        .submitLabel(.send)
+                        .onSubmit(onFreeText)
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(Color.logosBG1, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.5))
+                        .disabled(isPending)
+                    Button(isPending ? "Sent" : "Send") { onFreeText() }
+                        .buttonStyle(AmberChipButtonStyle())
+                        .disabled(!isConnected || isPending || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.logosBG2, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosTeal.opacity(0.28), lineWidth: 0.7))
+        .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 8)
+    }
+}
+
+private struct CommandPreview: View {
+    let command: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("cwd · current project")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.logosLabel3)
+            Text(command)
+                .font(.system(size: 12.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(Color.logosLabel)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(Color.black, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.5))
+    }
+}
+
+private struct ProjectRowView: View {
+    let project: LogosProject
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(project.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                    .lineLimit(1)
+                Text(project.lastPreview ?? project.projectKey)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(Color.logosLabel3)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color.logosAmber)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(isSelected ? Color.logosAmberSoft2 : Color.logosBG2.opacity(0.56), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(isSelected ? Color.logosAmber.opacity(0.55) : Color.logosHairline, lineWidth: 0.7))
+    }
+}
+
+private struct AttachRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+    var isLast = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .settingsIcon()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.logosLabel3)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .opacity(0.62)
+        .overlay(alignment: .bottom) {
+            if !isLast {
+                Rectangle().fill(Color.logosHairline).frame(height: 0.5).padding(.leading, 44)
+            }
+        }
+    }
+}
+
+private struct SectionHead: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .bold))
+            .tracking(0.4)
+            .foregroundStyle(Color.logosLabel3)
+            .textCase(.uppercase)
+            .padding(.horizontal, 2)
+    }
+}
+
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHead(title: title)
+            content
+        }
+    }
+}
+
+private struct SettingRowChrome<Content: View>: View {
+    var isLast: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .bottom) {
+                if !isLast {
+                    Rectangle()
+                        .fill(Color.logosHairline)
+                        .frame(height: 0.5)
+                        .padding(.leading, 14)
+                }
+            }
+    }
+}
+
+private struct ExpandableSelectRow: View {
+    let kind: SettingsPickerKind
+    let title: String
+    let detail: String
+    @Binding var selectedValue: String
+    @Binding var expanded: SettingsPickerKind?
+    let options: [PickerOption]
+    let monoLabels: Bool
+    let isLast: Bool
+
+    private var isExpanded: Bool { expanded == kind }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    expanded = isExpanded ? nil : kind
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel)
+                        Text(detail)
+                            .font(.system(size: 13))
+                            .foregroundStyle(isExpanded ? Color.logosAmber : Color.logosLabel3)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel3)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(isExpanded ? Color.logosAmberSoft2.opacity(0.55) : Color.clear)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                VStack(spacing: 2) {
+                    ForEach(options) { option in
+                        Button {
+                            selectedValue = option.value
+                            withAnimation(.easeOut(duration: 0.18)) { expanded = nil }
+                        } label: {
+                            HStack(spacing: 10) {
+                                RadioMark(isSelected: selectedValue == option.value)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.label)
+                                        .font(.system(size: 14, weight: selectedValue == option.value ? .semibold : .medium, design: monoLabels ? .monospaced : .default))
+                                        .foregroundStyle(Color.logosLabel)
+                                    Text(option.subtitle)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Color.logosLabel3)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 10)
+                            .background(selectedValue == option.value ? Color.logosAmberSoft : Color.logosBG1.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selectedValue == option.value ? Color.logosAmber.opacity(0.55) : Color.logosHairline, lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if !isLast && !isExpanded {
+                Rectangle()
+                    .fill(Color.logosHairline)
+                    .frame(height: 0.5)
+                    .padding(.leading, 14)
+            }
+        }
+    }
+}
+
+private struct NotificationToggleRow: View {
+    let title: String
+    let detail: String?
+    @Binding var isOn: Bool
+    let enabled: Bool
+    let isLast: Bool
+
+    var body: some View {
+        SettingRowChrome(isLast: isLast) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel)
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.logosLabel3)
+                    }
+                }
+                Spacer()
+                LogosToggle(isOn: $isOn, label: title)
+                    .disabled(!enabled)
+            }
+            .opacity(enabled ? 1 : 0.45)
+        }
+    }
+}
+
+private struct LogosToggle: View {
+    @Binding var isOn: Bool
+    var label: String = "Toggle"
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button {
+            guard isEnabled else { return }
+            withAnimation(.linear(duration: 0.2)) { isOn.toggle() }
+        } label: {
+            RoundedRectangle(cornerRadius: 999)
+                .fill(isOn ? Color.logosGreen : Color.logosBG4)
+                .frame(width: 51, height: 31)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 27, height: 27)
+                        .padding(2)
+                        .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityHint(isEnabled ? "Double-tap to toggle" : "Unavailable")
+        .accessibilityAddTraits(.isButton)
+        .opacity(isEnabled ? 1 : 0.7)
+    }
+}
+
+private struct RadioMark: View {
+    let isSelected: Bool
+
+    var body: some View {
+        Circle()
+            .fill(isSelected ? Color.logosAmber : Color.clear)
+            .frame(width: 18, height: 18)
+            .overlay {
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white)
+                } else {
+                    Circle().stroke(Color.logosLabel4, lineWidth: 1.5)
+                }
+            }
+    }
+}
+
+private struct BreathingDot: View {
+    let color: Color
+    let isActive: Bool
+    @State private var pulse = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .scaleEffect(isActive && pulse ? 1.35 : 1)
+            .opacity(isActive && pulse ? 0.55 : 1)
+            .onAppear { updatePulse() }
+            .onChange(of: isActive) { _, _ in updatePulse() }
+    }
+
+    private func updatePulse() {
+        if isActive {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        } else {
+            pulse = false
+        }
+    }
+}
+
+private struct ChatBubbleShape: Shape {
+    let isUser: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let topLeft: CGFloat = 20
+        let topRight: CGFloat = 20
+        let bottomLeft: CGFloat = isUser ? 20 : 6
+        let bottomRight: CGFloat = isUser ? 6 : 20
+
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + topLeft, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - topRight, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + topRight), control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - bottomRight))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - bottomRight, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + bottomLeft, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - bottomLeft), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + topLeft))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + topLeft, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct AmberPillButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Color.logosAmberOn)
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .frame(maxWidth: .infinity)
+            .background(Color.logosAmber.opacity(configuration.isPressed ? 0.78 : 1), in: Capsule())
+    }
+}
+
+private struct SecondaryPillButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Color.logosLabel)
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .frame(maxWidth: .infinity)
+            .background(Color.clear, in: Capsule())
+            .overlay(Capsule().stroke(Color.logosHairline, lineWidth: 0.7))
+            .opacity(configuration.isPressed ? 0.75 : 1)
+    }
+}
+
+private struct AmberChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color.logosAmberOn)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Color.logosAmber.opacity(configuration.isPressed ? 0.78 : 1), in: Capsule())
+    }
+}
+
+private struct GreenChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color.logosAmberOn)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Color.logosGreen.opacity(configuration.isPressed ? 0.78 : 1), in: Capsule())
+    }
+}
+
+private struct RedChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color.logosRed)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Color.logosRed.opacity(0.14), in: Capsule())
+            .overlay(Capsule().stroke(Color.logosRed.opacity(0.35), lineWidth: 0.7))
+    }
+}
+
+private struct NeutralChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color.logosLabel)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Color.logosBG3.opacity(configuration.isPressed ? 0.75 : 1), in: Capsule())
+    }
+}
+
+private extension View {
+    func settingsGroup() -> some View {
+        self
+            .background(Color.logosBG2, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+    }
+}
+
+private extension Image {
+    func settingsIcon() -> some View {
+        self
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(Color.logosLabel2)
+            .frame(width: 22, height: 22)
+    }
+}
+
+private extension Color {
+    init(hex: UInt32, opacity: Double = 1) {
+        self.init(
+            .sRGB,
+            red: Double((hex >> 16) & 0xff) / 255,
+            green: Double((hex >> 8) & 0xff) / 255,
+            blue: Double(hex & 0xff) / 255,
+            opacity: opacity
+        )
+    }
+
+    static let logosBG = Color(hex: 0x000000)
+    static let logosBG1 = Color(hex: 0x0E0E10)
+    static let logosBG2 = Color(hex: 0x1C1C1E)
+    static let logosBG3 = Color(hex: 0x2C2C2E)
+    static let logosBG4 = Color(hex: 0x3A3A3C)
+    static let logosGlass = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255, opacity: 0.72)
+    static let logosGlassThin = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255, opacity: 0.45)
+    static let logosSep = Color(red: 84 / 255, green: 84 / 255, blue: 88 / 255, opacity: 0.65)
+    static let logosSepFaint = Color(red: 84 / 255, green: 84 / 255, blue: 88 / 255, opacity: 0.35)
+    static let logosHairline = Color.white.opacity(0.08)
+    static let logosLabel = Color(hex: 0xFFFFFF)
+    static let logosLabel2 = Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255, opacity: 0.60)
+    static let logosLabel3 = Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255, opacity: 0.30)
+    static let logosLabel4 = Color(red: 235 / 255, green: 235 / 255, blue: 245 / 255, opacity: 0.16)
+    static let logosAmber = Color(hex: 0xFFAA33)
+    static let logosAmberBright = Color(hex: 0xFFC470)
+    static let logosAmberDeep = Color(hex: 0xE8901C)
+    static let logosAmberSoft = Color(red: 255 / 255, green: 170 / 255, blue: 51 / 255, opacity: 0.18)
+    static let logosAmberSoft2 = Color(red: 255 / 255, green: 170 / 255, blue: 51 / 255, opacity: 0.08)
+    static let logosAmberGlow = Color(red: 255 / 255, green: 170 / 255, blue: 51 / 255, opacity: 0.45)
+    static let logosAmberOn = Color(hex: 0x1A1306)
+    static let logosGreen = Color(hex: 0x30D158)
+    static let logosRed = Color(hex: 0xFF453A)
+    static let logosYellow = Color(hex: 0xFFD60A)
+    static let logosBlue = Color(hex: 0x0A84FF)
+    static let logosTeal = Color(hex: 0x64D2FF)
 }
 
 #Preview {
     ContentView()
         .environmentObject(LogosClient())
+        .environmentObject(NotificationCoordinator.shared)
 }

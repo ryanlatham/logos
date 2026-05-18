@@ -43,6 +43,16 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(settings.autoConnect)
     }
 
+    func testSettingsDefaultAdapterURLUsesTailscaleMagicDNS() throws {
+        let suiteName = "LogosSettingsDefaultAdapterURL-\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = LogosSettings(environment: [:], userDefaults: userDefaults)
+
+        XCTAssertEqual(settings.urlString, "ws://ryans-mac-studio:8765")
+    }
+
     func testHelloSignatureMatchesServerCanonicalHMAC() throws {
         let signature = LogosAuthentication.signHello(
             secret: "dev-secret",
@@ -67,6 +77,46 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(detector.observe(energy: 0.01, at: 11.0), .autoStop(reason: .trailingSilence))
     }
 
+    func testTapToTalkDefaultAllowsNaturalMidSentencePause() throws {
+        var detector = TapToTalkSilenceDetector()
+        detector.start(at: 30.0)
+
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 30.1), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 31.4), .continueListening)
+    }
+
+    func testTapToTalkDefaultStopsAfterLongTrailingSilence() throws {
+        var detector = TapToTalkSilenceDetector()
+        detector.start(at: 40.0)
+
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 40.1), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 42.7), .autoStop(reason: .trailingSilence))
+    }
+
+    func testTapToTalkDefaultTreatsQuietSpeechAsActivity() throws {
+        var detector = TapToTalkSilenceDetector()
+        detector.start(at: 50.0)
+
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 50.1), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.018, at: 51.4), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 52.8), .continueListening)
+    }
+
+    func testTapToTalkASRProgressExtendsSilenceWindow() throws {
+        var detector = TapToTalkSilenceDetector(
+            energyThreshold: 0.05,
+            trailingSilenceSeconds: 1.0,
+            initialSilenceSeconds: 2.0
+        )
+        detector.start(at: 60.0)
+
+        XCTAssertEqual(detector.observe(energy: 0.12, at: 60.1), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 61.0), .continueListening)
+        detector.markSpeech(at: 61.05)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 61.9), .continueListening)
+        XCTAssertEqual(detector.observe(energy: 0.001, at: 62.2), .autoStop(reason: .trailingSilence))
+    }
+
     func testTapToTalkStopsAfterInitialSilenceWithoutSpeech() throws {
         var detector = TapToTalkSilenceDetector(
             energyThreshold: 0.05,
@@ -87,6 +137,13 @@ final class LogosModelTests: XCTestCase {
         let enabled = VoiceRecognitionPolicy.resolve(supportsOnDeviceRecognition: true)
         XCTAssertTrue(enabled.voiceEnabled)
         XCTAssertTrue(enabled.requiresOnDeviceRecognition)
+
+        let temporarilyUnavailable = VoiceRecognitionPolicy.resolve(
+            supportsOnDeviceRecognition: true,
+            isRecognizerAvailable: false
+        )
+        XCTAssertFalse(temporarilyUnavailable.voiceEnabled)
+        XCTAssertTrue(temporarilyUnavailable.requiresOnDeviceRecognition)
     }
 
     func testVoiceControlsStayEnabledToStopActiveRecordingAfterDisconnect() throws {
@@ -163,6 +220,133 @@ final class LogosModelTests: XCTestCase {
         let speech = try XCTUnwrap(info["NSSpeechRecognitionUsageDescription"] as? String)
         XCTAssertTrue(mic.contains("microphone"))
         XCTAssertTrue(speech.contains("On-device"))
+    }
+
+    func testComposerReturnsToPausedAudioModeAfterVoiceTurnFinishes() throws {
+        XCTAssertEqual(ComposerModePolicy.modeAfterVoiceFinished(current: .recording), .paused)
+    }
+
+    func testFinalizingSpeechErrorWithoutInterimTranscriptKeepsWaitingForBufferedFinal() throws {
+        XCTAssertEqual(
+            VoiceFinalizationPolicy.actionForRecognitionError(isFinalizing: true, hasBufferedTranscript: false),
+            .waitForFinalResult
+        )
+    }
+
+    func testFinalizingSpeechErrorWithBufferedTranscriptSendsBestTranscript() throws {
+        XCTAssertEqual(
+            VoiceFinalizationPolicy.actionForRecognitionError(isFinalizing: true, hasBufferedTranscript: true),
+            .finishWithBestTranscript
+        )
+    }
+
+    func testActiveSpeechErrorOutsideFinalizationCancelsRecognition() throws {
+        XCTAssertEqual(
+            VoiceFinalizationPolicy.actionForRecognitionError(isFinalizing: false, hasBufferedTranscript: true),
+            .cancelRecognition
+        )
+    }
+
+    func testFinalizationFallbackSendsBufferedPartialAfterAutoStopWithoutASRFinal() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.noteTranscript("hello Hermes", isFinal: false), .keepWaiting)
+        XCTAssertEqual(finalization.begin(sendFinal: true, transcript: "hello Hermes"), .scheduleBestTranscriptFallback)
+        XCTAssertEqual(finalization.timerFired(.bestTranscriptGrace), .sendFinal)
+        XCTAssertEqual(finalization.timerFired(.hardTimeout), .keepWaiting)
+    }
+
+    func testFinalASRResultBeatsBestTranscriptFallback() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.noteTranscript("hello Her", isFinal: false), .keepWaiting)
+        XCTAssertEqual(finalization.begin(sendFinal: true, transcript: "hello Her"), .scheduleBestTranscriptFallback)
+        XCTAssertEqual(finalization.noteTranscript("hello Hermes", isFinal: true), .sendFinal)
+        XCTAssertEqual(finalization.timerFired(.bestTranscriptGrace), .keepWaiting)
+    }
+
+    func testFinalizingRecognitionErrorWithBufferedTranscriptSendsOnce() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.noteTranscript("ship it", isFinal: false), .keepWaiting)
+        XCTAssertEqual(finalization.begin(sendFinal: true, transcript: "ship it"), .scheduleBestTranscriptFallback)
+        XCTAssertEqual(finalization.recognitionError(), .sendFinal)
+        XCTAssertEqual(finalization.timerFired(.bestTranscriptGrace), .keepWaiting)
+    }
+
+    func testEmptyFinalizationFinishesWithoutSending() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.begin(sendFinal: true, transcript: "   "), .keepWaiting)
+        XCTAssertEqual(finalization.timerFired(.hardTimeout), .finishWithoutSending)
+        XCTAssertEqual(finalization.recognitionError(), .keepWaiting)
+    }
+
+    func testDuplicateFinalizationCallbacksDoNotDoubleSend() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.noteTranscript("only once", isFinal: false), .keepWaiting)
+        XCTAssertEqual(finalization.begin(sendFinal: true, transcript: "only once"), .scheduleBestTranscriptFallback)
+        XCTAssertEqual(finalization.timerFired(.bestTranscriptGrace), .sendFinal)
+        XCTAssertEqual(finalization.recognitionError(), .keepWaiting)
+        XCTAssertEqual(finalization.noteTranscript("only once", isFinal: true), .keepWaiting)
+    }
+
+    func testActiveFinalizationErrorOutsideStopCancelsRecognition() throws {
+        var finalization = VoiceFinalizationState()
+
+        XCTAssertEqual(finalization.recognitionError(), .cancelRecognition)
+    }
+
+    @MainActor
+    func testDisconnectedFinalSpeechReturnsFalseWithoutAppendingPendingMessage() throws {
+        let client = LogosClient()
+        client.disconnect()
+        let before = client.messages
+
+        let sent = client.sendSpeech(
+            text: "hello Hermes",
+            isFinal: true,
+            inputID: "voice-turn-1",
+            partialSeq: 2,
+            startedAtMilliseconds: 123
+        )
+
+        XCTAssertFalse(sent)
+        XCTAssertEqual(client.messages, before)
+    }
+
+    func testPendingVoiceMessageUsesInputIDForReconciliation() throws {
+        let pending = LogosMessage.pending(projectKey: "default", messageID: "voice-turn-1", content: "hello Hermes")
+        let persisted = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "voice-turn-1",
+            serverSeq: 7,
+            role: "user",
+            content: "hello Hermes!",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        XCTAssertEqual(pending.messageID, "voice-turn-1")
+        XCTAssertTrue(PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: persisted))
+    }
+
+    func testPendingMessageReconciliationKeepsRoleBoundaries() throws {
+        let pending = LogosMessage.pending(projectKey: "default", messageID: "voice-turn-1", content: "same text")
+        let assistant = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "voice-turn-1",
+            serverSeq: 7,
+            role: "assistant",
+            content: "same text",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        XCTAssertFalse(PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: assistant))
     }
 
     func testNotificationRouteParsesPrivatePushPayload() throws {

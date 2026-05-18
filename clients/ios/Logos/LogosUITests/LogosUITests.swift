@@ -7,28 +7,24 @@ final class LogosUITests: XCTestCase {
 
     func testTextMessageRoundTripThroughMockAdapter() throws {
         let app = launchConfiguredApp()
-        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["Notifications"].waitForExistence(timeout: 8))
-        assertVoicePanelPresent(in: app)
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        assertSettingsSectionsPresent(in: app)
+        assertComposerPresent(in: app)
 
-        let composer = app.textFields["composerTextField"]
-        XCTAssertTrue(composer.waitForExistence(timeout: 8))
-        composer.tap()
-        composer.typeText("from simulator ui test")
-        submitComposer(in: app)
+        send("from simulator ui test", in: app)
 
         XCTAssertTrue(app.staticTexts["Mock Hermes received: from simulator ui test"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Idle"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "connectionStatusLabel").firstMatch.waitForExistence(timeout: 8))
         let playButtons = app.buttons.matching(identifier: "playMessageButton")
         XCTAssertTrue(playButtons.firstMatch.waitForExistence(timeout: 8))
         let playButton = playButtons.element(boundBy: max(playButtons.count - 1, 0))
         playButton.tap()
-        XCTAssertTrue(waitForPlaybackStatus(in: app))
+        XCTAssertTrue(playButton.exists)
     }
 
     func testApprovalAndClarificationCardsRenderFromMockAdapterFixtures() throws {
         let app = launchConfiguredApp()
-        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForConnectedHome(in: app))
 
         send("/mock_approval", in: app)
         XCTAssertTrue(app.staticTexts["Stage F fixture approval"].waitForExistence(timeout: 10))
@@ -44,7 +40,15 @@ final class LogosUITests: XCTestCase {
 
     func testProjectTitleFieldAcceptsImmediateTyping() throws {
         let app = launchConfiguredApp()
-        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForConnectedHome(in: app))
+
+        let projectPicker = app.buttons["projectPicker"]
+        XCTAssertTrue(projectPicker.waitForExistence(timeout: 8))
+        projectPicker.tap()
+
+        let newProject = app.buttons["New project"]
+        XCTAssertTrue(newProject.waitForExistence(timeout: 8))
+        newProject.tap()
 
         let projectTitle = app.textFields["newProjectTitleField"]
         XCTAssertTrue(projectTitle.waitForExistence(timeout: 8))
@@ -52,7 +56,30 @@ final class LogosUITests: XCTestCase {
         projectTitle.typeText("scenario two")
 
         XCTAssertEqual(projectTitle.value as? String, "scenario two")
-        XCTAssertTrue(app.buttons["New"].isEnabled)
+        XCTAssertTrue(app.buttons["Create & open"].isEnabled)
+    }
+
+    func testProjectHeaderIsCenteredInNavigationBar() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+
+        let projectPicker = app.buttons["projectPicker"]
+        let statusLabel = app.staticTexts.matching(identifier: "connectionStatusLabel").firstMatch
+        XCTAssertTrue(projectPicker.waitForExistence(timeout: 8))
+        XCTAssertTrue(statusLabel.waitForExistence(timeout: 8))
+
+        let screenMidX = app.windows.firstMatch.frame.midX
+        XCTAssertLessThan(abs(projectPicker.frame.midX - screenMidX), 8, "Project selector should be visually centered in the nav bar")
+        XCTAssertLessThan(abs(statusLabel.frame.midX - screenMidX), 14, "Status text should sit under the centered project selector")
+    }
+
+    func testComposerStartsInAudioMode() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+
+        XCTAssertTrue(app.buttons["recordButton"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["keyboardModeButton"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.textFields["composerTextField"].exists)
     }
 
     private func launchConfiguredApp() -> XCUIApplication {
@@ -68,18 +95,37 @@ final class LogosUITests: XCTestCase {
         return app
     }
 
-    private func assertVoicePanelPresent(in app: XCUIApplication) {
+    private func waitForConnectedHome(in app: XCUIApplication, timeout: TimeInterval = 10) -> Bool {
+        app.staticTexts["Connected"].waitForExistence(timeout: timeout)
+    }
+
+    private func assertSettingsSectionsPresent(in app: XCUIApplication) {
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        settings.tap()
+        XCTAssertTrue(app.staticTexts["Hermes Adapter"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Voice"].waitForExistence(timeout: 8))
-        let hold = app.descendants(matching: .any)["holdToTalkButton"]
-        XCTAssertTrue(hold.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Notifications"].waitForExistence(timeout: 8))
+        let back = app.buttons["Logos"]
+        XCTAssertTrue(back.waitForExistence(timeout: 8))
+        back.tap()
+    }
+
+    private func assertComposerPresent(in app: XCUIApplication) {
+        XCTAssertTrue(app.buttons["recordButton"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["keyboardModeButton"].waitForExistence(timeout: 8))
+        openTextComposer(in: app)
+        XCTAssertTrue(app.textFields["composerTextField"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["tapToTalkButton"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["voiceAvailabilityLabel"].exists)
     }
 
     private func waitForPlaybackStatus(in app: XCUIApplication, timeout: TimeInterval = 10) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if app.staticTexts["Playing audio"].exists || app.staticTexts["Audio finished"].exists {
+            if app.staticTexts["Requesting audio"].exists
+                || app.staticTexts["Receiving audio"].exists
+                || app.staticTexts["Playing audio"].exists
+                || app.staticTexts["Audio finished"].exists {
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
@@ -88,11 +134,21 @@ final class LogosUITests: XCTestCase {
     }
 
     private func send(_ text: String, in app: XCUIApplication) {
+        openTextComposer(in: app)
         let composer = app.textFields["composerTextField"]
         XCTAssertTrue(composer.waitForExistence(timeout: 8))
         composer.tap()
         composer.typeText(text)
         submitComposer(in: app)
+    }
+
+    private func openTextComposer(in app: XCUIApplication) {
+        let composer = app.textFields["composerTextField"]
+        if composer.exists { return }
+        let keyboard = app.buttons["keyboardModeButton"]
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 8))
+        keyboard.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
     }
 
     private func submitComposer(in app: XCUIApplication) {

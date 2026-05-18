@@ -37,6 +37,8 @@ struct LogosConnectionLifecycle: Equatable {
 }
 
 struct LogosSettings: Equatable {
+    static let defaultURLString = "ws://ryans-mac-studio:8765"
+
     private static let urlKey = "logos.adapter.url"
     private static let deviceIDKey = "logos.device.id"
     private static let autoConnectKey = "logos.autoconnect"
@@ -49,7 +51,7 @@ struct LogosSettings: Equatable {
     init(environment: [String: String] = ProcessInfo.processInfo.environment, userDefaults: UserDefaults = .standard) {
         self.urlString = environment["LOGOS_WS_URL"]
             ?? userDefaults.string(forKey: Self.urlKey)
-            ?? "ws://127.0.0.1:8765"
+            ?? Self.defaultURLString
         self.deviceID = environment["LOGOS_DEVICE_ID"]
             ?? userDefaults.string(forKey: Self.deviceIDKey)
             ?? "ios-simulator"
@@ -193,17 +195,24 @@ struct LogosMessage: Identifiable, Hashable {
         )
     }
 
-    static func pending(projectKey: String, content: String) -> LogosMessage {
+    static func pending(projectKey: String, messageID: String = UUID().uuidString, content: String) -> LogosMessage {
         LogosMessage(
             projectKey: projectKey,
             sessionID: "pending",
-            messageID: UUID().uuidString,
+            messageID: messageID,
             serverSeq: 0,
             role: "user",
             content: content,
             timestamp: Date().timeIntervalSince1970,
             status: "pending"
         )
+    }
+}
+
+enum PendingMessageReconciliation {
+    static func shouldRemove(pending: LogosMessage, whenPersisted persisted: LogosMessage) -> Bool {
+        guard pending.status == "pending", pending.role == persisted.role else { return false }
+        return pending.messageID == persisted.messageID || pending.content == persisted.content
     }
 }
 

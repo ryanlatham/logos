@@ -1,6 +1,6 @@
 # Logos Device Test Checklist
 
-Last updated: 2026-05-15T12:23:21-07:00
+Last updated: 2026-05-18
 
 This checklist tracks validation that cannot be completed by Xcode Simulator alone. For an interactive walkthrough with checkboxes, command copy buttons, and a fillable report form, open `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`. Stage I establishes the voice path gates and Stage J adds APNS hardware/credential gates.
 
@@ -11,7 +11,7 @@ Prerequisites:
 - Install the Logos app on a physical iPhone signed with a real development team.
 - Run the Logos adapter on the Mac with `LOGOS_DEVICE_SECRET` configured.
 - Put the iPhone and Mac on the same trusted private network / Tailscale path.
-- Configure the app adapter URL to the Mac tailnet address and port.
+- Confirm the app adapter URL is `ws://ryans-mac-studio:8765`, or edit it only if the Mac is using a different tailnet/LAN address.
 
 Validation steps:
 
@@ -35,7 +35,8 @@ Validation steps:
    - stop speaking,
    - verify energy/silence detection stops recording,
    - verify the UI briefly shows a finalizing/finishing-transcript state,
-   - verify exactly one final transcript is sent after ASR finishes and includes the last few words spoken before silence.
+   - verify exactly one final `speech` frame with `payload.is_final=true` is sent after ASR finishes or the best-transcript fallback fires,
+   - verify the final text includes the last few words spoken before silence even if server logs show earlier partial frames only had `is_final=false`.
 8. Tap-to-talk initial silence:
    - tap `Tap to Talk` and remain silent,
    - verify the app stops after the initial-silence timeout and sends no empty final turn.
@@ -45,10 +46,14 @@ Validation steps:
 10. Fast repeated interactions:
     - rapidly tap voice controls,
     - verify only one recording session is active and the app does not crash.
-11. Background interruption:
+11. Audio route changes:
+    - repeat hold-to-talk and tap-to-talk with AirPods or another Bluetooth route if available,
+    - disconnect or switch the route while recording,
+    - verify Logos either finalizes one buffered transcript or cancels without sending an empty/corrupt turn.
+12. Background interruption:
     - start voice, background the app or receive a call/system interruption if practical,
     - verify recording stops safely and no corrupt/empty turn is persisted.
-12. Privacy spot check:
+13. Privacy spot check:
     - inspect adapter logs and verify full speech text is not logged unless explicit debug logging is enabled.
 
 Record results in Stage K/L reports with device model, iOS version, locale, recognition availability, pass/fail notes, and any screenshots/logs.

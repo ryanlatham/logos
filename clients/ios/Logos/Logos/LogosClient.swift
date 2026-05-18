@@ -110,14 +110,12 @@ final class LogosClient: ObservableObject {
         return sent
     }
 
-    func sendSpeech(text: String, isFinal: Bool, inputID: String, partialSeq: Int, startedAtMilliseconds: Int64) {
-        guard ensureConnectedForUserAction(isFinal ? "send speech" : "stream speech") else { return }
+    @discardableResult
+    func sendSpeech(text: String, isFinal: Bool, inputID: String, partialSeq: Int, startedAtMilliseconds: Int64) -> Bool {
+        guard ensureConnectedForUserAction(isFinal ? "send speech" : "stream speech") else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        if isFinal {
-            messages.append(LogosMessage.pending(projectKey: activeProjectKey, content: trimmed))
-        }
-        sendFrame(LogosSpeechFrame.make(
+        guard !trimmed.isEmpty else { return false }
+        let sent = sendFrame(LogosSpeechFrame.make(
             text: trimmed,
             isFinal: isFinal,
             inputID: inputID,
@@ -126,6 +124,10 @@ final class LogosClient: ObservableObject {
             deviceID: settings.deviceID,
             projectKey: activeProjectKey
         ))
+        if sent, isFinal {
+            messages.append(LogosMessage.pending(projectKey: activeProjectKey, messageID: inputID, content: trimmed))
+        }
+        return sent
     }
 
     func requestProjects() {
@@ -514,7 +516,7 @@ final class LogosClient: ObservableObject {
         }
         if let messageDict = payload["message"] as? [String: Any], let message = LogosMessage.from(dictionary: messageDict) {
             store.upsert(message)
-            messages.removeAll { $0.status == "pending" && $0.content == message.content && $0.role == message.role }
+            messages.removeAll { PendingMessageReconciliation.shouldRemove(pending: $0, whenPersisted: message) }
             messages = store.loadMessages(projectKey: activeProjectKey)
         }
     }
