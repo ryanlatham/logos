@@ -1,6 +1,20 @@
 # Logos Implementation Notes
 
-Last updated: 2026-05-15T05:47:05-07:00
+Last updated: 2026-05-18T06:34:24-07:00
+
+## Closure verification follow-up — playback status accessibility
+
+During the final Logos Kanban closure rerun, the adapter correctly received the UI-test playback request and streamed `audio_chunk` / `audio_end` frames, but the UI test could miss the playback status because the custom SwiftUI `ToolStrip` did not expose a stable playback-status accessibility node. The app now marks the playback strip with `playbackStatusLabel` and an accessibility label equal to the current status (`Receiving audio`, `Playing audio`, or `Audio finished`), and the UI test waits on that explicit element instead of brittle exact `StaticText` discovery.
+
+Verification after this fix:
+
+- Focused UI regression: `LogosUITests/testTextMessageRoundTripThroughMockAdapter` passed.
+- Full Xcode target: `LogosModelTests` 50/50 and `LogosUITests` 5/5 passed on Simulator `FD91D719-6C01-4917-A654-B81D3465595A`.
+- Python tests: `49 passed`.
+- Python compile check: passed.
+- `git diff --check`: passed.
+- Diff secret scan: `secret_scan_findings=0`.
+- Mock adapter cleanup: no tracked Hermes background process and no listener on `127.0.0.1:8766` after tests.
 
 ## Stage A — environment and contract verification
 

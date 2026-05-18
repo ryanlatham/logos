@@ -216,6 +216,9 @@ struct ContentView: View {
                     if let playbackStatus = client.playbackStatus, playbackStatus.isEmpty == false {
                         ToolStrip(label: "audio", detail: playbackStatus)
                             .id("playback")
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityIdentifier("playbackStatusLabel")
+                            .accessibilityLabel(playbackStatus)
                     }
 
                     if let error = client.lastError, error.isEmpty == false {

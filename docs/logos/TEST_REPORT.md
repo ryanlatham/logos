@@ -1,10 +1,10 @@
 # Logos Test Report
 
-Last updated: 2026-05-18T01:26:51-07:00
+Last updated: 2026-05-18T06:34:24-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
-Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 15 Pro
+Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 17 Pro
 
 Bundle id: `com.ryan.logos`
 
@@ -49,7 +49,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Result:
 
 ```text
-49 passed in 0.26s
+49 passed in 0.25s
 ```
 
 ### Python compile check
@@ -112,10 +112,12 @@ LogosUITests: 5 tests, 0 failures
 ** TEST SUCCEEDED **
 ```
 
+2026-05-18 closure rerun note: the playback UI test now waits on the explicit `playbackStatusLabel` accessibility element. This preserves the stricter adapter/audio-backed status assertion while avoiding brittle discovery of child `StaticText` nodes inside the custom playback strip.
+
 Latest Xcode result bundles:
 
 ```text
-/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.15_12-22-19--0700.xcresult
+/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.18_06-30-04--0700.xcresult
 ```
 
 ### Simulator launch

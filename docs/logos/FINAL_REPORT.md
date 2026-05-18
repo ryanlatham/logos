@@ -1,6 +1,6 @@
 # Logos Final Report — v1 Manual Gate Complete
 
-Last updated: 2026-05-18T01:26:51-07:00
+Last updated: 2026-05-18T06:34:24-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
@@ -8,13 +8,15 @@ Reference archive: `/Users/ryan/Development/logos-agent-reference`
 
 Kanban board: `logos-agent-voice-app`
 
-Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 15 Pro
+Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 17 Pro
 
 Bundle id: `com.ryan.logos`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 
 2026-05-18 update: Ryan completed the physical/manual validation pass after the post-redesign UI and voice fixes. The remaining repository work is now closure/hardening, not a v1 physical-device blocker. Detailed per-device manual-test metadata was not captured in this repo; do not invent it retroactively.
+
+2026-05-18 closure rerun update: final automated verification exposed a brittle playback-status accessibility lookup in `LogosUITests`; the app now exposes `playbackStatusLabel` on the audio status strip and the UI test waits on that explicit element. Full Python and Xcode verification passed after the fix.
 
 ## 1. What was implemented
 
