@@ -138,13 +138,15 @@ class LogosPendingInteraction:
     created_at: float
 
     def to_frame(self) -> dict[str, Any]:
+        payload = dict(self.payload)
+        payload.pop("session_key", None)
         return {
             "type": self.frame_type,
             "request_id": self.request_id,
             "project_key": self.project_key,
             "session_id": self.session_id,
             "server_seq": self.server_seq,
-            "payload": dict(self.payload),
+            "payload": payload,
         }
 
     def to_protocol(self) -> dict[str, Any]:
@@ -509,6 +511,10 @@ class LogosStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM logos_pending_interactions WHERE request_id = ?", (str(request_id),))
 
+    def resolve_pending_interactions_for_project(self, project_key: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM logos_pending_interactions WHERE project_key = ?", (str(project_key),))
+
     def create_project(self, title: str) -> LogosProject:
         base_key = self.slugify_project_title(title)
         with self._lock:
@@ -675,12 +681,16 @@ class LogosStore:
             if message_id is not None:
                 existing = self._get_message_locked(session_id, str(message_id))
                 if existing:
+                    if existing.project_key != project_key:
+                        raise ValueError("message_id/session_id collision across Logos projects")
                     return existing
 
             server_seq = self.next_server_seq()
             final_message_id = str(message_id) if message_id is not None else f"logos-{server_seq}"
             existing = self._get_message_locked(session_id, final_message_id)
             if existing:
+                if existing.project_key != project_key:
+                    raise ValueError("message_id/session_id collision across Logos projects")
                 return existing
 
             with self._conn:

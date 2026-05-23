@@ -24,6 +24,8 @@ OllamaTransport = Callable[..., str]
 class FastModelResult:
     ack: bool
     ack_text: str | None
+    direct_response_text: str | None
+    direct_response_kind: str | None
     switch_intent: dict[str, str] | None
     create_intent: dict[str, str] | None
     resume_intent: dict[str, str] | None
@@ -35,6 +37,8 @@ class FastModelResult:
         return {
             "ack": self.ack,
             "ack_text": self.ack_text,
+            "direct_response_text": self.direct_response_text,
+            "direct_response_kind": self.direct_response_kind,
             "switch_intent": self.switch_intent,
             "create_intent": self.create_intent,
             "resume_intent": self.resume_intent,
@@ -73,6 +77,14 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     if not isinstance(ack, bool):
         raise ValueError("fast model field ack must be a boolean")
     ack_text = _optional_nonempty_str(data.get("ack_text"), "ack_text")
+    direct_response_text = sanitize_direct_response_text(_optional_nonempty_str(data.get("direct_response_text"), "direct_response_text"))
+    direct_response_kind = _optional_nonempty_str(data.get("direct_response_kind"), "direct_response_kind")
+    if direct_response_kind is not None:
+        direct_response_kind = direct_response_kind.lower()
+        if direct_response_kind not in DIRECT_RESPONSE_KINDS:
+            raise ValueError("direct_response_kind must be social, app_help, simple_text, or null")
+    if direct_response_text and direct_response_kind is None:
+        raise ValueError("direct_response_kind is required when direct_response_text is present")
     cancel_intent = data.get("cancel_intent", False)
     if not isinstance(cancel_intent, bool):
         raise ValueError("fast model field cancel_intent must be a boolean")
@@ -84,13 +96,20 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
         approval_decision = approval_decision.lower()
         if approval_decision not in {"approve", "deny"}:
             raise ValueError("approval_decision must be approve, deny, or null")
+    switch_intent = _optional_str_dict(data.get("switch_intent"), "switch_intent")
+    create_intent = _optional_str_dict(data.get("create_intent"), "create_intent")
+    resume_intent = _optional_str_dict(data.get("resume_intent"), "resume_intent")
+    if direct_response_text and any([switch_intent, create_intent, resume_intent, cancel_intent, approval_decision]):
+        raise ValueError("direct_response_text cannot be combined with control or approval intents")
 
     return FastModelResult(
         ack=ack,
         ack_text=ack_text,
-        switch_intent=_optional_str_dict(data.get("switch_intent"), "switch_intent"),
-        create_intent=_optional_str_dict(data.get("create_intent"), "create_intent"),
-        resume_intent=_optional_str_dict(data.get("resume_intent"), "resume_intent"),
+        direct_response_text=direct_response_text,
+        direct_response_kind=direct_response_kind if direct_response_text else None,
+        switch_intent=switch_intent,
+        create_intent=create_intent,
+        resume_intent=resume_intent,
         cancel_intent=cancel_intent,
         approval_decision=approval_decision,
         confidence=float(confidence),
@@ -129,6 +148,144 @@ def sanitize_summary_text(text: str) -> str:
     return sanitized
 
 
+DIRECT_RESPONSE_KINDS = {"social", "app_help", "simple_text"}
+GENERIC_ACK_TEXTS = {"got it", "got it.", "sure", "sure.", "okay", "okay.", "ok", "ok."}
+MAX_ACK_CHARS = 80
+MAX_DIRECT_RESPONSE_CHARS = 240
+
+
+def sanitize_direct_response_text(text: str | None) -> str | None:
+    if text is None:
+        return None
+    sanitized = sanitize_summary_text(text).replace("```", "").strip()
+    if len(sanitized) > MAX_DIRECT_RESPONSE_CHARS:
+        sanitized = sanitized[: max(0, MAX_DIRECT_RESPONSE_CHARS - 1)].rstrip() + "…"
+    return sanitized or None
+
+
+def sanitize_ack_text(text: str | None) -> str | None:
+    if text is None:
+        return None
+    sanitized = sanitize_summary_text(text).replace("```", "").strip()
+    if len(sanitized) > MAX_ACK_CHARS:
+        sanitized = sanitized[: max(0, MAX_ACK_CHARS - 1)].rstrip() + "…"
+    return sanitized or None
+
+
+def natural_ack_for(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    normalized = re.sub(r"^(please|can you|could you|would you|will you)\s+", "", normalized)
+    if not normalized:
+        return ""
+    if normalized.startswith(("check", "look", "inspect", "find", "search")):
+        return "I'll check."
+    if normalized.startswith(("build", "run", "test")):
+        return "On it."
+    if normalized.startswith(("fix", "update", "change", "make", "edit", "patch")):
+        return "I'll handle it."
+    if normalized.startswith(("debug", "diagnose", "investigate", "figure out", "why")):
+        return "I'll take a look."
+    if normalized.startswith("summarize"):
+        return "I'll condense it."
+    if normalized.startswith("explain"):
+        return "I'll explain."
+    choices = ["On it.", "I'll take a look.", "Working on it.", "I'll handle it."]
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    return choices[digest[0] % len(choices)]
+
+
+def _deterministic_direct_response(normalized: str) -> tuple[str, str] | None:
+    allowed_kind = direct_response_kind_for_request(normalized)
+    if allowed_kind is None:
+        return None
+    if allowed_kind == "social":
+        if normalized in {"hi", "hello", "hey", "hi ada", "hello ada", "hey ada", "hello there"}:
+            return "I'm here. What are we tackling?", "social"
+        if normalized in {"thanks", "thank you", "thx", "ty", "appreciate it"}:
+            return "Anytime.", "social"
+        if normalized in {"you there?", "you there", "are you there?", "are you there", "ada?"}:
+            return "I'm here.", "social"
+    if allowed_kind == "app_help":
+        if normalized in {"who are you?", "who are you", "what are you?", "what are you"}:
+            return "I'm Ada, your Logos assistant in this app.", "app_help"
+        if normalized in {
+            "what can you do from this app?",
+            "what can you do from this app",
+            "what can you do here?",
+            "what can you do here",
+            "help",
+        }:
+            return "I can send requests to Hermes, switch projects, handle approvals, and play responses back.", "app_help"
+        if re.fullmatch(r"how (?:do|can) i (?:stop|cancel)(?: a| the)? run\??", normalized):
+            return "Tap Stop, or say “stop”.", "app_help"
+    if allowed_kind == "simple_text" and normalized in {"say hello", "say hello back"}:
+        return "Hello.", "simple_text"
+    return None
+
+
+def direct_response_kind_for_request(text: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if not normalized or normalized.startswith("/"):
+        return None
+    if normalized in {"hi", "hello", "hey", "hi ada", "hello ada", "hey ada", "hello there"}:
+        return "social"
+    if normalized in {"thanks", "thank you", "thx", "ty", "appreciate it"}:
+        return "social"
+    if normalized in {"you there?", "you there", "are you there?", "are you there", "ada?"}:
+        return "social"
+    if normalized in {"who are you?", "who are you", "what are you?", "what are you"}:
+        return "app_help"
+    if normalized in {
+        "what can you do from this app?",
+        "what can you do from this app",
+        "what can you do here?",
+        "what can you do here",
+        "help",
+    }:
+        return "app_help"
+    if re.fullmatch(r"how (?:do|can) i (?:stop|cancel)(?: a| the)? run\??", normalized):
+        return "app_help"
+    if normalized in {"say hello", "say hello back"}:
+        return "simple_text"
+    return None
+
+
+def _direct_response_text_is_safe(text: str | None) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if not normalized:
+        return False
+    privileged_starts = (
+        "approved",
+        "denied",
+        "rejected",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "switched",
+        "created",
+        "resumed",
+        "running",
+        "done",
+        "completed",
+        "i approved",
+        "i denied",
+        "i stopped",
+        "i switched",
+        "i created",
+        "i resumed",
+    )
+    return not normalized.startswith(privileged_starts)
+
+
+def is_safe_direct_response_for_request(text: str, response_kind: str | None, response_text: str | None) -> bool:
+    allowed_kind = direct_response_kind_for_request(text)
+    return allowed_kind is not None and response_kind == allowed_kind and _direct_response_text_is_safe(response_text)
+
+
+def _is_direct_response_request_safe(text: str) -> bool:
+    return direct_response_kind_for_request(text) is not None
+
+
 class DeterministicFastModel:
     """Strict, deterministic fallback for ack, safe intents, and summaries.
 
@@ -145,7 +302,9 @@ class DeterministicFastModel:
     def analyze_input(self, text: str, *, projects: list[str] | None = None) -> FastModelResult:
         raw_text = str(text or "").strip()
         normalized = re.sub(r"\s+", " ", raw_text.lower()).strip()
-        ack_text = self._ack_text(normalized)
+        ack_text = natural_ack_for(raw_text)
+        direct_response_text: str | None = None
+        direct_response_kind: str | None = None
         switch_intent: dict[str, str] | None = None
         create_intent: dict[str, str] | None = None
         resume_intent: dict[str, str] | None = None
@@ -187,10 +346,19 @@ class DeterministicFastModel:
                     resume_intent = {"target": target}
                     ack_text = f"Resuming {target}."
                     confidence = 0.9
+            if not any([switch_intent, create_intent, resume_intent]):
+                direct = _deterministic_direct_response(normalized)
+                if direct is not None:
+                    direct_response_text, direct_response_kind = direct
+                    ack_text = None
+                    confidence = 0.95
 
+        has_direct_response = direct_response_text is not None
         return FastModelResult(
-            ack=bool(raw_text),
-            ack_text=ack_text if raw_text else None,
+            ack=bool(raw_text) and not has_direct_response,
+            ack_text=ack_text if raw_text and not has_direct_response else None,
+            direct_response_text=direct_response_text,
+            direct_response_kind=direct_response_kind,
             switch_intent=switch_intent,
             create_intent=create_intent,
             resume_intent=resume_intent,
@@ -238,6 +406,7 @@ class OllamaFastModel:
         model: str | None = None,
         timeout_seconds: float = 2.5,
         min_confidence: float = 0.55,
+        direct_response_min_confidence: float = 0.86,
         summary_max_chars: int = 240,
         transport: OllamaTransport | None = None,
         fallback: DeterministicFastModel | None = None,
@@ -246,6 +415,7 @@ class OllamaFastModel:
         self.model = model or os.getenv("LOGOS_FAST_MODEL_MODEL") or os.getenv("OLLAMA_MODEL") or "gemma3:12b"
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self.min_confidence = min(1.0, max(0.0, float(min_confidence)))
+        self.direct_response_min_confidence = min(1.0, max(0.0, float(direct_response_min_confidence)))
         self.summary_max_chars = max(40, int(summary_max_chars))
         self.transport = transport or ollama_generate
         self.fallback = fallback or DeterministicFastModel(summary_max_chars=self.summary_max_chars)
@@ -263,6 +433,7 @@ class OllamaFastModel:
             result = parse_fast_model_json(raw)
             if result.confidence < self.min_confidence:
                 raise ValueError(f"fast model confidence {result.confidence:.2f} below threshold {self.min_confidence:.2f}")
+            result = self._apply_direct_response_policy(result, text)
             result = self._ensure_ack_text(result, text)
             self.last_error = None
             return result
@@ -286,11 +457,25 @@ class OllamaFastModel:
             self.last_error = str(exc)
             return self.fallback.summarize(text)
 
-    def _ensure_ack_text(self, result: FastModelResult, text: str) -> FastModelResult:
-        if not result.ack or result.ack_text:
+    def _apply_direct_response_policy(self, result: FastModelResult, text: str) -> FastModelResult:
+        if not result.direct_response_text:
             return result
-        fallback_ack = self.fallback.analyze_input(text).ack_text or "Got it."
-        return replace(result, ack_text=fallback_ack)
+        if (
+            result.confidence < self.direct_response_min_confidence
+            or not is_safe_direct_response_for_request(text, result.direct_response_kind, result.direct_response_text)
+        ):
+            return replace(result, direct_response_text=None, direct_response_kind=None, ack=True, ack_text=None)
+        return replace(result, ack=False, ack_text=None)
+
+    def _ensure_ack_text(self, result: FastModelResult, text: str) -> FastModelResult:
+        if result.direct_response_text:
+            return replace(result, ack=False, ack_text=None)
+        if not result.ack and str(text or "").strip():
+            result = replace(result, ack=True)
+        if not result.ack:
+            return result
+        ack_text = natural_ack_for(text)
+        return replace(result, ack_text=sanitize_ack_text(ack_text))
 
 
 def build_fast_model(extra: dict[str, Any] | None = None):
@@ -306,6 +491,10 @@ def build_fast_model(extra: dict[str, Any] | None = None):
             model=_optional_text(os.getenv("LOGOS_FAST_MODEL_MODEL") or extra.get("fast_model_model")),
             timeout_seconds=float(os.getenv("LOGOS_FAST_MODEL_TIMEOUT") or extra.get("fast_model_timeout", 2.5)),
             min_confidence=float(os.getenv("LOGOS_FAST_MODEL_MIN_CONFIDENCE") or extra.get("fast_model_min_confidence", 0.55)),
+            direct_response_min_confidence=float(
+                os.getenv("LOGOS_FAST_DIRECT_RESPONSE_MIN_CONFIDENCE")
+                or extra.get("fast_direct_response_min_confidence", 0.86)
+            ),
             summary_max_chars=summary_max_chars,
             transport=extra.get("fast_model_transport"),
             fallback=fallback,
@@ -347,10 +536,15 @@ def ollama_generate(*, endpoint: str, model: str, prompt: str, timeout_seconds: 
 def _analysis_prompt(text: str, *, projects: list[str] | None = None) -> str:
     projects_text = ", ".join(projects or []) or "none"
     return (
-        "You are Logos' fast local control model. Return only strict JSON with these keys: "
-        "ack(boolean), ack_text(string|null), switch_intent(object|null), create_intent(object|null), "
-        "resume_intent(object|null), cancel_intent(boolean), approval_decision(approve|deny|null), confidence(number 0..1). "
+        "You are Logos' fast local control and micro-response model. Return only strict JSON with these keys: "
+        "ack(boolean), ack_text(string|null), direct_response_text(string|null), direct_response_kind(social|app_help|simple_text|null), "
+        "switch_intent(object|null), create_intent(object|null), resume_intent(object|null), cancel_intent(boolean), "
+        "approval_decision(approve|deny|null), confidence(number 0..1). "
         "Only emit control intents for explicit, low-ambiguity user requests. Do not invent project names. "
+        "Direct-response only for these exact narrow request classes: greetings, thanks, are-you-there checks, static Logos app help, how to stop/cancel a run, or “say hello”. "
+        "For every other request, including facts, math, coding, project state, control actions, approvals, denials, switching, resuming, files, logs, memory, or current information, set direct_response_text=null and provide a short natural ack. "
+        "Avoid generic ack_text such as Got it, Sure, or Okay when a contextual ack fits. "
+        "Never combine direct_response_text with a control or approval intent. "
         "switch_intent shape: {\"project_title\":\"...\"}; create_intent: {\"title\":\"...\"}; resume_intent: {\"target\":\"...\"}. "
         f"Known projects: {projects_text}. User text: {json.dumps(str(text or ''))}"
     )
@@ -358,7 +552,7 @@ def _analysis_prompt(text: str, *, projects: list[str] | None = None) -> str:
 
 def _summary_prompt(text: str, *, summary_max_chars: int) -> str:
     return (
-        "Summarize this Hermes assistant response for spoken playback. Return only strict JSON: "
+        "Summarize this Hermes assistant response for notification metadata and compact surfaces. Return only strict JSON: "
         "{\"summary_text\":\"...\"}. One sentence, no secrets, no markdown, "
         f"maximum {summary_max_chars} characters. Text: {json.dumps(str(text or ''))}"
     )

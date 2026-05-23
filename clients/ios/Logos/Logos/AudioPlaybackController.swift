@@ -32,12 +32,21 @@ struct SystemAudioSessionManager: AudioSessionManaging {
 
 protocol AudioPlaying: AnyObject {
     var delegate: AVAudioPlayerDelegate? { get set }
+    var isPlaying: Bool { get }
+    var currentTime: TimeInterval { get set }
+    var duration: TimeInterval { get }
+    var isMeteringEnabled: Bool { get set }
 
     @discardableResult
     func prepareToPlay() -> Bool
 
     @discardableResult
     func play() -> Bool
+
+    func pause()
+    func stop()
+    func updateMeters()
+    func averagePower(forChannel channelNumber: Int) -> Float
 }
 
 extension AVAudioPlayer: AudioPlaying {}
@@ -57,12 +66,27 @@ struct AudioPlaybackResult: Equatable {
     let started: Bool
 }
 
+struct AudioPlaybackLifecycleSnapshot: Equatable {
+    let audioID: String
+    let currentTime: TimeInterval
+    let duration: TimeInterval
+    let reason: String
+}
+
+struct AudioPlaybackResumeResult: Equatable {
+    let audioID: String
+    let currentTime: TimeInterval
+    let started: Bool
+}
+
 final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
     var onPlaybackFinished: ((String, Bool) -> Void)?
 
     private var chunksByAudioID: [String: [Int: Data]] = [:]
     private var playersByAudioID: [String: any AudioPlaying] = [:]
     private var audioIDByPlayerID: [ObjectIdentifier: String] = [:]
+    private var dataByAudioID: [String: Data] = [:]
+    private var lifecycleSnapshotsByAudioID: [String: AudioPlaybackLifecycleSnapshot] = [:]
     private let sessionManager: any AudioSessionManaging
     private let playerFactory: any AudioPlayerMaking
 
@@ -107,8 +131,10 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
                 try? sessionManager.finishPlayback()
                 throw AudioPlaybackError.playbackDidNotStart
             }
+            player.isMeteringEnabled = true
             playersByAudioID[audioID] = player
             audioIDByPlayerID[ObjectIdentifier(player)] = audioID
+            dataByAudioID[audioID] = data
             chunksByAudioID.removeValue(forKey: audioID)
             return AudioPlaybackResult(byteCount: data.count, started: started)
         } catch {
@@ -123,6 +149,8 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         let playerID = ObjectIdentifier(player)
         guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
         playersByAudioID.removeValue(forKey: audioID)
+        dataByAudioID.removeValue(forKey: audioID)
+        lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
         try? sessionManager.finishPlayback()
         onPlaybackFinished?(audioID, flag)
     }
@@ -131,8 +159,97 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         let playerID = ObjectIdentifier(player)
         guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
         playersByAudioID.removeValue(forKey: audioID)
+        dataByAudioID.removeValue(forKey: audioID)
+        lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
         try? sessionManager.finishPlayback()
         onPlaybackFinished?(audioID, false)
+    }
+
+    @discardableResult
+    func pause(audioID: String) -> Bool {
+        guard let player = playersByAudioID[audioID] else { return false }
+        player.pause()
+        lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
+        return true
+    }
+
+    @discardableResult
+    func resume(audioID: String) throws -> Bool {
+        guard let player = playersByAudioID[audioID] else { return false }
+        try sessionManager.prepareForPlayback()
+        return player.play()
+    }
+
+    @discardableResult
+    func stop(audioID: String) -> Bool {
+        let player = playersByAudioID.removeValue(forKey: audioID)
+        chunksByAudioID.removeValue(forKey: audioID)
+        dataByAudioID.removeValue(forKey: audioID)
+        lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
+        if let player {
+            audioIDByPlayerID.removeValue(forKey: ObjectIdentifier(player))
+            player.stop()
+            try? sessionManager.finishPlayback()
+            return true
+        }
+        return false
+    }
+
+    func stopAll() {
+        for audioID in Array(Set(playersByAudioID.keys).union(chunksByAudioID.keys)) {
+            _ = stop(audioID: audioID)
+        }
+    }
+
+    func pauseForLifecycle(reason: String) -> [AudioPlaybackLifecycleSnapshot] {
+        var snapshots: [AudioPlaybackLifecycleSnapshot] = []
+        for (audioID, player) in playersByAudioID where player.isPlaying {
+            let snapshot = AudioPlaybackLifecycleSnapshot(
+                audioID: audioID,
+                currentTime: player.currentTime,
+                duration: player.duration,
+                reason: reason
+            )
+            player.pause()
+            lifecycleSnapshotsByAudioID[audioID] = snapshot
+            snapshots.append(snapshot)
+        }
+        return snapshots.sorted { $0.audioID < $1.audioID }
+    }
+
+    func resumeAfterLifecycle() throws -> [AudioPlaybackResumeResult] {
+        var results: [AudioPlaybackResumeResult] = []
+        for snapshot in lifecycleSnapshotsByAudioID.values.sorted(by: { $0.audioID < $1.audioID }) where snapshot.reason != "manual_pause" {
+            guard let player = playersByAudioID[snapshot.audioID] else { continue }
+            try sessionManager.prepareForPlayback()
+            player.currentTime = snapshot.currentTime
+            let started = player.play()
+            if started {
+                lifecycleSnapshotsByAudioID.removeValue(forKey: snapshot.audioID)
+            }
+            results.append(AudioPlaybackResumeResult(audioID: snapshot.audioID, currentTime: player.currentTime, started: started))
+        }
+        return results
+    }
+
+    func spectrumBins(audioID: String, count: Int = 12) -> [Double] {
+        let binCount = max(1, count)
+        if let player = playersByAudioID[audioID] {
+            player.updateMeters()
+            let power = player.averagePower(forChannel: 0)
+            let normalized = max(0.05, min(1.0, Double((power + 60) / 60)))
+            return (0..<binCount).map { index in
+                let wave = 0.65 + 0.35 * sin(Double(index) * 0.9 + player.currentTime)
+                return max(0.05, min(1.0, normalized * wave))
+            }
+        }
+        guard let data = dataByAudioID[audioID], data.isEmpty == false else {
+            return Array(repeating: 0.12, count: binCount)
+        }
+        return (0..<binCount).map { index in
+            let byte = data[index % data.count]
+            return max(0.05, Double(byte) / 255.0)
+        }
     }
 }
 

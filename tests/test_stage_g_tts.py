@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,6 +94,172 @@ class RecordingTTS:
         return DeterministicStubTTS().iter_chunks(text=text, audio_id=audio_id, chunk_size=128)
 
 
+class CountingSummaryFastModel:
+    def __init__(self, summary_text: str = "Concise spoken summary.") -> None:
+        self.summary_text = summary_text
+        self.summarize_calls: list[str] = []
+
+    def summarize(self, text: str):
+        original = str(text or "")
+        self.summarize_calls.append(original)
+        return SimpleNamespace(
+            summary_text=self.summary_text,
+            source_hash=hashlib.sha256(original.encode("utf-8")).hexdigest(),
+            source_chars=len(original),
+        )
+
+
+@pytest.mark.asyncio
+async def test_final_auto_playback_short_message_speaks_full_text(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "dev-secret",
+                "store_path": str(tmp_path / "logos.db"),
+                "final_audio_full_max_chars": 80,
+                "final_audio_full_max_words": 12,
+            },
+        )
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    recording_tts = RecordingTTS()
+    adapter.tts = recording_tts
+    summary_model = CountingSummaryFastModel(summary_text="This summary should not be spoken.")
+    adapter.fast_model = summary_model
+    message = adapter.store.append_message(
+        project_key="alpha",
+        session_id="sess-alpha",
+        role="assistant",
+        content="Short final answer.",
+        message_id="msg-final-short",
+    )
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(
+            type="playback_audio",
+            request_id="play-final-short",
+            device_id="iphone",
+            project_key="alpha",
+            session_id="sess-alpha",
+            payload={"message_id": message.message_id, "audio_id": "audio-final-short", "mode": "final_auto"},
+        )
+    )
+
+    assert response is None
+    assert recording_tts.texts == [message.content]
+    assert summary_model.summarize_calls == []
+    audio_chunks = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "audio_chunk"]
+    audio_end = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "audio_end"]
+    assert audio_chunks
+    assert len(audio_end) == 1
+    for frame in audio_chunks + audio_end:
+        assert frame["payload"]["mode"] == "full"
+        assert frame["payload"]["requested_mode"] == "final_auto"
+        assert frame["payload"]["selection_reason"] == "short_final_full"
+
+
+@pytest.mark.asyncio
+async def test_final_auto_playback_long_message_speaks_stored_summary_once(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "dev-secret",
+                "store_path": str(tmp_path / "logos.db"),
+                "final_audio_full_max_chars": 60,
+                "final_audio_full_max_words": 8,
+            },
+        )
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    recording_tts = RecordingTTS()
+    adapter.tts = recording_tts
+    summary_model = CountingSummaryFastModel(summary_text="Concise spoken summary.")
+    adapter.fast_model = summary_model
+    long_text = " ".join(f"detail{index}" for index in range(30))
+    sent = await adapter.send("project:alpha", long_text, metadata={"session_id": "sess-alpha", "message_id": "msg-final-long"})
+    assert sent.message_id == "msg-final-long"
+    assert summary_model.summarize_calls == [long_text]
+    fake_server.frames.clear()
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(
+            type="playback_audio",
+            request_id="play-final-long",
+            device_id="iphone",
+            project_key="alpha",
+            session_id="sess-alpha",
+            payload={"message_id": sent.message_id, "audio_id": "audio-final-long", "mode": "final_auto"},
+        )
+    )
+
+    assert response is None
+    assert recording_tts.texts == ["Concise spoken summary."]
+    assert summary_model.summarize_calls == [long_text]
+    audio_end = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "audio_end"]
+    assert len(audio_end) == 1
+    assert audio_end[0]["payload"]["mode"] == "summary"
+    assert audio_end[0]["payload"]["requested_mode"] == "final_auto"
+    assert audio_end[0]["payload"]["selection_reason"] == "long_final_summary_reused"
+
+
+@pytest.mark.asyncio
+async def test_final_auto_playback_regenerates_stale_summary_by_source_hash(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "dev-secret",
+                "store_path": str(tmp_path / "logos.db"),
+                "final_audio_full_max_chars": 60,
+                "final_audio_full_max_words": 8,
+            },
+        )
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    recording_tts = RecordingTTS()
+    adapter.tts = recording_tts
+    summary_model = CountingSummaryFastModel(summary_text="Fresh spoken summary.")
+    adapter.fast_model = summary_model
+    long_text = " ".join(f"updated-detail{index}" for index in range(30))
+    message = adapter.store.append_message(
+        project_key="alpha",
+        session_id="sess-alpha",
+        role="assistant",
+        content=long_text,
+        message_id="msg-final-stale",
+    )
+    adapter.store.upsert_summary(message=message, summary_text="Stale summary.", source_hash="stale-source-hash")
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(
+            type="playback_audio",
+            request_id="play-final-stale",
+            device_id="iphone",
+            project_key="alpha",
+            session_id="sess-alpha",
+            payload={"message_id": message.message_id, "audio_id": "audio-final-stale", "mode": "final_auto"},
+        )
+    )
+
+    assert response is None
+    assert recording_tts.texts == ["Fresh spoken summary."]
+    assert summary_model.summarize_calls == [long_text]
+    stored_summary = adapter.store.get_summary(message.session_id, message.message_id)
+    assert stored_summary is not None
+    assert stored_summary.summary_text == "Fresh spoken summary."
+    assert stored_summary.source_hash == hashlib.sha256(long_text.encode("utf-8")).hexdigest()
+    audio_end = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "audio_end"]
+    assert len(audio_end) == 1
+    assert audio_end[0]["payload"]["mode"] == "summary"
+    assert audio_end[0]["payload"]["requested_mode"] == "final_auto"
+    assert audio_end[0]["payload"]["selection_reason"] == "long_final_summary_regenerated"
+
+
 @pytest.mark.asyncio
 async def test_playback_audio_full_mode_speaks_complete_stored_message(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
@@ -123,6 +291,39 @@ async def test_playback_audio_full_mode_speaks_complete_stored_message(tmp_path)
     audio_end = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "audio_end"]
     assert len(audio_end) == 1
     assert audio_end[0]["payload"]["mode"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_playback_audio_rejects_message_from_other_project(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    recording_tts = RecordingTTS()
+    adapter.tts = recording_tts
+    message = adapter.store.append_message(
+        project_key="beta",
+        session_id="sess-beta",
+        role="assistant",
+        content="Private beta project answer.",
+        message_id="msg-cross-project",
+    )
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(
+            type="playback_audio",
+            request_id="play-cross-project",
+            device_id="iphone",
+            project_key="alpha",
+            session_id="sess-beta",
+            payload={"message_id": message.message_id, "audio_id": "audio-cross-project", "mode": "full"},
+        )
+    )
+
+    assert response is not None
+    assert response["type"] == "error"
+    assert response["payload"]["code"] == "message_project_mismatch"
+    assert recording_tts.texts == []
+    assert fake_server.frames == []
 
 
 @pytest.mark.asyncio
