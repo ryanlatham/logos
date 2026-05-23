@@ -259,6 +259,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var requestedAudioIDs = Set<String>()
     private var stoppedAudioIDs = Set<String>()
     private var activeAudioID: String?
+    private var spectrumUpdateTask: Task<Void, Never>?
+    private var spectrumUpdateAudioID: String?
     private var autoPlayedMessageKeys = Set<String>()
     private var pendingAPNSToken: String?
     private let pairingExchanger: any PairingCredentialExchanging
@@ -277,6 +279,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var pendingProjectSwitchTarget: String?
 
     private static let gatewayTimeoutAudioText = "The gateway stopped sending updates before a final response arrived."
+    private static let maxInboundFrameBytes = 2_000_000
+    private static let stoppedAudioIDRetentionLimit = 128
 
     init(
         store: SQLiteMessageStore = SQLiteMessageStore(),
@@ -294,8 +298,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         audioPlayback.onPlaybackFinished = { [weak self] audioID, succeeded in
             Task { @MainActor in
                 guard let self, self.activeAudioID == audioID else { return }
+                self.stopSpectrumUpdates(audioID: audioID)
                 self.activeAudioID = nil
                 self.requestedAudioIDs.remove(audioID)
+                self.rememberStoppedAudioID(audioID)
                 if succeeded {
                     self.updateAudioOverlay(
                         audioID: audioID,
@@ -690,6 +696,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     func pausePlayback() {
         guard let audioID = audioPlaybackOverlay?.audioID ?? activeAudioID else { return }
         guard audioPlayback.pause(audioID: audioID) else { return }
+        stopSpectrumUpdates(audioID: audioID)
         activeAudioID = audioID
         updateAudioOverlay(audioID: audioID, phase: .paused, detail: "Paused", canPause: false, canStop: true)
         playbackStatus = nil
@@ -701,6 +708,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             guard try audioPlayback.resume(audioID: audioID) else { return }
             activeAudioID = audioID
             updateAudioOverlay(audioID: audioID, phase: .playing, detail: "Playing", canPause: true, canStop: true)
+            startSpectrumUpdates(audioID: audioID)
             playbackStatus = nil
         } catch {
             recordError(error.localizedDescription)
@@ -711,6 +719,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard let audioID = audioPlaybackOverlay?.audioID ?? activeAudioID else { return }
         stoppedAudioIDs.insert(audioID)
         requestedAudioIDs.remove(audioID)
+        stopSpectrumUpdates(audioID: audioID)
         _ = audioPlayback.stop(audioID: audioID)
         if activeAudioID == audioID { activeAudioID = nil }
         audioPlaybackOverlay = nil
@@ -720,6 +729,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     func pauseAudioForSceneBackground() {
         let snapshots = audioPlayback.pauseForLifecycle(reason: "scene_background")
         guard let snapshot = snapshots.first else { return }
+        stopSpectrumUpdates(audioID: snapshot.audioID)
         activeAudioID = snapshot.audioID
         updateAudioOverlay(audioID: snapshot.audioID, phase: .paused, detail: "Paused", canPause: false, canStop: true)
         playbackStatus = nil
@@ -731,6 +741,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             guard let result = results.first, result.started else { return }
             activeAudioID = result.audioID
             updateAudioOverlay(audioID: result.audioID, phase: .playing, detail: "Playing", canPause: true, canStop: true)
+            startSpectrumUpdates(audioID: result.audioID)
             playbackStatus = nil
         } catch {
             recordError(error.localizedDescription)
@@ -767,7 +778,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             projectKey: projectKey,
             phase: .requesting,
             detail: "Requesting audio",
-            spectrumBins: Array(repeating: 0.12, count: 12),
+            spectrumBins: idleSpectrumBins(),
             canPause: false,
             canStop: true
         )
@@ -807,6 +818,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func clearFailedPlaybackRequest(audioID: String) {
         stoppedAudioIDs.insert(audioID)
         requestedAudioIDs.remove(audioID)
+        stopSpectrumUpdates(audioID: audioID)
         if activeAudioID == audioID {
             activeAudioID = nil
         }
@@ -817,6 +829,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func prepareForNewPlaybackRequest(audioID: String) {
+        stopSpectrumUpdates()
         for requestedID in requestedAudioIDs where requestedID != audioID {
             stoppedAudioIDs.insert(requestedID)
         }
@@ -832,6 +845,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func clearAudioPlaybackForProjectSwitch() {
+        stopSpectrumUpdates()
         for requestedID in requestedAudioIDs {
             stoppedAudioIDs.insert(requestedID)
         }
@@ -878,13 +892,46 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         audioPlaybackOverlay = overlay
     }
 
-    private func spectrumBins(fromBase64 base64: String, count: Int = 12) -> [Double] {
-        guard let data = Data(base64Encoded: base64), data.isEmpty == false else {
-            return Array(repeating: 0.12, count: count)
+    private func idleSpectrumBins(count: Int = 12) -> [Double] {
+        Array(repeating: 0.04, count: max(1, count))
+    }
+
+    private func startSpectrumUpdates(audioID: String) {
+        stopSpectrumUpdates()
+        spectrumUpdateAudioID = audioID
+        spectrumUpdateTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                self.refreshPlaybackSpectrum(audioID: audioID)
+            }
         }
-        return (0..<count).map { index in
-            max(0.05, Double(data[index % data.count]) / 255.0)
-        }
+    }
+
+    private func stopSpectrumUpdates(audioID: String? = nil) {
+        if let audioID, spectrumUpdateAudioID != audioID { return }
+        spectrumUpdateTask?.cancel()
+        spectrumUpdateTask = nil
+        spectrumUpdateAudioID = nil
+    }
+
+    func refreshPlaybackSpectrumForTesting(audioID: String) {
+        refreshPlaybackSpectrum(audioID: audioID)
+    }
+
+    private func refreshPlaybackSpectrum(audioID: String) {
+        guard activeAudioID == audioID,
+              stoppedAudioIDs.contains(audioID) == false,
+              var overlay = audioPlaybackOverlay,
+              overlay.audioID == audioID,
+              overlay.phase == .playing
+        else { return }
+        overlay.spectrumBins = audioPlayback.spectrumBins(audioID: audioID, count: 12)
+        audioPlaybackOverlay = overlay
     }
 
     private func appendProgressEvent(requestID: String, projectKey: String, sessionID: String?, kind: String, text: String) {
@@ -1189,6 +1236,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         case .string(let string):
             handleFrameString(string)
         case .data(let data):
+            guard data.count <= Self.maxInboundFrameBytes else {
+                LogosConnectionLog.logger.error("Inbound binary frame rejected because it exceeded size limit bytes=\(data.count, privacy: .public)")
+                return
+            }
             if let string = String(data: data, encoding: .utf8) {
                 handleFrameString(string)
             } else {
@@ -1201,6 +1252,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     func handleFrameString(_ string: String) {
+        guard string.utf8.count <= Self.maxInboundFrameBytes else {
+            LogosConnectionLog.logger.error("Inbound frame rejected because it exceeded size limit bytes=\(string.utf8.count, privacy: .public)")
+            return
+        }
         guard
             let data = string.data(using: .utf8),
             let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1727,17 +1782,31 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             shouldAcceptAudioFrame(root, audioID: audioID),
             let data = payload["data"] as? String
         else { return }
-        let chunkIndex = payload["chunk_index"] as? Int ?? Int(payload["chunk_index"] as? String ?? "") ?? 0
+        guard let chunkIndex = audioChunkIndex(from: payload) else {
+            recordError(AudioPlaybackError.invalidChunkIndex.localizedDescription)
+            playbackStatus = nil
+            return
+        }
         do {
             requestedAudioIDs.insert(audioID)
             try audioPlayback.appendChunk(audioID: audioID, chunkIndex: chunkIndex, base64: data)
-            updateAudioOverlay(audioID: audioID, phase: .receiving, detail: "Receiving audio", canPause: false, canStop: true, spectrumBins: spectrumBins(fromBase64: data))
+            updateAudioOverlay(audioID: audioID, phase: .receiving, detail: "Receiving audio", canPause: false, canStop: true, spectrumBins: idleSpectrumBins())
             playbackStatus = "Receiving audio"
         } catch {
             requestedAudioIDs.remove(audioID)
             recordError(error.localizedDescription)
             playbackStatus = nil
         }
+    }
+
+    private func audioChunkIndex(from payload: [String: Any]) -> Int? {
+        if let index = payload["chunk_index"] as? Int {
+            return index
+        }
+        if let rawIndex = payload["chunk_index"] as? String {
+            return Int(rawIndex)
+        }
+        return nil
     }
 
     private func handleAudioEnd(_ root: [String: Any]) {
@@ -1752,11 +1821,19 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             requestedAudioIDs.remove(audioID)
             activeAudioID = audioID
             updateAudioOverlay(audioID: audioID, phase: .playing, detail: "Playing", canPause: true, canStop: true)
+            startSpectrumUpdates(audioID: audioID)
             playbackStatus = result.started ? "Playing audio" : "Audio did not start"
         } catch {
             requestedAudioIDs.remove(audioID)
             recordError(error.localizedDescription)
             playbackStatus = nil
+        }
+    }
+
+    private func rememberStoppedAudioID(_ audioID: String) {
+        stoppedAudioIDs.insert(audioID)
+        if stoppedAudioIDs.count > Self.stoppedAudioIDRetentionLimit {
+            stoppedAudioIDs.subtract(stoppedAudioIDs.sorted().prefix(stoppedAudioIDs.count - Self.stoppedAudioIDRetentionLimit))
         }
     }
 

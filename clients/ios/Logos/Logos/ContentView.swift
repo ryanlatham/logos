@@ -1717,7 +1717,7 @@ private struct AudioPlaybackOverlayView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            SpectrumAnalyzerView(bins: overlay.spectrumBins, isActive: overlay.phase == .playing || overlay.phase == .receiving)
+            SpectrumAnalyzerView(bins: overlay.spectrumBins, isActive: overlay.phase == .playing)
                 .frame(width: 92, height: 34)
                 .accessibilityHidden(true)
 
@@ -1772,23 +1772,17 @@ private struct AudioPlaybackOverlayView: View {
 private struct SpectrumAnalyzerView: View {
     let bins: [Double]
     let isActive: Bool
-    @State private var pulse = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 3) {
-            ForEach(Array(bins.enumerated()), id: \.offset) { index, value in
+            ForEach(Array(bins.enumerated()), id: \.offset) { _, value in
                 Capsule()
                     .fill(Color.logosAmber.opacity(isActive ? 0.95 : 0.45))
-                    .frame(width: 4, height: max(4, CGFloat(value) * 28 + (pulse ? CGFloat(index % 3) : 0)))
+                    .frame(width: 4, height: max(4, CGFloat(value) * 28))
+                    .animation(.easeOut(duration: 0.05), value: value)
             }
         }
         .frame(maxHeight: .infinity)
-        .onAppear {
-            guard isActive else { return }
-            withAnimation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true)) {
-                pulse.toggle()
-            }
-        }
     }
 }
 
