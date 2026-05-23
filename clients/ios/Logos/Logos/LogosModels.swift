@@ -553,7 +553,8 @@ enum PendingMessageReconciliation {
         guard pending.status == "pending",
               pending.role == persisted.role,
               pending.projectKey == persisted.projectKey else { return false }
-        return pending.messageID == persisted.messageID || pending.content == persisted.content
+        if pending.messageID == persisted.messageID { return true }
+        return pending.content == persisted.content && persisted.timestamp >= pending.timestamp
     }
 }
 
