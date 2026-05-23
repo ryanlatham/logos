@@ -226,13 +226,488 @@ async def test_final_user_text_is_mirrored_for_reconnect_delta(tmp_path):
             request_id="r1",
             device_id="iphone",
             project_key="alpha",
-            payload={"text": "hello", "client_msg_id": "client-hello", "is_final": True},
+            payload={"text": "please check the repo status", "client_msg_id": "client-hello", "is_final": True},
         )
     )
 
     batch = adapter._handle_messages_get(
         Envelope(type="messages_get", request_id="get", device_id="iphone", project_key="alpha", payload={"after_server_seq": 0})
     )
-    assert captured[-1].text == "hello"
-    assert [message["content"] for message in batch["payload"]["messages"]] == ["hello"]
+    assert captured[-1].text == "please check the repo status"
+    assert [message["content"] for message in batch["payload"]["messages"]] == ["please check the repo status"]
     assert batch["payload"]["messages"][0]["message_id"] == "client-hello"
+
+
+@pytest.mark.asyncio
+async def test_pending_interaction_frames_do_not_expose_gateway_session_key(tmp_path):
+    class CapturingServer:
+        def __init__(self):
+            self.frames = []
+
+        async def broadcast(self, frame, *, project_key=None):
+            self.frames.append({"frame": frame, "project_key": project_key})
+
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"store_path": str(tmp_path / "logos.db")}))
+    server = CapturingServer()
+    adapter.ws_server = server  # type: ignore[assignment]
+
+    approval = await adapter.send_exec_approval(
+        chat_id="project:alpha",
+        command="python manage.py migrate",
+        session_key="agent:main:logos:dm:project:alpha:approval-secret",
+        description="May modify DB",
+        metadata={"session_id": "project:alpha", "approval_id": "approval-secret-test"},
+    )
+    clarification = await adapter.send_clarify(
+        chat_id="project:alpha",
+        question="Which target?",
+        choices=["staging", "prod"],
+        clarify_id="clarify-secret-test",
+        session_key="agent:main:logos:dm:project:alpha:clarify-secret",
+        metadata={"session_id": "project:alpha"},
+    )
+
+    assert "session_key" not in approval.raw_response["payload"]
+    assert "session_key" not in clarification.raw_response["payload"]
+    for item in server.frames:
+        assert "session_key" not in item["frame"].get("payload", {})
+
+    assert adapter.store.get_pending_interaction("approval-secret-test").payload["session_key"].endswith("approval-secret")
+    assert adapter.store.get_pending_interaction("clarify-secret-test").payload["session_key"].endswith("clarify-secret")
+
+    replay = adapter._handle_messages_get(
+        Envelope(type="messages_get", request_id="get-pending", device_id="iphone", project_key="alpha", payload={"after_server_seq": 0})
+    )
+    for pending in replay["payload"]["pending_interactions"]:
+        assert "session_key" not in pending["payload"]
+
+
+@pytest.mark.asyncio
+async def test_unscoped_signed_hello_does_not_receive_other_project_broadcasts(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    adapter.store.set_active_project(device_id="iphone", project_key="alpha")
+    adapter.store.append_message(
+        project_key="alpha",
+        session_id="project:alpha",
+        message_id="alpha-private-replay",
+        role="assistant",
+        content="Alpha private replay must not be sent to unscoped hello.",
+    )
+    assert await adapter.connect() is True
+    timestamp_ms = int(time.time() * 1000)
+    nonce = "nonce-unscoped-project-123"
+    try:
+        async with websockets.connect(adapter.ws_url) as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "request_id": "hello-unscoped",
+                        "device_id": "iphone",
+                        "payload": {
+                            "timestamp_ms": timestamp_ms,
+                            "nonce": nonce,
+                            "after_server_seq": 0,
+                            "signature": sign_hello(
+                                "dev-secret",
+                                device_id="iphone",
+                                request_id="hello-unscoped",
+                                project_key=None,
+                                timestamp_ms=timestamp_ms,
+                                nonce=nonce,
+                            ),
+                        },
+                    }
+                )
+            )
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            assert hello["type"] == "hello"
+            assert hello["project_key"] == "default"
+
+            try:
+                replay = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.2))
+            except asyncio.TimeoutError:
+                replay = None
+            if replay is not None:
+                assert replay["type"] == "messages_batch"
+                assert replay["project_key"] == "default"
+                assert "Alpha private replay" not in json.dumps(replay)
+
+            await adapter.ws_server.broadcast(
+                {"type": "run_status", "project_key": "alpha", "payload": {"status": "running"}},
+                project_key="alpha",
+            )
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.2)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_signed_hello_ignores_unsigned_payload_project_key(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    adapter.store.append_message(
+        project_key="alpha",
+        session_id="project:alpha",
+        message_id="alpha-private-payload-scope",
+        role="assistant",
+        content="Alpha private replay must not be selected by unsigned payload project_key.",
+    )
+    assert await adapter.connect() is True
+    timestamp_ms = int(time.time() * 1000)
+    nonce = "nonce-unsigned-payload-project-123"
+    try:
+        async with websockets.connect(adapter.ws_url) as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "request_id": "hello-payload-project",
+                        "device_id": "iphone",
+                        "payload": {
+                            "project_key": "alpha",
+                            "timestamp_ms": timestamp_ms,
+                            "nonce": nonce,
+                            "after_server_seq": 0,
+                            "signature": sign_hello(
+                                "dev-secret",
+                                device_id="iphone",
+                                request_id="hello-payload-project",
+                                project_key=None,
+                                timestamp_ms=timestamp_ms,
+                                nonce=nonce,
+                            ),
+                        },
+                    }
+                )
+            )
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            assert hello["type"] == "hello"
+            assert hello["project_key"] == "default"
+
+            try:
+                replay = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.2))
+            except asyncio.TimeoutError:
+                replay = None
+            if replay is not None:
+                assert replay["type"] == "messages_batch"
+                assert replay["project_key"] == "default"
+                assert "Alpha private replay" not in json.dumps(replay)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_run_cancel_resolves_pending_interactions_for_project(tmp_path):
+    class CapturingLogosAdapter(LogosAdapter):
+        def __init__(self, config: PlatformConfig):
+            super().__init__(config)
+            self.captured_text: list[str] = []
+
+        async def handle_message(self, event):  # type: ignore[override]
+            self.captured_text.append(event.text)
+
+    adapter = CapturingLogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")})
+    )
+    adapter.store.upsert_pending_interaction(
+        request_id="approval-cancelled",
+        kind="approval",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="approval_request",
+        payload={"approval_id": "approval-cancelled"},
+        server_seq=1,
+    )
+    adapter.store.upsert_pending_interaction(
+        request_id="clarify-cancelled",
+        kind="clarification",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="clarify_request",
+        payload={"clarify_id": "clarify-cancelled"},
+        server_seq=2,
+    )
+    adapter.store.upsert_pending_interaction(
+        request_id="approval-beta",
+        kind="approval",
+        project_key="beta",
+        session_id="project:beta",
+        frame_type="approval_request",
+        payload={"approval_id": "approval-beta"},
+        server_seq=3,
+    )
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(type="run_cancel", request_id="cancel-alpha", device_id="iphone", project_key="alpha", payload={})
+    )
+
+    assert response["type"] == "run_status"
+    assert response["payload"]["status"] == "idle"
+    assert response["payload"]["cancelled"] is True
+    assert adapter.captured_text == ["/stop"]
+    assert adapter.store.list_pending_interactions("alpha") == []
+    assert [item.request_id for item in adapter.store.list_pending_interactions("beta")] == ["approval-beta"]
+
+
+@pytest.mark.asyncio
+async def test_run_cancel_broadcasts_terminal_idle_after_stop(tmp_path):
+    class CaptureServer:
+        def __init__(self):
+            self.frames: list[dict] = []
+
+        async def broadcast(self, frame, *, project_key=None):
+            self.frames.append(frame)
+
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")})
+    )
+    capture = CaptureServer()
+    adapter.ws_server = capture  # type: ignore[assignment]
+
+    dispatched: list[str] = []
+
+    async def fake_dispatch(envelope, text_override=None, **kwargs):
+        dispatched.append(text_override or envelope.payload.get("text"))
+        return envelope.project_key or "default"
+
+    adapter._dispatch_gateway_text = fake_dispatch  # type: ignore[method-assign]
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(type="run_cancel", request_id="cancel-terminal", device_id="iphone", project_key="alpha", payload={})
+    )
+
+    assert dispatched == ["/stop"]
+    assert [frame["payload"]["status"] for frame in capture.frames if frame["type"] == "run_status"] == ["cancelling", "idle"]
+    assert response["type"] == "run_status"
+    assert response["payload"]["status"] == "idle"
+    assert response["payload"]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_cancel_returns_terminal_error_when_stop_dispatch_fails(tmp_path):
+    class CaptureServer:
+        def __init__(self):
+            self.frames: list[dict] = []
+
+        async def broadcast(self, frame, *, project_key=None):
+            self.frames.append(frame)
+
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")})
+    )
+    adapter.store.upsert_pending_interaction(
+        request_id="approval-alpha-preserve",
+        kind="approval",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="approval_request",
+        payload={"approval_id": "approval-alpha-preserve"},
+        server_seq=10,
+    )
+    capture = CaptureServer()
+    adapter.ws_server = capture  # type: ignore[assignment]
+
+    async def failing_dispatch(envelope, text_override=None, **kwargs):
+        raise RuntimeError("gateway unavailable: /Users/ryan/.hermes/secret-token")
+
+    adapter._dispatch_gateway_text = failing_dispatch  # type: ignore[method-assign]
+
+    response = await adapter.handle_ws_envelope(
+        Envelope(type="run_cancel", request_id="cancel-terminal-error", device_id="iphone", project_key="alpha", payload={})
+    )
+
+    statuses = [frame["payload"]["status"] for frame in capture.frames if frame["type"] == "run_status"]
+    assert statuses == ["cancelling", "error"]
+    assert response["type"] == "run_status"
+    assert response["payload"]["status"] == "error"
+    assert response["payload"]["cancelled"] is False
+    assert [item.request_id for item in adapter.store.list_pending_interactions("alpha")] == ["approval-alpha-preserve"]
+    assert "secret-token" not in json.dumps(response)
+
+
+@pytest.mark.asyncio
+async def test_text_input_cannot_rebroadcast_cross_project_message_collision(tmp_path):
+    class CaptureServer:
+        def __init__(self):
+            self.frames: list[dict] = []
+
+        async def broadcast(self, frame, *, project_key=None):
+            self.frames.append(frame)
+
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")})
+    )
+    capture = CaptureServer()
+    adapter.ws_server = capture  # type: ignore[assignment]
+    adapter.store.append_message(
+        project_key="beta",
+        session_id="project:beta",
+        message_id="shared-client-id",
+        role="assistant",
+        content="Beta private content must not leak",
+    )
+
+    dispatched: list[str] = []
+
+    async def fake_handle_message(event):
+        dispatched.append(event.text)
+
+    adapter.handle_message = fake_handle_message  # type: ignore[method-assign]
+
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="alpha-collision",
+            device_id="iphone",
+            project_key="alpha",
+            session_id="project:beta",
+            payload={"text": "check the alpha logs", "client_msg_id": "shared-client-id"},
+        )
+    )
+
+    serialized_frames = json.dumps(capture.frames)
+    user_frames = [
+        frame
+        for frame in capture.frames
+        if frame["type"] == "state_update"
+        and frame["payload"].get("op") == "message_appended"
+        and frame["payload"]["message"]["role"] == "user"
+    ]
+    assert dispatched == ["check the alpha logs"]
+    assert len(user_frames) == 1
+    assert user_frames[0]["payload"]["message"]["project_key"] == "alpha"
+    assert user_frames[0]["payload"]["message"]["session_id"] == "project:alpha"
+    assert user_frames[0]["payload"]["message"]["content"] == "check the alpha logs"
+    assert "Beta private content must not leak" not in serialized_frames
+
+
+@pytest.mark.asyncio
+async def test_fast_cancel_intent_mirrors_user_message_before_stop(tmp_path):
+    class CaptureServer:
+        def __init__(self):
+            self.frames: list[dict] = []
+
+        async def broadcast(self, frame, *, project_key=None):
+            self.frames.append(frame)
+
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")})
+    )
+    capture = CaptureServer()
+    adapter.ws_server = capture  # type: ignore[assignment]
+
+    dispatched: list[str] = []
+
+    async def fake_dispatch(envelope, text_override=None, **kwargs):
+        dispatched.append(text_override or envelope.payload.get("text"))
+        return envelope.project_key or "default"
+
+    adapter._dispatch_gateway_text = fake_dispatch  # type: ignore[method-assign]
+
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="req-fast-stop",
+            device_id="iphone",
+            project_key="alpha",
+            payload={"text": "stop", "client_msg_id": "client-stop"},
+        )
+    )
+
+    user_frames = [
+        frame
+        for frame in capture.frames
+        if frame["type"] == "state_update"
+        and frame["payload"].get("op") == "message_appended"
+        and frame["payload"]["message"]["role"] == "user"
+    ]
+    assert dispatched == ["/stop"]
+    assert len(user_frames) == 1
+    assert user_frames[0]["payload"]["message"]["message_id"] == "client-stop"
+    assert user_frames[0]["payload"]["message"]["content"] == "stop"
+    assert [frame["payload"]["status"] for frame in capture.frames if frame["type"] == "run_status"] == ["cancelling", "idle"]
+
+
+def test_messages_get_before_anchor_cannot_cross_project_sessions(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"store_path": str(tmp_path / "logos.db")}))
+    adapter.store.append_message(
+        project_key="beta",
+        session_id="project:beta",
+        message_id="beta-1",
+        role="assistant",
+        content="Beta private message one",
+    )
+    adapter.store.append_message(
+        project_key="beta",
+        session_id="project:beta",
+        message_id="beta-2",
+        role="assistant",
+        content="Beta private message two",
+    )
+
+    response = adapter._handle_messages_get(
+        Envelope(
+            type="messages_get",
+            request_id="get-cross-project-before",
+            device_id="iphone",
+            project_key="alpha",
+            payload={"session_id": "project:beta", "before_message_id": "beta-2", "limit": 10},
+        )
+    )
+
+    assert response["payload"]["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_websocket_internal_error_does_not_echo_exception_details(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+
+    async def boom(envelope):
+        raise RuntimeError("leaked /Users/ryan/.hermes/secret-token")
+
+    adapter.handle_ws_envelope = boom  # type: ignore[method-assign]
+    assert await adapter.connect() is True
+    timestamp_ms = int(time.time() * 1000)
+    nonce = "nonce-internal-error-123"
+    try:
+        async with websockets.connect(adapter.ws_url) as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "request_id": "hello-internal-error",
+                        "device_id": "iphone",
+                        "project_key": "default",
+                        "payload": {
+                            "timestamp_ms": timestamp_ms,
+                            "nonce": nonce,
+                            "signature": sign_hello(
+                                "dev-secret",
+                                device_id="iphone",
+                                request_id="hello-internal-error",
+                                project_key="default",
+                                timestamp_ms=timestamp_ms,
+                                nonce=nonce,
+                            ),
+                        },
+                    }
+                )
+            )
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            assert hello["type"] == "hello"
+            await ws.send(json.dumps({"type": "text_input", "request_id": "boom", "device_id": "iphone", "project_key": "default", "payload": {"text": "boom"}}))
+            response = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+            assert response["type"] == "error"
+            assert response["payload"]["code"] == "internal_error"
+            assert response["payload"]["message"] == "Logos adapter internal error."
+            assert "secret-token" not in json.dumps(response)
+            assert "/Users/ryan" not in json.dumps(response)
+    finally:
+        await adapter.disconnect()

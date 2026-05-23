@@ -123,10 +123,16 @@ final class LogosUITests: XCTestCase {
 
     private func waitForPlaybackStatus(in app: XCUIApplication, timeout: TimeInterval = 10) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        let explicitStatus = app.descendants(matching: .any).matching(identifier: "playbackStatusLabel").firstMatch
+        let playbackOverlay = app.descendants(matching: .any).matching(identifier: "audioPlaybackOverlay").firstMatch
+        let pauseControl = app.buttons["audioOverlayPauseButton"]
+        let stopControl = app.buttons["audioOverlayStopButton"]
+        let legacyStatus = app.descendants(matching: .any).matching(identifier: "playbackStatusLabel").firstMatch
         while Date() < deadline {
-            if explicitStatus.exists,
-               ["Receiving audio", "Playing audio", "Audio finished"].contains(explicitStatus.label) {
+            if playbackOverlay.exists || pauseControl.exists || stopControl.exists {
+                return true
+            }
+            if legacyStatus.exists,
+               ["Receiving audio", "Playing audio", "Audio finished"].contains(legacyStatus.label) {
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))

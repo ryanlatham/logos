@@ -331,10 +331,10 @@ async def test_qr_paired_device_is_gateway_authorized_before_dispatch(tmp_path, 
             request_id="text-1",
             device_id=device_id,
             project_key="alpha",
-            payload={"text": "hello", "client_msg_id": "client-hello", "is_final": True},
+            payload={"text": "please check the repo status", "client_msg_id": "client-hello", "is_final": True},
         )
     )
 
-    assert adapter.captured_events[-1].text == "hello"
+    assert adapter.captured_events[-1].text == "please check the repo status"
     assert adapter.captured_events[-1].source.user_id == device_id
     assert gateway_pairing.PairingStore().is_approved("logos", device_id) is True

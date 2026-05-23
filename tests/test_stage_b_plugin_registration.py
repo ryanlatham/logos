@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+from gateway.config import PlatformConfig
+
 from logos import register
+from logos.adapter import LogosAdapter
 
 
 class RecordingContext:
@@ -30,6 +35,7 @@ def test_register_declares_logos_platform_contract():
     assert call["required_env"] == ["LOGOS_DEVICE_SECRET"]
     assert call["allowed_users_env"] == "LOGOS_ALLOWED_USERS"
     assert call["allow_all_env"] == "LOGOS_ALLOW_ALL_USERS"
+    assert call["cron_deliver_env_var"] == "LOGOS_HOME_CHANNEL"
     assert callable(call["adapter_factory"])
     assert callable(call["check_fn"])
     assert call["check_fn"]() is True
@@ -38,6 +44,29 @@ def test_register_declares_logos_platform_contract():
     assert command["name"] == "logos-pair"
     assert "adapter_url=wss://<host>/" in command["args_hint"]
     assert callable(command["handler"])
+
+@pytest.mark.asyncio
+async def test_logos_connect_seeds_default_home_channel_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOGOS_HOME_CHANNEL", raising=False)
+    monkeypatch.delenv("LOGOS_HOME_CHANNEL_NAME", raising=False)
+    adapter = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "master-secret",
+                "host": "127.0.0.1",
+                "port": 0,
+                "store_path": str(tmp_path / "logos.db"),
+            },
+        )
+    )
+
+    try:
+        assert await adapter.connect() is True
+        assert os.environ["LOGOS_HOME_CHANNEL"] == "project:default"
+        assert os.environ["LOGOS_HOME_CHANNEL_NAME"] == "Logos"
+    finally:
+        await adapter.disconnect()
 
 
 def test_registered_logos_pair_command_handler_generates_qr_media(tmp_path, monkeypatch):

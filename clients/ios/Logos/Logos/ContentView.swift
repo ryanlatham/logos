@@ -52,6 +52,24 @@ struct ContentView: View {
                 composerBar
             }
 
+            if let overlay = client.audioPlaybackOverlay {
+                AudioPlaybackOverlayView(
+                    overlay: overlay,
+                    onPauseResume: {
+                        if overlay.phase == .paused {
+                            client.resumePlayback()
+                        } else {
+                            client.pausePlayback()
+                        }
+                    },
+                    onStop: { client.stopPlayback() }
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 66)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(6)
+            }
+
             if showProjectSwitcher {
                 projectSwitcherLayer
                     .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
@@ -78,7 +96,10 @@ struct ContentView: View {
         .onAppear(perform: configureRuntime)
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
+                client.resumeAudioForSceneActive()
                 client.connectIfAutoConnectEnabled()
+            } else if newPhase == .inactive || newPhase == .background {
+                client.pauseAudioForSceneBackground()
             }
         }
         .onChange(of: client.connectionState) { _, newState in
@@ -219,6 +240,14 @@ struct ContentView: View {
                             .id(message.id)
                     }
 
+                    if let progress = client.progressActivity {
+                        ProgressActivityCard(
+                            activity: progress,
+                            onToggleExpanded: { client.toggleProgressActivityExpanded() }
+                        )
+                        .id("progress-activity")
+                    }
+
                     if voiceInput.isRecording || voiceInput.isFinalizingTranscript {
                         DraftUserBubble(text: voiceInput.partialTranscript.isEmpty ? "Listening…" : voiceInput.partialTranscript)
                             .id("voice-draft")
@@ -240,14 +269,6 @@ struct ContentView: View {
                             .id("ack")
                     }
 
-                    if let playbackStatus = client.playbackStatus, playbackStatus.isEmpty == false {
-                        ToolStrip(label: "audio", detail: playbackStatus)
-                            .id("playback")
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityIdentifier("playbackStatusLabel")
-                            .accessibilityLabel(playbackStatus)
-                    }
-
                     if let error = client.lastError, error.isEmpty == false {
                         ErrorStrip(text: error)
                             .id("error")
@@ -266,6 +287,7 @@ struct ContentView: View {
                 scrollToBottomAfterLayout(proxy, animated: false)
             }
             .onChange(of: client.messages.count) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.progressActivity?.events.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: voiceInput.partialTranscript) { _, _ in scrollToBottom(proxy) }
             .onChange(of: client.approvalCard?.id) { _, _ in scrollToBottom(proxy) }
             .onChange(of: client.clarifyCard?.id) { _, _ in scrollToBottom(proxy) }
@@ -290,7 +312,7 @@ struct ContentView: View {
             ApprovalCardView(
                 approval: approval,
                 isPending: client.pendingInteractionResponseID == approval.id,
-                isConnected: client.connectionState == .connected,
+                isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
                 onApprove: { client.approveCurrentRequest() },
                 onDeny: { client.denyCurrentRequest() }
             )
@@ -302,7 +324,7 @@ struct ContentView: View {
                 clarify: clarify,
                 answer: $clarifyAnswer,
                 isPending: client.pendingInteractionResponseID == clarify.id,
-                isConnected: client.connectionState == .connected,
+                isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
                 focused: $focusedField,
                 onChoice: { client.answerClarification($0) },
                 onFreeText: submitClarificationAnswer
@@ -330,7 +352,7 @@ struct ContentView: View {
                             .foregroundStyle(message.role == "user" ? Color.logosAmberOn.opacity(0.55) : Color.logosLabel3)
                     }
 
-                    if message.role != "user", message.status == "persisted" {
+                    if message.role != "user", message.status == "persisted", message.isProgressUpdate == false {
                         Button {
                             client.playback(message: message)
                         } label: {
@@ -1143,6 +1165,8 @@ struct ContentView: View {
                 proxy.scrollTo(approvalID, anchor: .bottom)
             } else if let clarifyID = client.clarifyCard?.id {
                 proxy.scrollTo(clarifyID, anchor: .bottom)
+            } else if client.progressActivity != nil {
+                proxy.scrollTo("progress-activity", anchor: .bottom)
             } else if let last = client.messages.last {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
@@ -1311,9 +1335,9 @@ struct ContentView: View {
 
     private var shouldShowRunControl: Bool {
         switch client.runStatus {
-        case .running, .queued, .awaitingApproval, .awaitingClarification:
+        case .running, .queued, .awaitingApproval, .awaitingClarification, .cancelling:
             return true
-        case .idle, .cancelling, .error:
+        case .idle, .error:
             return false
         }
     }
@@ -1357,13 +1381,16 @@ struct ContentView: View {
     }
 
     private var composerActionDisabled: Bool {
-        composerMode == .text && hasComposerDraft == false && defaultInput == "text"
+        if client.runStatus == .cancelling, composerMode == .text {
+            return true
+        }
+        return composerMode == .text && hasComposerDraft == false && defaultInput == "text"
     }
 
     private var voiceControlsDisabled: Bool {
         VoiceControlPolicy.controlsDisabled(
             voiceEnabled: voiceInput.voiceEnabled,
-            connected: client.connectionState == .connected,
+            connected: client.connectionState == .connected && client.runStatus != .cancelling,
             isRecording: voiceInput.isRecording || voiceInput.pendingMode != nil,
             isFinalizing: voiceInput.isFinalizingTranscript
         )
@@ -1625,6 +1652,146 @@ private struct DraftUserBubble: View {
     }
 }
 
+private struct ProgressActivityCard: View {
+    let activity: ProgressActivityState
+    let onToggleExpanded: () -> Void
+
+    private var latestEvent: ProgressActivityEvent? { activity.events.last }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Button(action: onToggleExpanded) {
+                HStack(spacing: 9) {
+                    Image(systemName: activity.isExpanded ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
+                        .foregroundStyle(activity.timedOut ? Color.logosRed : Color.logosAmber)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(activity.timedOut ? "Gateway timed out" : "Hermes is working")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel)
+                        Text("\(activity.events.count) update\(activity.events.count == 1 ? "" : "s")" + (latestEvent.map { " · \($0.kind)" } ?? ""))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel3)
+                    }
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("progressActivityToggle")
+            .accessibilityLabel(activity.isExpanded ? "Collapse Hermes progress updates" : "Expand Hermes progress updates")
+
+            if activity.isExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(activity.events) { event in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(event.kind)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(Color.logosAmber)
+                                .frame(width: 72, alignment: .leading)
+                            Text(event.text)
+                                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                .foregroundStyle(Color.logosLabel2)
+                                .lineLimit(4)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            } else if let latestEvent {
+                Text(latestEvent.text)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.logosLabel3)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke((activity.timedOut ? Color.logosRed : Color.logosAmber).opacity(0.24), lineWidth: 0.5))
+        .accessibilityIdentifier("progressActivityCard")
+    }
+}
+
+private struct AudioPlaybackOverlayView: View {
+    let overlay: AudioPlaybackOverlayState
+    let onPauseResume: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SpectrumAnalyzerView(bins: overlay.spectrumBins, isActive: overlay.phase == .playing || overlay.phase == .receiving)
+                .frame(width: 92, height: 34)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(overlay.phase == .paused ? "Audio paused" : "Audio playing")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                Text(overlay.detail)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.logosLabel3)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: onPauseResume) {
+                Image(systemName: overlay.phase == .paused ? "play.fill" : "pause.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.logosAmberOn)
+            .background(Color.logosAmber, in: Circle())
+            .disabled(!overlay.canPause && overlay.phase != .paused)
+            .opacity((overlay.canPause || overlay.phase == .paused) ? 1 : 0.45)
+            .accessibilityIdentifier("audioOverlayPauseButton")
+            .accessibilityLabel(overlay.phase == .paused ? "Resume audio" : "Pause audio")
+
+            Button(action: onStop) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.white)
+            .background(Color.logosRed, in: Circle())
+            .disabled(!overlay.canStop)
+            .opacity(overlay.canStop ? 1 : 0.45)
+            .accessibilityIdentifier("audioOverlayStopButton")
+            .accessibilityLabel("Stop audio")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.logosGlass.opacity(0.96), in: RoundedRectangle(cornerRadius: 18))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.28), radius: 16, x: 0, y: 8)
+        .accessibilityIdentifier("audioPlaybackOverlay")
+    }
+}
+
+private struct SpectrumAnalyzerView: View {
+    let bins: [Double]
+    let isActive: Bool
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(Array(bins.enumerated()), id: \.offset) { index, value in
+                Capsule()
+                    .fill(Color.logosAmber.opacity(isActive ? 0.95 : 0.45))
+                    .frame(width: 4, height: max(4, CGFloat(value) * 28 + (pulse ? CGFloat(index % 3) : 0)))
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .onAppear {
+            guard isActive else { return }
+            withAnimation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true)) {
+                pulse.toggle()
+            }
+        }
+    }
+}
+
 private struct ThinkingBubble: View {
     let text: String
     @State private var shimmerPhase = false
@@ -1848,7 +2015,7 @@ private struct ClarifyCardView: View {
                         .frame(height: 40)
                         .background(Color.logosBG1, in: RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.5))
-                        .disabled(isPending)
+                        .disabled(!isConnected || isPending)
                     Button(isPending ? "Sent" : "Send") { onFreeText() }
                         .buttonStyle(AmberChipButtonStyle())
                         .disabled(!isConnected || isPending || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

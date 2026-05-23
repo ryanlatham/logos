@@ -28,10 +28,10 @@ Logos needs to support:
 - Explicit resume of existing Hermes sessions from Logos using gateway-native `/resume`; browsing uses the Logos mobile picker, with `/sessions` passed through only if the installed gateway handler is available.
 - Project switching by app picker or by voice, for example: "switch to allox".
 - Frontier-model quality for actual work through Hermes's normal agent stack.
-- Fast local-model responses only for acknowledgment, summarization, and narrow intent extraction.
+- Fast local-model responses only for acknowledgment, safe micro-responses, summarization metadata, and narrow intent extraction.
 - Interactive Hermes surfaces: clarification prompts, one-shot tool approvals, denial, stop/cancel, and visible tool/run progress.
 - Asynchronous completion notifications when the phone is backgrounded or disconnected.
-- Lazy audio playback of short summaries rather than automatic full-response TTS.
+- Lazy/manual and active-app automatic audio playback use full assistant message text, with summaries retained for notification metadata and future compact surfaces.
 
 ## Non-goals for core v1
 
@@ -665,44 +665,68 @@ Do not make implicit single-session sharing the core continuity mechanism. It ca
 
 ## Fast LLM
 
-The fast model has three jobs:
+The fast model has four deliberately narrow jobs:
 
-1. Generate a very short acknowledgment.
-2. Detect narrow control intents: switch project, create project, cancel/stop.
-3. Summarize completed agent responses for notification metadata and audio playback.
+1. Generate a very short, contextual acknowledgment for Hermes-bound work.
+2. Detect narrow control intents: switch project, create project, resume, cancel/stop, and explicit approval/denial replies.
+3. Produce safe direct micro-responses for trivial non-tool asks such as greetings, thanks, static app help, or tiny generic text.
+4. Summarize completed agent responses for notification metadata and compact future surfaces.
 
-It does not answer substantive user requests. It does not persist outputs into Hermes conversation history. It does not call tools.
+It does not answer substantive user requests, query current facts, calculate, inspect files, read project state, or call tools. Direct micro-responses are Logos-local assistant messages marked with `metadata.source = "fast_response"`; they are not persisted into Hermes conversation history. Anything ambiguous, current, stateful, tool-requiring, or action-oriented goes through the normal Hermes gateway path.
 
 Suggested schema:
 
 ```json
 {
   "ack": true,
-  "ack_text": "I'll check that now.",
+  "ack_text": "I'll check.",
+  "direct_response_text": null,
+  "direct_response_kind": null,
   "switch_intent": null,
   "create_intent": null,
+  "resume_intent": null,
   "cancel_intent": false,
+  "approval_decision": null,
   "confidence": 0.91
 }
 ```
 
+For a fast direct response:
+
+```json
+{
+  "ack": false,
+  "ack_text": null,
+  "direct_response_text": "I'm here.",
+  "direct_response_kind": "social",
+  "switch_intent": null,
+  "create_intent": null,
+  "resume_intent": null,
+  "cancel_intent": false,
+  "approval_decision": null,
+  "confidence": 0.93
+}
+```
+
+Acknowledgments are transient state updates, not chat messages. The adapter includes `transient: true` and `ttl_ms` in `fast_ack` frames; the iOS client clears them on assistant messages, terminal run status, project/interaction changes, or TTL expiry.
+
 V1 behavior on uncertainty:
 
 - If switch intent is ambiguous, do not switch; ask a clarification or leave the active project unchanged.
-- If JSON validation fails, default to no ack and no control action.
+- If direct-response safety is uncertain, set `direct_response_text` to null and route the request to Hermes.
+- If JSON validation fails, fall back to deterministic safe ack/intent behavior and no model-originated direct response.
 - If the model is unavailable, the app still submits the message to Hermes; only the low-latency nicety is lost.
 
 Use a constrained decoder or structured-output wrapper. Treat `>95%` intent accuracy as an evaluation target, not an architectural assumption. Collect a small local eval set from real commands before trusting voice-driven switching.
 
 ## TTS
 
-TTS is short-form only:
+TTS is request-scoped and adapter-owned:
 
-- fast acknowledgment at request time
-- summary playback for completed messages
+- optional fast acknowledgment audio at request time
+- active-app automatic playback of completed assistant messages using full message text
+- manual playback using `mode: "full"`
 - optional clarification/approval prompt readout if the UI asks for it
-
-Agent responses are not streamed as full TTS during runs. Long responses remain text-first. Audio is for gist; text is for detail.
 
 `playback_audio` request:
 
@@ -712,13 +736,13 @@ Agent responses are not streamed as full TTS during runs. Long responses remain 
   "project_key": "archwright-phase-6",
   "session_id": "...",
   "payload": {
-    "message_id": 12346,
-    "mode": "summary"
+    "message_id": "12346",
+    "mode": "full"
   }
 }
 ```
 
-The adapter looks up a stored summary for `message_id`. If none exists and the message is short, it reads the message itself. If none exists and the message is long, it generates a summary first, stores it, and then streams audio.
+When a `message_id` is present, the adapter treats its stored message content as authoritative instead of trusting client-provided text. Summaries are still stored for notification metadata and compact surfaces, but full-response playback is the user-facing audio path.
 
 Start with Kokoro or the simplest high-speed local TTS that works reliably on the Mac. Treat Chatterbox, Qwen3-TTS, and other naturalness upgrades as future internal swaps, not v1 product decisions.
 
@@ -963,7 +987,7 @@ Each stage should be demoable. Do not begin the next stage until the current one
 
 - No background agent-run durability after adapter restart.
 - No persistent approval policy store.
-- No automatic full-response TTS.
+- No continuous background full-response TTS while the app is suspended.
 - No continuous listening.
 - No cross-device global focus sync.
 - No manual Kanban editing UI.

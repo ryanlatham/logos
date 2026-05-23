@@ -406,6 +406,45 @@ struct LogosProject: Identifiable, Hashable {
     }
 }
 
+enum AudioPlaybackPhase: String, Hashable {
+    case requesting
+    case receiving
+    case playing
+    case paused
+    case finished
+    case failed
+}
+
+struct AudioPlaybackOverlayState: Identifiable, Hashable {
+    var id: String { audioID }
+    let audioID: String
+    let messageID: String?
+    let projectKey: String
+    var phase: AudioPlaybackPhase
+    var detail: String
+    var spectrumBins: [Double]
+    var canPause: Bool
+    var canStop: Bool
+}
+
+struct ProgressActivityEvent: Identifiable, Hashable {
+    let id: String
+    let kind: String
+    let text: String
+    let timestamp: TimeInterval
+}
+
+struct ProgressActivityState: Identifiable, Hashable {
+    var id: String { requestID }
+    let requestID: String
+    let projectKey: String
+    let sessionID: String?
+    var events: [ProgressActivityEvent]
+    var isExpanded: Bool
+    var timedOut: Bool
+    var lastUpdateAt: TimeInterval
+}
+
 struct LogosMessage: Identifiable, Hashable {
     var id: String { "\(sessionID):\(messageID)" }
     let projectKey: String
@@ -416,6 +455,46 @@ struct LogosMessage: Identifiable, Hashable {
     let content: String
     let timestamp: TimeInterval
     var status: String
+    var isFinal: Bool = true
+    var hasFinalizedMetadata: Bool = false
+    var metadataSource: String? = nil
+    var progressKind: String? = nil
+
+    var gatewayProgressKind: String? {
+        Self.gatewayProgressKind(for: content)
+    }
+
+    var progressEventKind: String {
+        progressKind ?? metadataSource ?? gatewayProgressKind ?? "progress"
+    }
+
+    var isProgressUpdate: Bool {
+        guard role != "user" else { return false }
+        if hasFinalizedMetadata && isFinal {
+            return false
+        }
+        return isFinal == false
+            || progressKind != nil
+            || metadataSource == "tool_progress"
+            || metadataSource == "progress"
+            || gatewayProgressKind != nil
+    }
+
+    static func gatewayProgressKind(for content: String) -> String? {
+        var trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["⏳", "⚠️", "⚠"] where trimmed.hasPrefix(prefix) {
+            trimmed = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            break
+        }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("still working...") || lower.hasPrefix("still working…") {
+            return "gateway_status"
+        }
+        if lower.hasPrefix("gateway restarting") || lower.hasPrefix("gateway shutting down") {
+            return "gateway_status"
+        }
+        return nil
+    }
 
     static func from(dictionary: [String: Any]) -> LogosMessage? {
         guard
@@ -427,6 +506,10 @@ struct LogosMessage: Identifiable, Hashable {
         else { return nil }
         let serverSeq = dictionary["server_seq"] as? Int ?? Int(dictionary["server_seq"] as? String ?? "") ?? 0
         let timestamp = dictionary["timestamp"] as? TimeInterval ?? Date().timeIntervalSince1970
+        let metadata = dictionary["metadata"] as? [String: Any]
+        let finalized = metadata?["finalized"] as? Bool
+        let source = metadata?["source"] as? String
+        let progressKind = metadata?["progress_kind"] as? String ?? metadata?["kind"] as? String
         return LogosMessage(
             projectKey: projectKey,
             sessionID: sessionID,
@@ -435,7 +518,11 @@ struct LogosMessage: Identifiable, Hashable {
             role: role,
             content: content,
             timestamp: timestamp,
-            status: dictionary["status"] as? String ?? "persisted"
+            status: dictionary["status"] as? String ?? "persisted",
+            isFinal: finalized ?? true,
+            hasFinalizedMetadata: finalized != nil,
+            metadataSource: source,
+            progressKind: progressKind
         )
     }
 
@@ -463,7 +550,9 @@ struct UndeliveredSpeechDraft: Identifiable, Equatable {
 
 enum PendingMessageReconciliation {
     static func shouldRemove(pending: LogosMessage, whenPersisted persisted: LogosMessage) -> Bool {
-        guard pending.status == "pending", pending.role == persisted.role else { return false }
+        guard pending.status == "pending",
+              pending.role == persisted.role,
+              pending.projectKey == persisted.projectKey else { return false }
         return pending.messageID == persisted.messageID || pending.content == persisted.content
     }
 }

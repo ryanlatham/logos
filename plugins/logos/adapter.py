@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import ipaddress
 import logging
 import os
+import re
 import shlex
 import socket
 import time
@@ -18,7 +20,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 from .apns import APNSClient, PrivateNotificationKind, build_private_apns_payload
-from .fast_llm import FastModelResult, build_fast_model
+from .fast_llm import FastModelResult, build_fast_model, is_safe_direct_response_for_request
 from .pairing import (
     DEFAULT_PAIRING_TTL_SECONDS,
     PairingInvite,
@@ -28,15 +30,65 @@ from .pairing import (
     render_qr_png,
 )
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
-from .store import LogosMessage, LogosProject, LogosStore
+from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
 
+_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "logos_request_context",
+    default=None,
+)
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS = 600
+DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS = 100
+LOGOS_HOME_CHANNEL_ENV = "LOGOS_HOME_CHANNEL"
+LOGOS_HOME_CHANNEL_NAME_ENV = "LOGOS_HOME_CHANNEL_NAME"
+DEFAULT_LOGOS_HOME_CHANNEL = "project:default"
+DEFAULT_LOGOS_HOME_CHANNEL_NAME = "Logos"
+PROGRESS_MESSAGE_ID_PREFIX = "progress-"
+GATEWAY_STILL_WORKING_RE = re.compile(r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE)
+GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
+PROGRESS_TOOL_NAMES = {
+    "airtable",
+    "browser_click",
+    "browser_navigate",
+    "browser_scroll",
+    "browser_snapshot",
+    "browser_type",
+    "browser_vision",
+    "clarify",
+    "computer_use",
+    "cronjob",
+    "delegate_task",
+    "execute_code",
+    "ha_call_service",
+    "ha_get_state",
+    "ha_list_entities",
+    "ha_list_services",
+    "image_generate",
+    "memory",
+    "patch",
+    "process",
+    "read_file",
+    "search_files",
+    "send_message",
+    "skill_manage",
+    "skill_view",
+    "skills_list",
+    "terminal",
+    "text_to_speech",
+    "todo",
+    "vision_analyze",
+    "web_extract",
+    "web_search",
+    "write_file",
+}
+PROGRESS_LINE_RE = re.compile(r"^\W+\s+(?P<tool>[A-Za-z_][A-Za-z0-9_.-]*)(?:\(|:|…|\.\.\.|\s|$)")
 
 
 def _truthy(value: Any) -> bool:
@@ -94,9 +146,70 @@ def _optional_nonempty_str(value: Any) -> str | None:
     return text or None
 
 
+def _nonnegative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if parsed < 0:
+        return int(default)
+    return parsed
+
+
 def _validate_config(config: PlatformConfig) -> bool:
     extra = getattr(config, "extra", {}) or {}
     return bool(os.getenv("LOGOS_DEVICE_SECRET") or _optional_nonempty_str(extra.get("device_secret")))
+
+
+def _project_chat_id(project_key: Any) -> str | None:
+    text = _optional_nonempty_str(project_key)
+    if not text:
+        return None
+    return text if text.startswith("project:") else f"project:{text}"
+
+
+def _configured_home_channel(config: PlatformConfig, extra: dict[str, Any]) -> tuple[str, str]:
+    """Resolve Logos' process-local home channel.
+
+    Hermes emits a first-message onboarding notice for any platform with no
+    home target env var. Logos' chats are per-project, so leaving this unset
+    causes that generic notice to repeat in every new project. A stable default
+    project gives Logos the same one-home-channel shape as Telegram/Discord
+    without requiring Hermes core special-casing.
+    """
+    explicit_env = _optional_nonempty_str(os.getenv(LOGOS_HOME_CHANNEL_ENV))
+    explicit_name = _optional_nonempty_str(os.getenv(LOGOS_HOME_CHANNEL_NAME_ENV))
+    if explicit_env:
+        return explicit_env, explicit_name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
+
+    home = getattr(config, "home_channel", None)
+    home_chat_id = _optional_nonempty_str(getattr(home, "chat_id", None)) if home is not None else None
+    home_name = _optional_nonempty_str(getattr(home, "name", None)) if home is not None else None
+    if home_chat_id:
+        return home_chat_id, home_name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
+
+    configured = extra.get("home_channel")
+    if isinstance(configured, dict):
+        chat_id = _optional_nonempty_str(configured.get("chat_id")) or _project_chat_id(configured.get("project_key"))
+        name = _optional_nonempty_str(configured.get("name"))
+        if chat_id:
+            return chat_id, name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
+    else:
+        chat_id = _optional_nonempty_str(configured)
+        if chat_id:
+            return chat_id, _optional_nonempty_str(extra.get("home_channel_name")) or DEFAULT_LOGOS_HOME_CHANNEL_NAME
+
+    chat_id = _optional_nonempty_str(extra.get("home_chat_id")) or _project_chat_id(extra.get("home_project_key"))
+    if chat_id:
+        return chat_id, _optional_nonempty_str(extra.get("home_channel_name")) or DEFAULT_LOGOS_HOME_CHANNEL_NAME
+
+    return DEFAULT_LOGOS_HOME_CHANNEL, DEFAULT_LOGOS_HOME_CHANNEL_NAME
+
+
+def _ensure_home_channel_env(config: PlatformConfig, extra: dict[str, Any]) -> None:
+    chat_id, name = _configured_home_channel(config, extra)
+    os.environ.setdefault(LOGOS_HOME_CHANNEL_ENV, chat_id)
+    os.environ.setdefault(LOGOS_HOME_CHANNEL_NAME_ENV, name)
 
 
 def _platform() -> Platform:
@@ -115,6 +228,7 @@ def _platform() -> Platform:
                     required_env=["LOGOS_DEVICE_SECRET"],
                     allowed_users_env="LOGOS_ALLOWED_USERS",
                     allow_all_env="LOGOS_ALLOW_ALL_USERS",
+                    cron_deliver_env_var=LOGOS_HOME_CHANNEL_ENV,
                     pii_safe=True,
                     emoji="📱",
                 )
@@ -142,8 +256,19 @@ class LogosAdapter(BasePlatformAdapter):
         self.store = LogosStore(self._store_path(extra))
         self.tts = build_tts(extra)
         self.fast_model = build_fast_model(extra)
+        final_audio_full_max_chars = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_CHARS")
+        final_audio_full_max_words = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_WORDS")
+        self.final_audio_full_max_chars = _nonnegative_int(
+            final_audio_full_max_chars if final_audio_full_max_chars is not None else extra.get("final_audio_full_max_chars"),
+            DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS,
+        )
+        self.final_audio_full_max_words = _nonnegative_int(
+            final_audio_full_max_words if final_audio_full_max_words is not None else extra.get("final_audio_full_max_words"),
+            DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
+        )
         self.apns = APNSClient.from_env()
         self.latest_pairing_invite: PairingInvite | None = None
+        self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
 
     @staticmethod
     def envelope_from_dict(data: dict[str, Any]) -> Envelope:
@@ -428,6 +553,7 @@ class LogosAdapter(BasePlatformAdapter):
         except Exception as exc:
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
             return False
+        _ensure_home_channel_env(self.config, getattr(self.config, "extra", {}) or {})
         self._mark_connected()
         logger.info("Logos: WebSocket server listening on %s", self.ws_url)
         return True
@@ -540,14 +666,18 @@ class LogosAdapter(BasePlatformAdapter):
     async def _handle_final_text(self, envelope: Envelope) -> None:
         project_key = self._project_key_for(envelope)
         text = envelope.payload.get("text")
-        fast_result = self.fast_model.analyze_input(text if isinstance(text, str) else "")
+        text_value = text if isinstance(text, str) else ""
+        session_id = self._client_session_id_for(envelope, project_key)
+        fast_result = self.fast_model.analyze_input(text_value)
+        if await self._handle_fast_direct_response(envelope, fast_result):
+            return None
         await self._emit_fast_ack(envelope, fast_result)
         routed = await self._route_fast_intent(envelope, fast_result)
         if routed:
             return None
         await self._broadcast_run_status(
             project_key=project_key,
-            session_id=envelope.session_id or f"project:{project_key}",
+            session_id=session_id,
             status="running",
             request_id=envelope.request_id,
             device_id=envelope.device_id,
@@ -555,11 +685,158 @@ class LogosAdapter(BasePlatformAdapter):
         await self._dispatch_gateway_text(envelope)
         return None
 
+    async def _mirror_user_message(
+        self,
+        envelope: Envelope,
+        text: str,
+        *,
+        project: LogosProject,
+        project_key: str,
+        session_id: str,
+        client_msg_id: str,
+    ) -> LogosMessage:
+        if envelope.device_id:
+            self.store.set_active_project(device_id=envelope.device_id, project_key=project_key)
+        stored_user = self.store.append_message(
+            project_key=project_key,
+            session_id=session_id,
+            message_id=client_msg_id,
+            role="user",
+            content=text,
+            metadata={"client_msg_id": client_msg_id, "source": envelope.type},
+        )
+        existing_project = self.store.get_project(project_key)
+        self.store.upsert_project(
+            project_key=project_key,
+            title=existing_project.title if existing_project else project.title,
+            current_session_id=session_id,
+            lineage_root_session_id=session_id,
+            last_seen_message_id=stored_user.message_id,
+            last_seen_server_seq=stored_user.server_seq,
+            last_preview=text[:240],
+        )
+        if self.ws_server is not None:
+            await self.ws_server.broadcast(self._message_state_update(stored_user), project_key=project_key)
+        return stored_user
+
+    def _client_session_id_for(self, envelope: Envelope, project_key: str) -> str:
+        default_session_id = f"project:{project_key}"
+        requested = str(envelope.session_id or "").strip()
+        if not requested:
+            return default_session_id
+        if requested.startswith("project:") and requested != default_session_id:
+            return default_session_id
+        for project in self.store.list_projects(limit=500):
+            if project.project_key == project_key:
+                continue
+            if requested in {project.current_session_id, project.lineage_root_session_id, f"project:{project.project_key}"}:
+                return default_session_id
+        return requested
+
+    def _request_context_for_event(self, event: MessageEvent) -> dict[str, str] | None:
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        request_id = str(raw_message.get("request_id") or "").strip()
+        if not request_id:
+            return None
+        project_key = str(raw_message.get("project_key") or self._project_key_from_chat_id(event.source.chat_id)).strip()
+        session_id = str(raw_message.get("session_id") or event.source.chat_id).strip()
+        return {"project_key": project_key, "session_id": session_id, "request_id": request_id}
+
+    async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
+        context = self._request_context_for_event(event)
+        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
+        try:
+            await super().handle_message(event)
+        finally:
+            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
+
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:  # type: ignore[override]
+        context = self._request_context_for_event(event)
+        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
+
+    def _metadata_with_current_request_id(
+        self,
+        *,
+        project_key: str,
+        session_id: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(metadata or {})
+        if metadata.get("request_id"):
+            return metadata
+        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        if not context or context.get("project_key") != project_key:
+            return metadata
+        context_session = context.get("session_id")
+        if not context_session or str(session_id or "").strip() != context_session:
+            return metadata
+        explicit_session = str(metadata.get("session_id") or metadata.get("session") or "").strip()
+        if explicit_session and explicit_session != context_session:
+            return metadata
+        request_id = context.get("request_id")
+        if request_id:
+            metadata["request_id"] = request_id
+        return metadata
+
+    async def _handle_fast_direct_response(self, envelope: Envelope, result: FastModelResult) -> bool:
+        response_text = result.direct_response_text
+        response_kind = result.direct_response_kind
+        text = envelope.payload.get("text")
+        if any([result.switch_intent, result.create_intent, result.resume_intent, result.cancel_intent, result.approval_decision]):
+            return False
+        if not response_text or not response_kind or not isinstance(text, str) or not text.strip():
+            return False
+        if not is_safe_direct_response_for_request(text, response_kind, response_text):
+            return False
+        project_key = self._project_key_for(envelope)
+        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
+        client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
+        session_id = self._client_session_id_for(envelope, project_key)
+        await self._mirror_user_message(
+            envelope,
+            text,
+            project=project,
+            project_key=project_key,
+            session_id=session_id,
+            client_msg_id=client_msg_id,
+        )
+        assistant_message_id = f"fast-{envelope.request_id or uuid.uuid4()}"
+        stored_assistant = self.store.append_message(
+            project_key=project_key,
+            session_id=session_id,
+            message_id=assistant_message_id,
+            role="assistant",
+            content=response_text,
+            metadata={
+                "source": "fast_response",
+                "fast_response_kind": response_kind,
+                "fast_model": result.to_protocol(),
+                "request_id": envelope.request_id,
+            },
+        )
+        existing_project = self.store.get_project(project_key)
+        self.store.upsert_project(
+            project_key=project_key,
+            title=existing_project.title if existing_project else project.title,
+            current_session_id=session_id,
+            lineage_root_session_id=session_id,
+            last_seen_message_id=stored_assistant.message_id,
+            last_seen_server_seq=stored_assistant.server_seq,
+            last_preview=response_text[:240],
+        )
+        if self.ws_server is not None:
+            await self.ws_server.broadcast(self._message_state_update(stored_assistant), project_key=project_key)
+        return True
+
     async def _emit_fast_ack(self, envelope: Envelope, result: FastModelResult) -> dict[str, Any] | None:
         if not result.ack or not result.ack_text:
             return None
         project_key = self._project_key_for(envelope)
-        session_id = envelope.session_id or f"project:{project_key}"
+        session_id = self._client_session_id_for(envelope, project_key)
         audio_id = f"ack-{envelope.request_id or uuid.uuid4()}"
         frame = self._state_update(
             op="fast_ack",
@@ -569,6 +846,8 @@ class LogosAdapter(BasePlatformAdapter):
                 "fast_model": result.to_protocol(),
                 "audio_id": audio_id,
                 "transient": True,
+                "ttl_ms": 5000,
+                "clear_on": ["assistant_message", "run_terminal", "project_change", "interaction_resolved"],
             },
         )
         if self.ws_server is not None:
@@ -589,6 +868,7 @@ class LogosAdapter(BasePlatformAdapter):
 
     async def _route_fast_intent(self, envelope: Envelope, result: FastModelResult) -> bool:
         if result.cancel_intent:
+            await self._mirror_control_intent_message(envelope)
             await self._handle_run_cancel(envelope)
             return True
         if result.approval_decision:
@@ -640,6 +920,21 @@ class LogosAdapter(BasePlatformAdapter):
                 return True
         return False
 
+    async def _mirror_control_intent_message(self, envelope: Envelope) -> None:
+        text = envelope.payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+        project_key = self._project_key_for(envelope)
+        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
+        await self._mirror_user_message(
+            envelope,
+            text.strip(),
+            project=project,
+            project_key=project_key,
+            session_id=self._client_session_id_for(envelope, project_key),
+            client_msg_id=str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()),
+        )
+
     def _find_project_by_title(self, title: str) -> LogosProject | None:
         normalized = str(title or "").strip().lower()
         if not normalized:
@@ -668,29 +963,18 @@ class LogosAdapter(BasePlatformAdapter):
         device_id = envelope.device_id or str(envelope.payload.get("device_id") or "logos-device")
         self._approve_gateway_pairing_for_device(device_id, _optional_nonempty_str(envelope.payload.get("display_name")))
         client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
-        session_id = str(envelope.session_id or f"project:{project_key}")
+        session_id = self._client_session_id_for(envelope, project_key)
         if mirror_user:
-            stored_user = self.store.append_message(
+            await self._mirror_user_message(
+                envelope,
+                text,
+                project=project,
                 project_key=project_key,
                 session_id=session_id,
-                message_id=client_msg_id,
-                role="user",
-                content=text,
-                metadata={"client_msg_id": client_msg_id, "source": envelope.type},
+                client_msg_id=client_msg_id,
             )
-            existing_project = self.store.get_project(project_key)
-            self.store.upsert_project(
-                project_key=project_key,
-                title=existing_project.title if existing_project else project.title,
-                current_session_id=session_id,
-                lineage_root_session_id=session_id,
-                last_seen_message_id=stored_user.message_id,
-                last_seen_server_seq=stored_user.server_seq,
-                last_preview=text[:240],
-            )
-            if self.ws_server is not None:
-                await self.ws_server.broadcast(self._message_state_update(stored_user), project_key=project_key)
         raw_message = envelope.to_dict()
+        raw_message["session_id"] = session_id
         raw_payload = dict(raw_message.get("payload") or {})
         raw_payload["text"] = text
         raw_message["payload"] = raw_payload
@@ -716,6 +1000,105 @@ class LogosAdapter(BasePlatformAdapter):
         project_key = self._project_key_from_chat_id(chat_id)
         return {"name": project_key, "type": "dm", "project_key": project_key}
 
+    @staticmethod
+    def _source_hash(text: str) -> str:
+        return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+    def _is_short_final_audio_text(self, text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return (
+            len(normalized) <= self.final_audio_full_max_chars
+            and len(normalized.split()) <= self.final_audio_full_max_words
+        )
+
+    def _summary_for_message(self, message: LogosMessage) -> tuple[LogosSummary, str]:
+        expected_source_hash = self._source_hash(message.content)
+        existing = self.store.get_summary(message.session_id, message.message_id)
+        if existing is not None and existing.source_hash == expected_source_hash:
+            return existing, "reused"
+
+        summary_result = self.fast_model.summarize(message.content)
+        summary = self.store.upsert_summary(
+            message=message,
+            summary_text=summary_result.summary_text,
+            source_hash=expected_source_hash,
+        )
+        return summary, "regenerated" if existing is not None else "generated"
+
+    @staticmethod
+    def _looks_like_tool_progress_text(content: str) -> bool:
+        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+        if not lines:
+            return False
+        for line in lines:
+            match = PROGRESS_LINE_RE.match(line)
+            if not match:
+                return False
+            tool = match.group("tool").strip(" .:()[]{}")
+            if tool not in PROGRESS_TOOL_NAMES and "_" not in tool and "." not in tool:
+                return False
+        return True
+
+    @staticmethod
+    def _looks_like_gateway_status_text(content: str) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        return bool(GATEWAY_STILL_WORKING_RE.match(text) or GATEWAY_LIFECYCLE_STATUS_RE.match(text))
+
+    def _progress_kind_for_text(self, content: str) -> str | None:
+        if self._looks_like_tool_progress_text(content):
+            return "tool_progress"
+        if self._looks_like_gateway_status_text(content):
+            return "gateway_status"
+        return None
+
+    async def _broadcast_progress_text(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        kind: str = "tool_progress",
+    ) -> SendResult:
+        metadata = dict(metadata or {})
+        project_key = self._project_key_from_chat_id(chat_id)
+        provided_progress_id = request_id or metadata.get("message_id")
+        context_key = (project_key, str(provided_progress_id)) if provided_progress_id is not None else None
+        previous_context = self._transient_progress_context.get(context_key, {}) if context_key is not None else {}
+        previous_metadata = dict(previous_context.get("metadata") or {})
+        session_id = str(metadata.get("session_id") or metadata.get("session") or previous_context.get("session_id") or chat_id)
+        if provided_progress_id is None and kind == "gateway_status":
+            provided_progress_id = f"{PROGRESS_MESSAGE_ID_PREFIX}gateway-status-{_safe_filename_component(session_id)}"
+        progress_id = str(provided_progress_id or f"{PROGRESS_MESSAGE_ID_PREFIX}{uuid.uuid4()}")
+        progress_metadata = {**previous_metadata, **metadata}
+        root_request_id = str(progress_metadata.get("request_id") or progress_id)
+        self._transient_progress_context[(project_key, progress_id)] = {
+            "session_id": session_id,
+            "metadata": progress_metadata,
+            "kind": kind,
+        }
+        frame = {
+            "type": "tool_progress",
+            "request_id": root_request_id,
+            "project_key": project_key,
+            "session_id": session_id,
+            "server_seq": self.store.next_server_seq(),
+            "payload": {
+                "kind": kind,
+                "progress_kind": kind,
+                "message_id": progress_id,
+                "text": content,
+                "transient": True,
+            },
+        }
+        if self.ws_server is not None:
+            await self.ws_server.broadcast(frame, project_key=project_key)
+        return SendResult(success=True, message_id=progress_id, raw_response=frame)
+
     async def send(
         self,
         chat_id: str,
@@ -726,6 +1109,10 @@ class LogosAdapter(BasePlatformAdapter):
         metadata = dict(metadata or {})
         project_key = self._project_key_from_chat_id(chat_id)
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
+        metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
+        progress_kind = self._progress_kind_for_text(content)
+        if progress_kind is not None:
+            return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
         hermes_message_id = metadata.get("message_id") or metadata.get("hermes_message_id")
         stored = self.store.append_message(
             project_key=project_key,
@@ -736,12 +1123,7 @@ class LogosAdapter(BasePlatformAdapter):
             metadata={**metadata, "reply_to": reply_to} if reply_to else metadata,
         )
         frame = self._message_state_update(stored)
-        summary_result = self.fast_model.summarize(content)
-        summary = self.store.upsert_summary(
-            message=stored,
-            summary_text=summary_result.summary_text,
-            source_hash=summary_result.source_hash,
-        )
+        summary, _summary_status = self._summary_for_message(stored)
         summary_frame = self._summary_ready_update(stored, summary.to_protocol())
         existing_project = self.store.get_project(project_key)
         self.store.upsert_project(
@@ -780,9 +1162,25 @@ class LogosAdapter(BasePlatformAdapter):
         finalize: bool = False,
     ) -> SendResult:
         project_key = self._project_key_from_chat_id(chat_id)
-        existing = self.store.get_message_by_project(project_key, str(message_id))
+        message_id_str = str(message_id)
+        progress_kind = self._progress_kind_for_text(content)
+        if not finalize and (progress_kind is not None or message_id_str.startswith(PROGRESS_MESSAGE_ID_PREFIX)):
+            return await self._broadcast_progress_text(
+                chat_id=chat_id,
+                content=content,
+                request_id=message_id_str,
+                kind=progress_kind or "tool_progress",
+            )
+        existing = self.store.get_message_by_project(project_key, message_id_str)
         if existing is None:
-            return SendResult(success=False, message_id=None, error="message not found")
+            if not finalize:
+                return SendResult(success=False, message_id=None, error="message not found")
+            return await self._append_final_message_for_transient_edit(
+                chat_id=chat_id,
+                project_key=project_key,
+                message_id=message_id_str,
+                content=content,
+            )
         updated = self.store.update_message(
             session_id=existing.session_id,
             message_id=existing.message_id,
@@ -802,6 +1200,7 @@ class LogosAdapter(BasePlatformAdapter):
         )
         frame = {
             "type": "state_update",
+            "request_id": str(updated.metadata.get("request_id") or updated.message_id),
             "project_key": project_key,
             "session_id": updated.session_id,
             "server_seq": updated.server_seq,
@@ -812,12 +1211,7 @@ class LogosAdapter(BasePlatformAdapter):
         }
         summary_frame: dict[str, Any] | None = None
         if finalize:
-            summary_result = self.fast_model.summarize(content)
-            summary = self.store.upsert_summary(
-                message=updated,
-                summary_text=summary_result.summary_text,
-                source_hash=summary_result.source_hash,
-            )
+            summary, _summary_status = self._summary_for_message(updated)
             summary_frame = self._summary_ready_update(updated, summary.to_protocol())
         if self.ws_server is not None:
             await self.ws_server.broadcast(frame, project_key=project_key)
@@ -825,9 +1219,65 @@ class LogosAdapter(BasePlatformAdapter):
                 await self.ws_server.broadcast(summary_frame, project_key=project_key)
         return SendResult(success=True, message_id=updated.message_id, raw_response=frame)
 
+    async def _append_final_message_for_transient_edit(
+        self,
+        *,
+        chat_id: str,
+        project_key: str,
+        message_id: str,
+        content: str,
+    ) -> SendResult:
+        context = self._transient_progress_context.pop((project_key, message_id), {})
+        session_id = str(context.get("session_id") or chat_id)
+        metadata = dict(context.get("metadata") or {})
+        for progress_key in ("progress_kind", "kind"):
+            metadata.pop(progress_key, None)
+        if metadata.get("source") in {"tool_progress", "progress"}:
+            metadata.pop("source", None)
+        metadata.update({"edited_at": time.time(), "finalized": True})
+        stored = self.store.append_message(
+            project_key=project_key,
+            session_id=session_id,
+            message_id=message_id,
+            role="assistant",
+            content=content,
+            metadata=metadata,
+        )
+        frame = self._message_state_update(stored)
+        summary, _summary_status = self._summary_for_message(stored)
+        summary_frame = self._summary_ready_update(stored, summary.to_protocol())
+        existing_project = self.store.get_project(project_key)
+        self.store.upsert_project(
+            project_key=project_key,
+            title=existing_project.title if existing_project else project_key,
+            current_session_id=session_id,
+            lineage_root_session_id=str(metadata.get("lineage_root_session_id") or metadata.get("root_session_id") or session_id),
+            last_seen_message_id=stored.message_id,
+            last_seen_server_seq=stored.server_seq,
+            last_preview=content[:240],
+        )
+        if self.ws_server is not None:
+            await self.ws_server.broadcast(frame, project_key=project_key)
+            await self.ws_server.broadcast(summary_frame, project_key=project_key)
+            await self._broadcast_run_status(
+                project_key=project_key,
+                session_id=session_id,
+                status="idle",
+            )
+        self._send_private_notification(
+            PrivateNotificationKind.FINISHED,
+            project_key=project_key,
+            session_id=session_id,
+            message_id=stored.message_id,
+            server_seq=stored.server_seq,
+            sensitive_context={"content": content, "summary": summary.summary_text},
+        )
+        return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
+
     def _message_state_update(self, message: LogosMessage) -> dict[str, Any]:
         return {
             "type": "state_update",
+            "request_id": str(message.metadata.get("request_id") or message.message_id),
             "project_key": message.project_key,
             "session_id": message.session_id,
             "server_seq": message.server_seq,
@@ -889,12 +1339,13 @@ class LogosAdapter(BasePlatformAdapter):
         body = {"op": op}
         if payload:
             body.update(payload)
+        project_key = self._project_key_for(envelope)
         return {
             "type": "state_update",
             "request_id": envelope.request_id,
             "device_id": envelope.device_id,
-            "project_key": self._project_key_for(envelope),
-            "session_id": envelope.session_id,
+            "project_key": project_key,
+            "session_id": self._client_session_id_for(envelope, project_key),
             "server_seq": server_seq,
             "payload": body,
         }
@@ -950,15 +1401,30 @@ class LogosAdapter(BasePlatformAdapter):
     async def _handle_run_cancel(self, envelope: Envelope) -> dict[str, Any]:
         project_key = self._project_key_for(envelope)
         session_id = envelope.session_id or f"project:{project_key}"
-        frame = await self._broadcast_run_status(
+        await self._broadcast_run_status(
             project_key=project_key,
             session_id=session_id,
             status="cancelling",
             request_id=envelope.request_id,
             device_id=envelope.device_id,
         )
-        await self._dispatch_gateway_text(envelope, "/stop", mirror_user=False)
-        return frame
+        dispatch_failed = False
+        try:
+            await self._dispatch_gateway_text(envelope, "/stop", mirror_user=False)
+        except Exception:
+            dispatch_failed = True
+            logger.warning("Logos: failed to dispatch /stop for run_cancel", exc_info=True)
+        if not dispatch_failed:
+            self.store.resolve_pending_interactions_for_project(project_key)
+        terminal_frame = await self._broadcast_run_status(
+            project_key=project_key,
+            session_id=session_id,
+            status="error" if dispatch_failed else "idle",
+            request_id=envelope.request_id,
+            device_id=envelope.device_id,
+            payload={"cancelled": not dispatch_failed, "reason": "stop_dispatch_failed"} if dispatch_failed else {"cancelled": True},
+        )
+        return terminal_frame
 
     async def _handle_approval_response(self, envelope: Envelope) -> dict[str, Any]:
         decision = str(envelope.payload.get("decision") or "").strip().lower()
@@ -1063,19 +1529,22 @@ class LogosAdapter(BasePlatformAdapter):
         metadata = dict(metadata or {})
         project_key = self._project_key_from_chat_id(chat_id)
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
+        private_payload = {
+            "clarify_id": clarify_id,
+            "question": question,
+            "choices": list(choices or []),
+            "allow_free_text": True,
+            "session_key": session_key,
+        }
+        public_payload = dict(private_payload)
+        public_payload.pop("session_key", None)
         frame = {
             "type": "clarify_request",
             "request_id": clarify_id,
             "project_key": project_key,
             "session_id": session_id,
             "server_seq": self.store.next_server_seq(),
-            "payload": {
-                "clarify_id": clarify_id,
-                "question": question,
-                "choices": list(choices or []),
-                "allow_free_text": True,
-                "session_key": session_key,
-            },
+            "payload": public_payload,
         }
         self.store.upsert_pending_interaction(
             request_id=clarify_id,
@@ -1083,7 +1552,7 @@ class LogosAdapter(BasePlatformAdapter):
             project_key=project_key,
             session_id=session_id,
             frame_type="clarify_request",
-            payload=frame["payload"],
+            payload=private_payload,
             server_seq=int(frame["server_seq"]),
         )
         try:
@@ -1122,20 +1591,23 @@ class LogosAdapter(BasePlatformAdapter):
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
         server_seq = self.store.next_server_seq()
         approval_id = str(metadata.get("approval_id") or f"appr-{server_seq}")
+        private_payload = {
+            "approval_id": approval_id,
+            "title": "Approve shell command?",
+            "summary": description,
+            "command_preview": command,
+            "risk": str(metadata.get("risk") or description),
+            "session_key": session_key,
+        }
+        public_payload = dict(private_payload)
+        public_payload.pop("session_key", None)
         frame = {
             "type": "approval_request",
             "request_id": approval_id,
             "project_key": project_key,
             "session_id": session_id,
             "server_seq": server_seq,
-            "payload": {
-                "approval_id": approval_id,
-                "title": "Approve shell command?",
-                "summary": description,
-                "command_preview": command,
-                "risk": str(metadata.get("risk") or description),
-                "session_key": session_key,
-            },
+            "payload": public_payload,
         }
         self.store.upsert_pending_interaction(
             request_id=approval_id,
@@ -1143,7 +1615,7 @@ class LogosAdapter(BasePlatformAdapter):
             project_key=project_key,
             session_id=session_id,
             frame_type="approval_request",
-            payload=frame["payload"],
+            payload=private_payload,
             server_seq=server_seq,
         )
         if self.ws_server is not None:
@@ -1222,7 +1694,7 @@ class LogosAdapter(BasePlatformAdapter):
                 type="messages_get",
                 request_id=hello.request_id,
                 device_id=hello.device_id,
-                project_key=hello.project_key or hello.payload.get("project_key"),
+                project_key=self._project_key_for_hello(hello),
                 session_id=hello.session_id,
                 payload={"after_server_seq": after_seq, "limit": hello.payload.get("limit", 100)},
             )
@@ -1233,7 +1705,9 @@ class LogosAdapter(BasePlatformAdapter):
         payload = envelope.payload
         session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
         message_id = payload.get("message_id")
-        mode = str(payload.get("mode") or "summary")
+        requested_mode = str(payload.get("mode") or "summary").strip().lower() or "summary"
+        selected_mode = requested_mode
+        selection_reason = f"requested_{requested_mode}"
         text = None
         if message_id:
             message = self.store.get_message(session_id, str(message_id))
@@ -1245,20 +1719,38 @@ class LogosAdapter(BasePlatformAdapter):
                     device_id=envelope.device_id,
                     project_key=project_key,
                 )
-            if mode == "summary":
-                summary = self.store.get_summary(message.session_id, message.message_id)
-                if summary is None:
-                    summary_result = self.fast_model.summarize(message.content)
-                    summary = self.store.upsert_summary(
-                        message=message,
-                        summary_text=summary_result.summary_text,
-                        source_hash=summary_result.source_hash,
-                    )
+            if message.project_key != project_key:
+                return error_frame(
+                    "message_project_mismatch",
+                    "playback_audio message does not belong to the requested project",
+                    request_id=envelope.request_id,
+                    device_id=envelope.device_id,
+                    project_key=project_key,
+                )
+            if requested_mode == "final_auto":
+                if self._is_short_final_audio_text(message.content):
+                    selected_mode = "full"
+                    selection_reason = "short_final_full"
+                    text = message.content
+                else:
+                    summary, summary_status = self._summary_for_message(message)
+                    selected_mode = "summary"
+                    selection_reason = f"long_final_summary_{summary_status}"
+                    text = summary.summary_text
+            elif requested_mode == "summary":
+                summary, summary_status = self._summary_for_message(message)
+                selected_mode = "summary"
+                selection_reason = f"requested_summary_{summary_status}"
                 text = summary.summary_text
             else:
+                selected_mode = requested_mode
+                selection_reason = "requested_full" if requested_mode == "full" else f"requested_{requested_mode}"
                 text = message.content
         else:
             text = payload.get("text") or payload.get("summary_text")
+            if requested_mode == "final_auto":
+                selected_mode = "full"
+                selection_reason = "payload_text_full"
         if not isinstance(text, str) or not text.strip():
             return error_frame(
                 "missing_audio_source",
@@ -1276,7 +1768,9 @@ class LogosAdapter(BasePlatformAdapter):
             request_id=envelope.request_id,
             device_id=envelope.device_id,
             message_id=str(message_id) if message_id else None,
-            mode=mode,
+            mode=selected_mode,
+            requested_mode=requested_mode,
+            selection_reason=selection_reason,
             source=getattr(self.tts, "source_name", "tts"),
         )
 
@@ -1292,7 +1786,11 @@ class LogosAdapter(BasePlatformAdapter):
         message_id: str | None,
         mode: str,
         source: str,
+        requested_mode: str | None = None,
+        selection_reason: str | None = None,
     ) -> dict[str, Any] | None:
+        requested_mode = requested_mode or mode
+        selection_reason = selection_reason or f"requested_{requested_mode}"
         try:
             chunks = self.tts.iter_chunks(text=text, audio_id=audio_id)
         except Exception as exc:
@@ -1333,6 +1831,8 @@ class LogosAdapter(BasePlatformAdapter):
                     "mime_type": chunk.mime_type,
                     "encoding": chunk.encoding,
                     "mode": mode,
+                    "requested_mode": requested_mode,
+                    "selection_reason": selection_reason,
                     "data": chunk.data_b64,
                 },
             }
@@ -1351,6 +1851,8 @@ class LogosAdapter(BasePlatformAdapter):
                 "chunk_count": len(chunks),
                 "mime_type": chunks[0].mime_type,
                 "mode": mode,
+                "requested_mode": requested_mode,
+                "selection_reason": selection_reason,
                 "source": source,
             },
         }
@@ -1367,6 +1869,7 @@ class LogosAdapter(BasePlatformAdapter):
         if before_message_id:
             session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
             messages = self.store.messages_before_message_id(session_id, str(before_message_id), limit=limit + 1)
+            messages = [message for message in messages if message.project_key == project_key]
         else:
             after_server_seq = int(payload.get("after_server_seq", payload.get("last_seen_server_seq", 0)) or 0)
             messages = self.store.messages_after_server_seq(project_key, after_server_seq, limit=limit + 1)
@@ -1415,6 +1918,13 @@ class LogosAdapter(BasePlatformAdapter):
             raise ProtocolError("project_key cannot be empty")
         return project_key
 
+    def _project_key_for_hello(self, envelope: Envelope) -> str:
+        raw = envelope.project_key or "default"
+        project_key = str(raw).strip()
+        if not project_key:
+            raise ProtocolError("project_key cannot be empty")
+        return project_key
+
     @staticmethod
     def _project_key_from_chat_id(chat_id: str) -> str:
         if chat_id.startswith("project:"):
@@ -1449,6 +1959,7 @@ def register(ctx: Any) -> None:
         required_env=["LOGOS_DEVICE_SECRET"],
         allowed_users_env="LOGOS_ALLOWED_USERS",
         allow_all_env="LOGOS_ALLOW_ALL_USERS",
+        cron_deliver_env_var=LOGOS_HOME_CHANNEL_ENV,
         pii_safe=True,
         emoji="📱",
     )

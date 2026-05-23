@@ -196,7 +196,7 @@ class LogosWebSocketServer:
                             await websocket.close(code=1008, reason="device_not_allowed")
                             return
                         authenticated = True
-                        project_key = envelope.project_key or envelope.payload.get("project_key")
+                        project_key = self.adapter._project_key_for_hello(envelope)
                         async with self._lock:
                             self._clients[websocket] = {
                                 "device_id": device_id,
@@ -254,7 +254,7 @@ class LogosWebSocketServer:
                     await websocket.send(serialize_frame(error_frame("protocol_error", str(exc))))
                 except Exception as exc:
                     logger.exception("Logos: unhandled websocket frame error")
-                    await websocket.send(serialize_frame(error_frame("internal_error", str(exc))))
+                    await websocket.send(serialize_frame(error_frame("internal_error", "Logos adapter internal error.")))
         finally:
             async with self._lock:
                 self._clients.pop(websocket, None)

@@ -68,7 +68,8 @@ async def test_run_cancel_maps_to_gateway_stop_command(tmp_path):
     response = await adapter.handle_ws_envelope(Envelope(type="run_cancel", request_id="cancel", device_id="iphone", project_key="alpha", payload={}))
 
     assert response["type"] == "run_status"
-    assert response["payload"]["status"] == "cancelling"
+    assert response["payload"]["status"] == "idle"
+    assert response["payload"]["cancelled"] is True
     assert adapter.captured_events[-1].text == "/stop"
     assert adapter.captured_events[-1].source.chat_id == "project:alpha"
 
