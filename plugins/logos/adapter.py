@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import ipaddress
 import logging
@@ -34,6 +35,11 @@ from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
+
+_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "logos_request_context",
+    default=None,
+)
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -727,6 +733,55 @@ class LogosAdapter(BasePlatformAdapter):
                 return default_session_id
         return requested
 
+    def _request_context_for_event(self, event: MessageEvent) -> dict[str, str] | None:
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        request_id = str(raw_message.get("request_id") or "").strip()
+        if not request_id:
+            return None
+        project_key = str(raw_message.get("project_key") or self._project_key_from_chat_id(event.source.chat_id)).strip()
+        session_id = str(raw_message.get("session_id") or event.source.chat_id).strip()
+        return {"project_key": project_key, "session_id": session_id, "request_id": request_id}
+
+    async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
+        context = self._request_context_for_event(event)
+        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
+        try:
+            await super().handle_message(event)
+        finally:
+            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
+
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:  # type: ignore[override]
+        context = self._request_context_for_event(event)
+        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
+
+    def _metadata_with_current_request_id(
+        self,
+        *,
+        project_key: str,
+        session_id: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(metadata or {})
+        if metadata.get("request_id"):
+            return metadata
+        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        if not context or context.get("project_key") != project_key:
+            return metadata
+        context_session = context.get("session_id")
+        if not context_session or str(session_id or "").strip() != context_session:
+            return metadata
+        explicit_session = str(metadata.get("session_id") or metadata.get("session") or "").strip()
+        if explicit_session and explicit_session != context_session:
+            return metadata
+        request_id = context.get("request_id")
+        if request_id:
+            metadata["request_id"] = request_id
+        return metadata
+
     async def _handle_fast_direct_response(self, envelope: Envelope, result: FastModelResult) -> bool:
         response_text = result.direct_response_text
         response_kind = result.direct_response_kind
@@ -760,6 +815,7 @@ class LogosAdapter(BasePlatformAdapter):
                 "source": "fast_response",
                 "fast_response_kind": response_kind,
                 "fast_model": result.to_protocol(),
+                "request_id": envelope.request_id,
             },
         )
         existing_project = self.store.get_project(project_key)
@@ -1019,6 +1075,7 @@ class LogosAdapter(BasePlatformAdapter):
             provided_progress_id = f"{PROGRESS_MESSAGE_ID_PREFIX}gateway-status-{_safe_filename_component(session_id)}"
         progress_id = str(provided_progress_id or f"{PROGRESS_MESSAGE_ID_PREFIX}{uuid.uuid4()}")
         progress_metadata = {**previous_metadata, **metadata}
+        root_request_id = str(progress_metadata.get("request_id") or progress_id)
         self._transient_progress_context[(project_key, progress_id)] = {
             "session_id": session_id,
             "metadata": progress_metadata,
@@ -1026,7 +1083,7 @@ class LogosAdapter(BasePlatformAdapter):
         }
         frame = {
             "type": "tool_progress",
-            "request_id": progress_id,
+            "request_id": root_request_id,
             "project_key": project_key,
             "session_id": session_id,
             "server_seq": self.store.next_server_seq(),
@@ -1050,11 +1107,12 @@ class LogosAdapter(BasePlatformAdapter):
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         metadata = dict(metadata or {})
+        project_key = self._project_key_from_chat_id(chat_id)
+        session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
+        metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
             return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
-        project_key = self._project_key_from_chat_id(chat_id)
-        session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
         hermes_message_id = metadata.get("message_id") or metadata.get("hermes_message_id")
         stored = self.store.append_message(
             project_key=project_key,
@@ -1142,6 +1200,7 @@ class LogosAdapter(BasePlatformAdapter):
         )
         frame = {
             "type": "state_update",
+            "request_id": str(updated.metadata.get("request_id") or updated.message_id),
             "project_key": project_key,
             "session_id": updated.session_id,
             "server_seq": updated.server_seq,

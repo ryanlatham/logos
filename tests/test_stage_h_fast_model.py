@@ -374,9 +374,11 @@ async def test_adapter_direct_fast_response_bypasses_gateway_and_ack(tmp_path):
     message_frames = [frame for frame in capture.frames if frame["type"] == "state_update" and frame["payload"].get("op") == "message_appended"]
     assert [frame["payload"]["message"]["role"] for frame in message_frames] == ["user", "assistant"]
     assistant = message_frames[-1]["payload"]["message"]
+    assert message_frames[-1]["request_id"] == "req-hi"
     assert assistant["content"]
     assert assistant["metadata"]["source"] == "fast_response"
     assert assistant["metadata"]["fast_response_kind"] == "social"
+    assert assistant["metadata"]["request_id"] == "req-hi"
 
 
 @pytest.mark.asyncio

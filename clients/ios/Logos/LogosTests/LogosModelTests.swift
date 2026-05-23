@@ -1759,6 +1759,263 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testLateUnscopedFinalAfterNewTextBeforeProgressDoesNotAutoplay() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-before-text-rerun","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request is running"}}
+        """#)
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """)
+        XCTAssertTrue(client.sendText("new request before progress"))
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":134,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-before-progress","server_seq":134,"role":"assistant","content":"Old final before new progress starts.","timestamp":129.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertTrue(client.messages.contains { $0.content == "new request before progress" && $0.status == "pending" })
+    }
+
+    @MainActor
+    func testMatchingFinalAfterNewTextBeforeProgressAutoplays() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("fast hello before progress"))
+        let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestID = try XCTUnwrap(textRoot["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":135,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-fast-final","server_seq":135,"role":"assistant","content":"Fast response before progress.","timestamp":130.0,"metadata":{"finalized":true,"source":"fast_response"}}}}
+        """)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-fast-final")
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testOutstandingFollowupFinalBeforeProgressSupersedesOlderActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("first run before followup final"))
+        let firstRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let firstRequestID = try XCTUnwrap(firstRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"First run active before followup final"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.requestID, firstRequestID)
+
+        XCTAssertTrue(client.sendText("second final before progress"))
+        let secondRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let secondRequestID = try XCTUnwrap(secondRoot["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","server_seq":143,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-second-final-before-progress","server_seq":143,"role":"assistant","content":"Second final before progress.","timestamp":138.0,"metadata":{"finalized":true,"source":"fast_response"}}}}
+        """)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-second-final-before-progress")
+        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testLateStaleProgressAfterNewTextBeforeProgressDoesNotReleaseStaleFinal() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request was running"}}
+        """#)
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """)
+        XCTAssertTrue(client.sendText("new request before stale progress"))
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Late old progress"}}
+        """#)
+        client.handleFrameString(#"""
+        {"type":"state_update","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","server_seq":136,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-stale-progress-final","server_seq":136,"role":"assistant","content":"Old final after stale progress.","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertNil(client.progressActivity)
+    }
+
+    @MainActor
+    func testLateStaleProgressAfterNewProgressDoesNotReplaceNewProgressOrAutoplay() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request was running"}}
+        """#)
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """)
+        XCTAssertTrue(client.sendText("new request with valid progress"))
+        let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(newRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"New request progress"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Late old progress after new progress"}}
+        """#)
+        client.handleFrameString(#"""
+        {"type":"state_update","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","server_seq":137,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-after-new-progress-final","server_seq":137,"role":"assistant","content":"Old final after the new request has progress.","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
+        XCTAssertEqual(client.runStatus, .running)
+    }
+
+    @MainActor
+    func testCancelSuppressesAllOutstandingOutboundRequests() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        var requestIDs: [String] = []
+        for index in 0..<70 {
+            XCTAssertTrue(client.sendText("pending request \(index)"))
+            let root = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+            requestIDs.append(try XCTUnwrap(root["request_id"] as? String))
+        }
+        XCTAssertEqual(Set(requestIDs).count, 70)
+        let firstRequestID = try XCTUnwrap(requestIDs.first)
+
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","server_seq":138,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-first-pending-after-cancel","server_seq":138,"role":"assistant","content":"Old first pending final after cancel.","timestamp":133.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testOutstandingFollowupProgressSupersedesOlderActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("first run"))
+        let firstRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let firstRequestID = try XCTUnwrap(firstRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"First run progress"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.requestID, firstRequestID)
+
+        XCTAssertTrue(client.sendText("second run"))
+        let secondRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let secondRequestID = try XCTUnwrap(secondRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Second run progress"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.requestID, secondRequestID)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","server_seq":140,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-second-run-final","server_seq":140,"role":"assistant","content":"Second run final.","timestamp":135.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-second-run-final")
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testPostCancelUnscopedFinalDoesNotAutoplayAfterMatchingNewFinal() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-unscoped-after-good-final","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old run progress"}}
+        """#)
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """)
+        XCTAssertTrue(client.sendText("new run after cancel"))
+        let newRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let newRequestID = try XCTUnwrap(newRoot["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(newRequestID)","project_key":"default","session_id":"project:default","server_seq":141,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-new-after-cancel-final","server_seq":141,"role":"assistant","content":"New final after cancel.","timestamp":136.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":142,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-after-good-final","server_seq":142,"role":"assistant","content":"Old unscoped final after the good final.","timestamp":137.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-new-after-cancel-final")
+    }
+
+    @MainActor
+    func testServerDrivenCancelSuppressesActiveRunBeforeStaleFinal() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-server-driven-cancel","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Server-side run is active"}}
+        """#)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-server-driven-cancel")
+
+        client.handleFrameString(#"""
+        {"type":"run_status","request_id":"server-cancel-status","project_key":"default","session_id":"project:default","payload":{"status":"cancelling"}}
+        """#)
+        client.handleFrameString(#"""
+        {"type":"run_status","request_id":"server-cancel-status","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
+        """#)
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertNil(client.progressActivity)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"state_update","request_id":"req-server-driven-cancel","project_key":"default","session_id":"project:default","server_seq":139,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-server-driven-cancel-final","server_seq":139,"role":"assistant","content":"Server-canceled final arrived late.","timestamp":134.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
     func testOutboundTextAndSpeechAreRejectedWhileCancelling() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)

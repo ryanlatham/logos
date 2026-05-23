@@ -10,6 +10,8 @@ import pytest
 import websockets
 
 from gateway.config import PlatformConfig
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.session import SessionSource
 from logos.adapter import LogosAdapter
 from logos.schema import Envelope
 from logos.ws_server import sign_hello
@@ -58,6 +60,210 @@ async def test_final_text_input_uses_gateway_handle_message_path_without_rewriti
     assert event.source.user_id == "iphone-17-pro"
     assert event.source.user_name == "iphone-17-pro"
     assert event.raw_message["type"] == "text_input"
+
+
+@pytest.mark.asyncio
+async def test_gateway_progress_and_final_reuse_inbound_request_id(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    handled = asyncio.Event()
+
+    async def fake_gateway_handler(event):
+        session_id = event.raw_message["session_id"]
+        await adapter.send(event.source.chat_id, "🔧 terminal: \"pytest\"", metadata={"session_id": session_id})
+        await adapter.send(
+            event.source.chat_id,
+            "Final answer for correlated request.",
+            metadata={"session_id": session_id, "message_id": "logos-final-correlated"},
+        )
+        handled.set()
+        return None
+
+    adapter.set_message_handler(fake_gateway_handler)
+
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="req-root-normal",
+            device_id="iphone-17-pro",
+            project_key="archwright",
+            payload={"text": "run normal gateway work", "is_final": True, "client_msg_id": "client-normal"},
+        )
+    )
+    await asyncio.wait_for(handled.wait(), timeout=2)
+
+    frames = [item["frame"] for item in fake_server.frames]
+    progress_frames = [frame for frame in frames if frame["type"] == "tool_progress"]
+    final_frames = [
+        frame
+        for frame in frames
+        if frame["type"] == "state_update"
+        and frame["payload"].get("op") == "message_appended"
+        and frame["payload"]["message"]["message_id"] == "logos-final-correlated"
+    ]
+    assert progress_frames
+    assert progress_frames[-1]["request_id"] == "req-root-normal"
+    assert final_frames
+    assert final_frames[-1]["request_id"] == "req-root-normal"
+
+
+@pytest.mark.asyncio
+async def test_queued_followup_does_not_relabel_active_run_progress_with_new_request_id(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    active_run_may_emit = asyncio.Event()
+    active_run_emitted = asyncio.Event()
+
+    async def fake_gateway_handler(event):
+        session_id = event.raw_message["session_id"]
+        if event.text == "first request":
+            await active_run_may_emit.wait()
+            await adapter.send(event.source.chat_id, "🔧 terminal: \"old-after-new\"", metadata={"session_id": session_id})
+            active_run_emitted.set()
+            return None
+        return None
+
+    adapter.set_message_handler(fake_gateway_handler)
+
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="req-A",
+            device_id="iphone-17-pro",
+            project_key="archwright",
+            payload={"text": "first request", "is_final": True, "client_msg_id": "client-A"},
+        )
+    )
+    await asyncio.sleep(0)
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="req-B",
+            device_id="iphone-17-pro",
+            project_key="archwright",
+            payload={"text": "second request", "is_final": True, "client_msg_id": "client-B"},
+        )
+    )
+    active_run_may_emit.set()
+    await asyncio.wait_for(active_run_emitted.wait(), timeout=2)
+
+    progress_frames = [
+        item["frame"]
+        for item in fake_server.frames
+        if item["frame"]["type"] == "tool_progress" and item["frame"]["payload"]["text"] == "🔧 terminal: \"old-after-new\""
+    ]
+    assert progress_frames
+    assert progress_frames[-1]["request_id"] == "req-A"
+    assert progress_frames[-1]["request_id"] != "req-B"
+
+
+@pytest.mark.asyncio
+async def test_requestless_queued_followup_does_not_inherit_active_request_context(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    active_run_may_finish = asyncio.Event()
+    requestless_done = asyncio.Event()
+
+    async def fake_gateway_handler(event):
+        session_id = event.raw_message["session_id"]
+        if event.text == "first request":
+            await active_run_may_finish.wait()
+            return None
+        if event.text == "requestless followup":
+            await adapter.send(event.source.chat_id, "🔧 terminal: \"requestless\"", metadata={"session_id": session_id})
+            requestless_done.set()
+            return None
+        return None
+
+    adapter.set_message_handler(fake_gateway_handler)
+
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id="req-A",
+            device_id="iphone-17-pro",
+            project_key="archwright",
+            payload={"text": "first request", "is_final": True, "client_msg_id": "client-A"},
+        )
+    )
+    await asyncio.sleep(0)
+    await adapter.handle_ws_envelope(
+        Envelope(
+            type="text_input",
+            request_id=None,
+            device_id="iphone-17-pro",
+            project_key="archwright",
+            payload={"text": "requestless followup", "is_final": True, "client_msg_id": "client-requestless"},
+        )
+    )
+    active_run_may_finish.set()
+    await asyncio.wait_for(requestless_done.wait(), timeout=2)
+
+    progress_frames = [
+        item["frame"]
+        for item in fake_server.frames
+        if item["frame"]["type"] == "tool_progress" and item["frame"]["payload"]["text"] == "🔧 terminal: \"requestless\""
+    ]
+    assert progress_frames
+    assert progress_frames[-1]["request_id"] != "req-A"
+
+
+@pytest.mark.asyncio
+async def test_context_request_id_is_not_applied_to_different_session_send(tmp_path):
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
+    )
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    handled = asyncio.Event()
+
+    async def fake_gateway_handler(event):
+        await adapter.send(event.source.chat_id, "🔧 terminal: \"wrong-session\"")
+        handled.set()
+        return None
+
+    adapter.set_message_handler(fake_gateway_handler)
+    event = MessageEvent(
+        text="custom session request",
+        message_type=MessageType.TEXT,
+        source=SessionSource(
+            platform=adapter.platform,
+            chat_id="project:archwright",
+            chat_name="archwright",
+            chat_type="dm",
+            user_id="iphone-17-pro",
+            user_name="iphone-17-pro",
+            message_id="client-custom",
+        ),
+        raw_message={
+            "type": "text_input",
+            "request_id": "req-custom-session",
+            "project_key": "archwright",
+            "session_id": "custom-session",
+            "payload": {"text": "custom session request", "is_final": True, "client_msg_id": "client-custom"},
+        },
+        message_id="client-custom",
+    )
+
+    await adapter.handle_message(event)
+    await asyncio.wait_for(handled.wait(), timeout=2)
+
+    progress_frames = [
+        item["frame"]
+        for item in fake_server.frames
+        if item["frame"]["type"] == "tool_progress" and item["frame"]["payload"]["text"] == "🔧 terminal: \"wrong-session\""
+    ]
+    assert progress_frames
+    assert progress_frames[-1]["request_id"] != "req-custom-session"
 
 
 @pytest.mark.asyncio
@@ -121,6 +327,7 @@ async def test_edit_message_updates_existing_logos_message_for_final_content(tmp
     update_frames = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "state_update" and item["frame"]["payload"].get("op") == "message_updated"]
     assert update_frames
     update = update_frames[-1]
+    assert update["request_id"] == sent.message_id
     assert update["server_seq"] == stored.server_seq
     assert update["payload"]["message"]["message_id"] == sent.message_id
     assert update["payload"]["message"]["server_seq"] == stored.server_seq
@@ -196,6 +403,28 @@ async def test_progress_message_id_finalize_persists_final_content_instead_of_pr
         Envelope(type="messages_get", request_id="get-finalized-progress", device_id="iphone", project_key="archwright", payload={"after_server_seq": 0})
     )
     assert [message["content"] for message in replay["payload"]["messages"]] == ["Final answer after the tool finished."]
+
+
+@pytest.mark.asyncio
+async def test_progress_finalize_preserves_root_request_id_when_present(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+
+    sent = await adapter.send(
+        "project:archwright",
+        "🔧 terminal: \"pytest\"",
+        metadata={"session_id": "sess-progress", "message_id": "hermes-msg-root", "request_id": "req-root-progress"},
+    )
+    edited = await adapter.edit_message("project:archwright", "hermes-msg-root", "Final answer with root request id.", finalize=True)
+
+    assert sent.success is True
+    assert edited.success is True
+    frames = [item["frame"] for item in fake_server.frames]
+    progress_frames = [frame for frame in frames if frame["type"] == "tool_progress"]
+    state_updates = [frame for frame in frames if frame["type"] == "state_update" and frame["payload"].get("op") == "message_appended"]
+    assert progress_frames[-1]["request_id"] == "req-root-progress"
+    assert state_updates[-1]["request_id"] == "req-root-progress"
 
 
 @pytest.mark.asyncio
