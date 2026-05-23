@@ -829,6 +829,83 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(buffer.merged(with: [persisted], projectKey: "default"), [persisted])
     }
 
+    func testPendingMessageReconciliationKeepsDistinctRepeatedUserText() throws {
+        let pending = LogosMessage(
+            projectKey: "default",
+            sessionID: "pending",
+            messageID: "voice-turn-2",
+            serverSeq: 0,
+            role: "user",
+            content: "yes",
+            timestamp: 200,
+            status: "pending"
+        )
+        let olderPersisted = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "voice-turn-1",
+            serverSeq: 7,
+            role: "user",
+            content: "yes",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        XCTAssertFalse(PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: olderPersisted))
+    }
+
+    func testPendingMessageReconciliationRemovesNewerSameContentEchoWithoutClientID() throws {
+        let pending = LogosMessage(
+            projectKey: "default",
+            sessionID: "pending",
+            messageID: "local-client-id",
+            serverSeq: 0,
+            role: "user",
+            content: "hello Hermes",
+            timestamp: 200,
+            status: "pending"
+        )
+        let newerPersistedEcho = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "server-generated-id",
+            serverSeq: 8,
+            role: "user",
+            content: "hello Hermes",
+            timestamp: 201,
+            status: "persisted"
+        )
+
+        XCTAssertTrue(PendingMessageReconciliation.shouldRemove(pending: pending, whenPersisted: newerPersistedEcho))
+    }
+
+    @MainActor
+    func testFinalSpeechPendingAppearsForRepeatedTranscriptTextBeforeSocketSendCompletes() async throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        store.upsert(LogosMessage(
+            projectKey: "default",
+            sessionID: "session-1",
+            messageID: "voice-turn-previous",
+            serverSeq: 7,
+            role: "user",
+            content: "yes",
+            timestamp: 123,
+            status: "persisted"
+        ))
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        let sent = client.sendSpeech(
+            text: "yes",
+            isFinal: true,
+            inputID: "voice-turn-current",
+            partialSeq: 2,
+            startedAtMilliseconds: 456
+        )
+
+        XCTAssertTrue(sent)
+        XCTAssertTrue(client.messages.contains { $0.messageID == "voice-turn-current" && $0.status == "pending" })
+    }
+
     @MainActor
     func testSuccessfulConnectionMarksFirstConnectionComplete() throws {
         let socket = RecordingWebSocketTask()
@@ -838,7 +915,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalSpeechPendingAppearsOnlyAfterSocketSendCompletes() async throws {
+    func testFinalSpeechPendingAppearsImmediatelyAfterASRFinalBeforeSocketSendCompletes() async throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
         let sent = client.sendSpeech(
@@ -850,13 +927,15 @@ final class LogosModelTests: XCTestCase {
         )
 
         XCTAssertTrue(sent)
-        XCTAssertFalse(client.messages.contains { $0.messageID == "voice-turn-queued" })
+        XCTAssertEqual(client.messages.last?.messageID, "voice-turn-queued")
+        XCTAssertEqual(client.messages.last?.content, "hello Hermes")
+        XCTAssertEqual(client.messages.last?.role, "user")
+        XCTAssertEqual(client.messages.last?.status, "pending")
 
         socket.completeLastSend(error: nil)
         await Task.yield()
 
-        XCTAssertEqual(client.messages.last?.messageID, "voice-turn-queued")
-        XCTAssertEqual(client.messages.last?.status, "pending")
+        XCTAssertEqual(client.messages.filter { $0.messageID == "voice-turn-queued" }.count, 1)
         XCTAssertNil(client.undeliveredSpeechDraft)
     }
 

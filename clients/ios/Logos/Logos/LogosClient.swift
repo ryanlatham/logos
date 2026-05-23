@@ -454,9 +454,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             guard isFinal else { return }
             switch result {
             case .success:
-                self?.handleFinalSpeechSendSuccess(inputID: inputID, pending: pending)
+                self?.handleFinalSpeechSendSuccess(inputID: inputID)
             case .failure(let error):
-                self?.handleFinalSpeechSendFailure(failedDraft, error: error)
+                self?.handleFinalSpeechSendFailure(failedDraft, requestID: requestID, error: error)
             }
         }
         if sent == false, isFinal {
@@ -465,6 +465,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             suppressedRunRequestIDs.remove(requestID)
             outstandingOutboundResponseRequestIDs.insert(requestID)
             pendingOutboundResponseRequestID = requestID
+            addPendingMessage(pending)
         }
         return sent
     }
@@ -1883,14 +1884,13 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
     }
 
-    private func handleFinalSpeechSendSuccess(inputID: String, pending: LogosMessage) {
-        guard inFlightFinalSpeechDrafts.removeValue(forKey: inputID) != nil else { return }
-        addPendingMessage(pending)
+    private func handleFinalSpeechSendSuccess(inputID: String) {
+        inFlightFinalSpeechDrafts.removeValue(forKey: inputID)
     }
 
-    private func handleFinalSpeechSendFailure(_ draft: UndeliveredSpeechDraft, error: Error) {
+    private func handleFinalSpeechSendFailure(_ draft: UndeliveredSpeechDraft, requestID: String, error: Error) {
         guard inFlightFinalSpeechDrafts.removeValue(forKey: draft.inputID) != nil else { return }
-        clearOutstandingOutboundRequestID(pendingOutboundResponseRequestID)
+        clearOutstandingOutboundRequestID(requestID)
         pendingMessages.remove(messageID: draft.inputID)
         refreshMessages()
         undeliveredSpeechDraft = UndeliveredSpeechDraft(
