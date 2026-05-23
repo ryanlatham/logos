@@ -185,7 +185,7 @@
       <h2>Pass condition</h2>
       <p>The iPhone can connect to the Mac over a trusted private network, send text and speech through Logos, receive Hermes responses, play audio, handle approval/clarification/stop flows, and route private notifications without leaking secrets or response text.</p>
       <div class="status-row">
-        <span class="pill good">Simulator path already passed</span>
+        <span class="pill good">Automated + live plugin path passed</span>
         <span class="pill warn">Hardware gate now</span>
       </div>
     </aside>
@@ -211,7 +211,7 @@
       </div>
       <div class="card">
         <h3>Required secret</h3>
-        <p><code>LOGOS_DEVICE_SECRET</code> must match between the adapter and app. The guide never needs the actual value pasted back.</p>
+        <p><code>LOGOS_DEVICE_SECRET</code> must match between the adapter and app. In Logos, use <strong>Settings → Device key → Edit</strong> to paste an adapter-provided secret, or <strong>Generate</strong> a phone key and restart the adapter with that same value locally. Never paste the actual value into the report.</p>
       </div>
       <div class="card">
         <h3>Optional APNS</h3>
@@ -252,7 +252,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
         <pre id="cmd-xcode">cd /Users/ryan/Development/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 open Logos.xcodeproj</pre>
-        <p class="muted tiny">In Xcode: select the Logos app target, set your signing team, select the physical iPhone, then build/run.</p>
+        <p class="muted tiny">In Xcode: select the Logos app target, set your signing team, confirm <code>Logos/Logos.entitlements</code> is attached, select the physical iPhone, then build/run.</p>
       </div>
 
       <div class="command">
@@ -276,8 +276,8 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
     <p class="muted">These are real Simulator screenshots from the completed local validation. Physical device UI should match structurally, except permission prompts and device status bars.</p>
     <div class="visual-grid">
       <figure class="shot">
-        <img src="stage-k-simulator-app.png" alt="Logos app connected to ws://127.0.0.1:8765, default project active, idle status, notifications panel, voice panel, Hold to Talk and Tap to Talk controls">
-        <figcaption class="muted">Main screen: Adapter connected, default project, Idle, Notifications, Voice, Hold to Talk, Tap to Talk.</figcaption>
+        <img src="stage-k-simulator-app.png" alt="Logos app connected to local adapter, default project active, idle status, settings gear, project picker, and composer voice controls">
+        <figcaption class="muted">Main screen: connected status, project picker, settings, message thread, and composer/voice controls.</figcaption>
       </figure>
       <figure class="shot">
         <img src="stage-g-playback-simulator.png" alt="Logos Simulator playback state with assistant message and playback status">
@@ -306,7 +306,7 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
         </div>
         <div class="steps">
           <div class="step"><div><strong>Open <code>Logos.xcodeproj</code> and set signing for the Logos target.</strong><span class="expected">Expected: Xcode accepts the development team and the physical iPhone is a valid run destination.</span></div></div>
-          <div class="step"><div><strong>Build and run Logos on the phone.</strong><span class="expected">Expected: the app launches to the <code>Logos</code> screen with Adapter, Project, Notifications, Voice, and composer panels.</span></div></div>
+          <div class="step"><div><strong>Build and run Logos on the phone.</strong><span class="expected">Expected: the app launches to the <code>Logos</code> screen with nav bar, Settings gear, project picker, message thread, and composer/voice controls.</span></div></div>
           <div class="step"><div><strong>If iOS asks to trust the developer or device, complete the normal Apple trust flow.</strong><span class="expected">Expected: no crash on first launch; no notification, microphone, or speech prompt should be forced until you use those features.</span></div></div>
         </div>
         <textarea data-notes placeholder="Install/signing notes, device model, iOS version, errors"></textarea>
@@ -319,7 +319,8 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
         </div>
         <div class="steps">
           <div class="step"><div><strong>Start the mock adapter bound to the Mac private address.</strong><span class="expected">Expected: terminal prints <code>READY ws://...</code> with <code>secret=[REDACTED]</code>.</span></div></div>
-          <div class="step"><div><strong>In Logos, enter <code>ws://&lt;mac-tailnet-or-private-lan-ip&gt;:8765</code> and the matching shared secret.</strong><span class="expected">Expected: status changes from Connecting to <span class="ok">Connected</span>.</span></div></div>
+          <div class="step"><div><strong>In Logos Settings, set Adapter to <code>ws://&lt;mac-tailnet-or-private-lan-ip&gt;:8765</code>, then use Device key → Edit to paste the matching shared secret.</strong><span class="expected">Expected: the key row shows only a masked suffix after Save.</span></div></div>
+          <div class="step"><div><strong>Tap Connect.</strong><span class="expected">Expected: status changes from Connecting to <span class="ok">Connected</span>. If iOS asks for local-network access, allow it for this private-network test.</span></div></div>
           <div class="step"><div><strong>Tap Disconnect, then Reconnect.</strong><span class="expected">Expected: reconnect succeeds without app relaunch and without duplicate project/message spam.</span></div></div>
         </div>
         <textarea data-notes placeholder="Network notes: Tailscale/LAN, URL used with secrets redacted, failures"></textarea>
@@ -361,7 +362,7 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
         </div>
         <div class="steps">
           <div class="step"><div><strong>Generate an assistant message, then tap Play under it.</strong><span class="expected">Expected: playback status changes to <code>Requesting audio</code>, then <code>Receiving audio</code>, then <code>Playing audio</code>.</span></div></div>
-          <div class="step"><div><strong>Listen through phone speaker and, if convenient, Bluetooth output.</strong><span class="expected">Expected: deterministic stub WAV audio plays; it may not sound beautiful. Transport correctness is the point.</span></div></div>
+          <div class="step"><div><strong>Listen through phone speaker and, if convenient, Bluetooth output.</strong><span class="expected">Expected: mock adapter WAV audio plays on the transport path; real Hermes plugin playback should be intelligible macOS <code>say</code> speech. Simulator playback remains protocol/status validation only.</span></div></div>
           <div class="step"><div><strong>Tap Play repeatedly on the same message.</strong><span class="expected">Expected: no crash, no permanent stuck <code>Receiving audio</code> state.</span></div></div>
         </div>
         <textarea data-notes placeholder="Playback notes: audible? output route? stuck states? latency?"></textarea>
@@ -414,7 +415,7 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
           <label>Status<select data-status><option>Not run</option><option>Pass</option><option>Partial</option><option>Fail</option><option>Blocked</option></select></label>
         </div>
         <div class="steps">
-          <div class="step"><div><strong>Start adapter/Hermes with APNS credentials set.</strong><span class="expected">Expected: APNS client initializes for sandbox; missing credentials should skip live sends without breaking normal responses.</span></div></div>
+          <div class="step"><div><strong>Start adapter/Hermes with APNS credentials set and the Xcode signing team configured for Push Notifications.</strong><span class="expected">Expected: the app target uses <code>Logos/Logos.entitlements</code> with <code>aps-environment=development</code>; APNS client initializes for sandbox. Missing credentials should skip live sends without breaking normal responses.</span></div></div>
           <div class="step"><div><strong>Tap Enable in the Notifications panel and allow the iOS prompt.</strong><span class="expected">Expected: app receives a device token and sends <code>register_device</code>; normal logs do not print raw token.</span></div></div>
           <div class="step"><div><strong>Background the app and trigger an assistant completion.</strong><span class="expected">Expected: notification title <code>Hermes finished</code>, body <code>Open Logos to view the result.</code></span></div></div>
           <div class="step"><div><strong>Tap the notification.</strong><span class="expected">Expected: Logos opens to the relevant project and performs reconnect + delta sync. Payload contains routing ids only, not response text or command previews.</span></div></div>
@@ -447,7 +448,7 @@ export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
         <tr><td data-label="Symptom">Phone never connects</td><td data-label="Likely cause">Wrong bind address, firewall, Tailscale/LAN path, or mismatched secret.</td><td data-label="Check">Confirm adapter printed READY on the same IP/port; verify iPhone can reach Mac; retype secret locally without reporting it.</td></tr>
         <tr><td data-label="Symptom">Connected but Send does nothing</td><td data-label="Likely cause">WebSocket authenticated but frame rejected or adapter crashed.</td><td data-label="Check">Watch adapter terminal for errors; confirm app still shows Connected; retry with mock adapter.</td></tr>
         <tr><td data-label="Symptom">Voice disabled</td><td data-label="Likely cause">On-device speech recognition unavailable or permissions denied.</td><td data-label="Check">This is acceptable if clearly surfaced. It is a bug only if the app silently falls back to network recognition.</td></tr>
-        <tr><td data-label="Symptom">No APNS notification</td><td data-label="Likely cause">Credentials, signing entitlement, device token registration, sandbox/prod mismatch, or app/background state.</td><td data-label="Check">Record APNS environment and bundle id, but never paste tokens or key material.</td></tr>
+        <tr><td data-label="Symptom">No APNS notification</td><td data-label="Likely cause">Credentials, signing team capability, device token registration, sandbox/prod mismatch, or app/background state.</td><td data-label="Check">Confirm <code>Logos/Logos.entitlements</code> is attached, record APNS environment and bundle id, but never paste tokens or key material.</td></tr>
         <tr><td data-label="Symptom">Duplicate messages after reconnect</td><td data-label="Likely cause">Delta sync/server_seq/message_id dedupe bug.</td><td data-label="Check">Record exact sequence: background duration, project, whether force-close occurred, screenshot if sanitized.</td></tr>
         <tr><td data-label="Symptom">Playback stuck Receiving audio</td><td data-label="Likely cause">Missing <code>audio_end</code>, chunk decode failure, or audio session issue.</td><td data-label="Check">Try another assistant message; note whether status changes to Playing audio.</td></tr>
       </tbody>

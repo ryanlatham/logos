@@ -4,10 +4,13 @@ import hashlib
 import ipaddress
 import logging
 import os
+import shlex
+import socket
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
@@ -15,10 +18,18 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 from .apns import APNSClient, PrivateNotificationKind, build_private_apns_payload
-from .fast_llm import DeterministicFastModel, FastModelResult
+from .fast_llm import FastModelResult, build_fast_model
+from .pairing import (
+    DEFAULT_PAIRING_TTL_SECONDS,
+    PairingInvite,
+    create_invite,
+    derive_device_secret,
+    pairing_token_hash,
+    render_qr_png,
+)
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
 from .store import LogosMessage, LogosProject, LogosStore
-from .tts import DeterministicStubTTS
+from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
@@ -28,8 +39,52 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 
-def _truthy(value: str | None) -> bool:
-    return bool(value and value.strip().lower() in {"1", "true", "yes", "on"})
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _safe_filename_component(value: Any) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or "").strip())
+    return cleaned.strip(".-_") or "device"
+
+
+def _is_loopback_adapter_url(value: str) -> bool:
+    try:
+        parsed = urlparse(str(value or ""))
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_plaintext_non_loopback_adapter_url(value: str) -> bool:
+    try:
+        parsed = urlparse(str(value or ""))
+    except Exception:
+        return False
+    return parsed.scheme == "ws" and not _is_loopback_adapter_url(value)
+
+
+def _string_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = [value]
+    return {str(item).strip() for item in raw_items if str(item).strip()}
 
 
 def _optional_nonempty_str(value: Any) -> str | None:
@@ -40,8 +95,8 @@ def _optional_nonempty_str(value: Any) -> str | None:
 
 
 def _validate_config(config: PlatformConfig) -> bool:
-    _ = config
-    return bool(os.getenv("LOGOS_DEVICE_SECRET"))
+    extra = getattr(config, "extra", {}) or {}
+    return bool(os.getenv("LOGOS_DEVICE_SECRET") or _optional_nonempty_str(extra.get("device_secret")))
 
 
 def _platform() -> Platform:
@@ -80,12 +135,15 @@ class LogosAdapter(BasePlatformAdapter):
         if port_value in (None, ""):
             port_value = DEFAULT_PORT
         self.port = int(port_value)
-        self.device_secret = str(os.getenv("LOGOS_DEVICE_SECRET") or "")
+        self.device_secret = str(os.getenv("LOGOS_DEVICE_SECRET") or extra.get("device_secret") or "").strip()
+        self.allow_all_users = _truthy(os.getenv("LOGOS_ALLOW_ALL_USERS")) or _truthy(extra.get("allow_all_users"))
+        self.allowed_users = _string_set(os.getenv("LOGOS_ALLOWED_USERS")) | _string_set(extra.get("allowed_users")) | _string_set(extra.get("allowed_devices"))
         self.ws_server: LogosWebSocketServer | None = None
         self.store = LogosStore(self._store_path(extra))
-        self.tts = DeterministicStubTTS()
-        self.fast_model = DeterministicFastModel()
+        self.tts = build_tts(extra)
+        self.fast_model = build_fast_model(extra)
         self.apns = APNSClient.from_env()
+        self.latest_pairing_invite: PairingInvite | None = None
 
     @staticmethod
     def envelope_from_dict(data: dict[str, Any]) -> Envelope:
@@ -110,9 +168,28 @@ class LogosAdapter(BasePlatformAdapter):
         if normalized in {"localhost", "127.0.0.1", "::1"}:
             return True
         try:
-            address = ipaddress.ip_address(normalized)
+            return LogosAdapter._is_safe_ip_address(ipaddress.ip_address(normalized))
         except ValueError:
+            pass
+        if normalized in {"", "0.0.0.0", "::"}:
             return False
+        try:
+            infos = socket.getaddrinfo(normalized, None, proto=socket.IPPROTO_TCP)
+        except OSError:
+            return False
+        addresses: set[Any] = set()
+        for info in infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            try:
+                addresses.add(ipaddress.ip_address(str(sockaddr[0])))
+            except ValueError:
+                return False
+        return bool(addresses) and all(LogosAdapter._is_safe_ip_address(address) for address in addresses)
+
+    @staticmethod
+    def _is_safe_ip_address(address: Any) -> bool:
         if address.is_unspecified or address.is_multicast:
             return False
         tailscale_cgnat = ipaddress.ip_network("100.64.0.0/10")
@@ -127,14 +204,203 @@ class LogosAdapter(BasePlatformAdapter):
         device_id = str(device_id or "").strip()
         if not device_id:
             return False
-        if _truthy(os.getenv("LOGOS_ALLOW_ALL_USERS")):
+        if self.allow_all_users:
             return True
-        allowed_raw = os.getenv("LOGOS_ALLOWED_USERS") or ""
-        allowed = {item.strip() for item in allowed_raw.split(",") if item.strip()}
-        if allowed:
-            return device_id in allowed
+        if self.allowed_users:
+            return device_id in self.allowed_users
         existing = self.store.get_device(device_id)
         return bool(existing and existing.revoked_at is None)
+
+    def auth_secrets_for_device(self, device_id: str | None) -> list[tuple[str, str]]:
+        """Return candidate hello secrets for a device, preferring per-device credentials."""
+
+        normalized_device = str(device_id or "").strip()
+        if not self.device_secret:
+            return []
+        if not normalized_device:
+            return [(self.device_secret, "shared_master")]
+        existing = self.store.get_device(normalized_device)
+        per_device_secret = derive_device_secret(self.device_secret, normalized_device)
+        per_device_hash = hashlib.sha256(per_device_secret.encode("utf-8")).hexdigest()
+        master_hash = hashlib.sha256(self.device_secret.encode("utf-8")).hexdigest()
+        if existing and existing.revoked_at is not None:
+            return []
+        if existing and existing.shared_secret_hash:
+            if existing.shared_secret_hash == per_device_hash:
+                return [(per_device_secret, "per_device")]
+            if existing.shared_secret_hash == master_hash:
+                return [(self.device_secret, "legacy_shared")]
+            return []
+        return [(self.device_secret, "shared_master")]
+
+    def _approve_gateway_pairing_for_device(self, device_id: str | None, display_name: str | None = None) -> bool:
+        """Bridge Logos QR/device auth into Hermes' generic gateway authorization store."""
+
+        normalized_device = str(device_id or "").strip()
+        if not normalized_device or not self.is_device_allowed(normalized_device):
+            return False
+        try:
+            from gateway.pairing import PairingStore
+        except Exception:
+            logger.debug("Logos: gateway pairing store unavailable for device authorization", exc_info=True)
+            return False
+
+        platform_name = self.platform.value if self.platform else "logos"
+        try:
+            store = PairingStore()
+            with store._lock:  # noqa: SLF001 - plugin bridge uses Hermes' existing gateway-pairing persistence.
+                if store.is_approved(platform_name, normalized_device):
+                    return False
+                store._approve_user(platform_name, normalized_device, display_name or normalized_device)  # noqa: SLF001
+                return True
+        except Exception:
+            logger.warning("Logos: failed to authorize QR-paired device in gateway pairing store", exc_info=True)
+            return False
+
+    def create_pairing_invite(
+        self,
+        *,
+        adapter_url: str | None = None,
+        device_id: str | None = None,
+        ttl_seconds: int = DEFAULT_PAIRING_TTL_SECONDS,
+        now: float | None = None,
+        autoconnect: bool = True,
+    ) -> PairingInvite:
+        url = adapter_url or self._public_adapter_url()
+        invite = create_invite(
+            master_secret=self.device_secret,
+            adapter_url=url,
+            device_id=device_id,
+            ttl_seconds=ttl_seconds,
+            now=now,
+            autoconnect=autoconnect,
+        )
+        self.store.upsert_pairing_token(
+            token_hash=pairing_token_hash(invite.pair_token),
+            device_id=invite.device_id,
+            shared_secret_hash=invite.device_secret_hash,
+            expires_at=invite.expires_at,
+            created_at=now,
+        )
+        self.latest_pairing_invite = invite
+        return invite
+
+    def build_pairing_command_response(
+        self,
+        raw_args: str = "",
+        *,
+        image_dir: str | Path | None = None,
+        now: float | None = None,
+    ) -> str:
+        options = self._parse_pairing_args(raw_args)
+        ttl_seconds = int(options.get("ttl") or options.get("ttl_seconds") or DEFAULT_PAIRING_TTL_SECONDS)
+        device_id = options.get("device_id") or options.get("device")
+        adapter_url = options.get("adapter_url") or options.get("url") or None
+        invite = self.create_pairing_invite(
+            adapter_url=adapter_url,
+            device_id=device_id,
+            ttl_seconds=ttl_seconds,
+            now=now,
+            autoconnect=not _truthy(options.get("no_autoconnect")),
+        )
+        output_dir = Path(image_dir).expanduser() if image_dir else Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes") / "cache" / "logos"
+        safe_device_id = _safe_filename_component(invite.device_id)
+        png_path = render_qr_png(invite.pairing_url, output_dir / f"pairing-{safe_device_id}-{int(invite.expires_at)}.png")
+        remaining = max(0, int(invite.expires_at - (time.time() if now is None else float(now))))
+        warnings: list[str] = []
+        if _is_loopback_adapter_url(invite.adapter_url):
+            warnings.append(
+                "⚠️ Adapter URL is loopback. This is fine for Simulator, but a physical iPhone will point at itself. "
+                "Set LOGOS_PUBLIC_URL or pass adapter_url=wss://<mac>.<tailnet>.ts.net/ for device pairing."
+            )
+        elif _is_plaintext_non_loopback_adapter_url(invite.adapter_url):
+            warnings.append(
+                "⚠️ Adapter URL uses plaintext ws://. The iOS pairing client rejects non-loopback plaintext pairing URLs; use wss://."
+            )
+        warning_text = "".join(f"{warning}\n" for warning in warnings)
+        return (
+            "Scan this with your iPhone to pair Logos.\n\n"
+            f"Device ID: `{invite.device_id}`\n"
+            f"Adapter: `{invite.adapter_url}`\n"
+            f"Expires in: {remaining} seconds\n"
+            f"{warning_text}\n"
+            "This QR uses a short-lived one-time token; the long-lived per-device secret is not printed here.\n\n"
+            f"MEDIA:{png_path}"
+        )
+
+    async def handle_pairing_envelope(self, envelope: Envelope) -> dict[str, Any]:
+        token = str(envelope.payload.get("pair_token") or "").strip()
+        device_id = str(envelope.payload.get("device_id") or envelope.device_id or "").strip()
+        display_name = _optional_nonempty_str(envelope.payload.get("display_name"))
+        if not token:
+            return self._pairing_error(envelope, "missing_pair_token", "Pairing token is required")
+        if not device_id:
+            return self._pairing_error(envelope, "missing_device_id", "Device ID is required")
+        token_hash = pairing_token_hash(token)
+        record = self.store.get_pairing_token(token_hash)
+        if record is None:
+            return self._pairing_error(envelope, "token_not_found", "Pairing token was not found")
+        now = time.time()
+        if record.device_id != device_id:
+            return self._pairing_error(envelope, "device_mismatch", "Pairing token was issued for a different device")
+        if record.is_consumed:
+            return self._pairing_error(envelope, "token_consumed", "Pairing token was already used")
+        if record.is_expired(now):
+            return self._pairing_error(envelope, "token_expired", "Pairing token has expired")
+        device_secret = derive_device_secret(self.device_secret, device_id)
+        device_secret_hash = hashlib.sha256(device_secret.encode("utf-8")).hexdigest()
+        if record.shared_secret_hash != device_secret_hash:
+            return self._pairing_error(envelope, "credential_mismatch", "Pairing token credential binding does not match this adapter")
+        consumed = self.store.mark_pairing_token_consumed(token_hash, consumed_at=now, expires_after=now)
+        if consumed is None:
+            return self._pairing_error(envelope, "token_consumed", "Pairing token was already used or expired")
+        self.store.upsert_device(
+            device_id=device_id,
+            display_name=display_name,
+            shared_secret_hash=device_secret_hash,
+            capabilities=[],
+        )
+        self._approve_gateway_pairing_for_device(device_id, display_name)
+        return {
+            "type": "pairing_complete",
+            "request_id": envelope.request_id,
+            "device_id": device_id,
+            "payload": {
+                "adapter_url": envelope.payload.get("adapter_url") or self._public_adapter_url(),
+                "device_id": device_id,
+                "device_secret": device_secret,
+                "credential_scope": "per_device",
+            },
+        }
+
+    def _pairing_error(self, envelope: Envelope, reason: str, message: str) -> dict[str, Any]:
+        frame = error_frame(
+            "pairing_failed",
+            message,
+            request_id=envelope.request_id,
+            device_id=envelope.device_id,
+            project_key=envelope.project_key,
+            raw=envelope.to_dict(),
+        )
+        frame["payload"]["reason"] = reason
+        return frame
+
+    def _public_adapter_url(self) -> str:
+        value = _optional_nonempty_str(os.getenv("LOGOS_PUBLIC_URL"))
+        if value:
+            return value
+        return self.ws_url
+
+    @staticmethod
+    def _parse_pairing_args(raw_args: str) -> dict[str, str]:
+        options: dict[str, str] = {}
+        for item in shlex.split(raw_args or ""):
+            if "=" in item:
+                key, value = item.split("=", 1)
+                options[key.strip().replace("-", "_")] = value.strip()
+            elif item.strip():
+                options.setdefault("device_id", item.strip())
+        return options
 
     async def connect(self) -> bool:
         if not self.device_secret:
@@ -240,7 +506,7 @@ class LogosAdapter(BasePlatformAdapter):
             )
         capabilities_raw = envelope.payload.get("capabilities") or []
         capabilities = [str(item) for item in capabilities_raw] if isinstance(capabilities_raw, list) else []
-        shared_hash = hashlib.sha256(self.device_secret.encode("utf-8")).hexdigest() if self.device_secret else None
+        shared_hash = None
         device = self.store.upsert_device(
             device_id=device_id,
             display_name=_optional_nonempty_str(envelope.payload.get("display_name")),
@@ -249,6 +515,7 @@ class LogosAdapter(BasePlatformAdapter):
             apns_environment=_optional_nonempty_str(envelope.payload.get("apns_environment")),
             capabilities=capabilities,
         )
+        self._approve_gateway_pairing_for_device(device_id, device.display_name)
         return {
             "type": "registered",
             "request_id": envelope.request_id,
@@ -316,7 +583,7 @@ class LogosAdapter(BasePlatformAdapter):
                 device_id=envelope.device_id,
                 message_id=None,
                 mode="ack",
-                source="deterministic_stub_fast_ack",
+                source=getattr(self.tts, "source_name", "tts"),
             )
         return frame
 
@@ -399,6 +666,7 @@ class LogosAdapter(BasePlatformAdapter):
         if envelope.device_id:
             self.store.set_active_project(device_id=envelope.device_id, project_key=project_key)
         device_id = envelope.device_id or str(envelope.payload.get("device_id") or "logos-device")
+        self._approve_gateway_pairing_for_device(device_id, _optional_nonempty_str(envelope.payload.get("display_name")))
         client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
         session_id = str(envelope.session_id or f"project:{project_key}")
         if mirror_user:
@@ -502,6 +770,60 @@ class LogosAdapter(BasePlatformAdapter):
             sensitive_context={"content": content, "summary": summary.summary_text},
         )
         return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        project_key = self._project_key_from_chat_id(chat_id)
+        existing = self.store.get_message_by_project(project_key, str(message_id))
+        if existing is None:
+            return SendResult(success=False, message_id=None, error="message not found")
+        updated = self.store.update_message(
+            session_id=existing.session_id,
+            message_id=existing.message_id,
+            content=content,
+            metadata={"edited_at": time.time(), "finalized": bool(finalize)},
+        )
+        if updated is None:
+            return SendResult(success=False, message_id=message_id, error="message not found")
+        existing_project = self.store.get_project(project_key)
+        self.store.upsert_project(
+            project_key=project_key,
+            title=existing_project.title if existing_project else project_key,
+            current_session_id=updated.session_id,
+            last_seen_message_id=updated.message_id,
+            last_seen_server_seq=updated.server_seq,
+            last_preview=content[:240],
+        )
+        frame = {
+            "type": "state_update",
+            "project_key": project_key,
+            "session_id": updated.session_id,
+            "server_seq": updated.server_seq,
+            "payload": {
+                "op": "message_updated",
+                "message": updated.to_protocol(),
+            },
+        }
+        summary_frame: dict[str, Any] | None = None
+        if finalize:
+            summary_result = self.fast_model.summarize(content)
+            summary = self.store.upsert_summary(
+                message=updated,
+                summary_text=summary_result.summary_text,
+                source_hash=summary_result.source_hash,
+            )
+            summary_frame = self._summary_ready_update(updated, summary.to_protocol())
+        if self.ws_server is not None:
+            await self.ws_server.broadcast(frame, project_key=project_key)
+            if summary_frame is not None:
+                await self.ws_server.broadcast(summary_frame, project_key=project_key)
+        return SendResult(success=True, message_id=updated.message_id, raw_response=frame)
 
     def _message_state_update(self, message: LogosMessage) -> dict[str, Any]:
         return {
@@ -642,8 +964,10 @@ class LogosAdapter(BasePlatformAdapter):
         decision = str(envelope.payload.get("decision") or "").strip().lower()
         if decision in {"approve", "allow", "yes", "y"}:
             command = "/approve"
+            normalized_decision = "approve"
         elif decision in {"deny", "reject", "cancel", "no", "n"}:
             command = "/deny"
+            normalized_decision = "deny"
         else:
             return error_frame(
                 "invalid_approval_decision",
@@ -663,7 +987,18 @@ class LogosAdapter(BasePlatformAdapter):
                 device_id=envelope.device_id,
                 project_key=project_key,
             )
-        project_key = await self._dispatch_gateway_text(envelope, command, mirror_user=False)
+        resolved_directly = False
+        session_key = str(pending.payload.get("session_key") or "").strip()
+        if session_key:
+            try:
+                from tools.approval import resolve_gateway_approval
+
+                approval_choice = "once" if normalized_decision == "approve" else "deny"
+                resolved_directly = bool(resolve_gateway_approval(session_key, approval_choice))
+            except Exception:
+                resolved_directly = False
+        if not resolved_directly:
+            project_key = await self._dispatch_gateway_text(envelope, command, mirror_user=False)
         self.store.resolve_pending_interaction(request_id)
         return await self._broadcast_run_status(
             project_key=project_key,
@@ -671,7 +1006,7 @@ class LogosAdapter(BasePlatformAdapter):
             status="running",
             request_id=envelope.request_id,
             device_id=envelope.device_id,
-            payload={"approval_decision": decision},
+            payload={"approval_decision": normalized_decision},
         )
 
     async def _handle_clarify_response(self, envelope: Envelope) -> dict[str, Any]:
@@ -685,19 +1020,27 @@ class LogosAdapter(BasePlatformAdapter):
                 project_key=envelope.project_key,
             )
         clarify_id = str(envelope.payload.get("clarify_id") or envelope.request_id or "")
+        project_key = self._project_key_for(envelope)
         pending = self.store.get_pending_interaction(clarify_id) if clarify_id else None
+        if pending is not None and (pending.kind != "clarification" or pending.project_key != project_key):
+            return error_frame(
+                "clarify_not_pending",
+                "clarify_response requires a matching pending clarification for this project",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=project_key,
+            )
         resolved = False
-        if clarify_id:
+        if pending is not None:
             try:
                 from tools.clarify_gateway import resolve_gateway_clarify
 
                 resolved = bool(resolve_gateway_clarify(clarify_id, text))
             except Exception:
                 resolved = False
-        project_key = self._project_key_for(envelope)
         if not resolved:
             project_key = await self._dispatch_gateway_text(envelope, text)
-        if pending is not None and pending.kind == "clarification" and pending.project_key == project_key:
+        if pending is not None and resolved:
             self.store.resolve_pending_interaction(clarify_id)
         return await self._broadcast_run_status(
             project_key=project_key,
@@ -891,35 +1234,8 @@ class LogosAdapter(BasePlatformAdapter):
         session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
         message_id = payload.get("message_id")
         mode = str(payload.get("mode") or "summary")
-        text = payload.get("text") or payload.get("summary_text")
-        if message_id and mode == "summary":
-            message = self.store.get_message(session_id, str(message_id))
-            if message is None:
-                return error_frame(
-                    "message_not_found",
-                    f"no Logos message found for {session_id}/{message_id}",
-                    request_id=envelope.request_id,
-                    device_id=envelope.device_id,
-                    project_key=project_key,
-                )
-            summary = self.store.get_summary(message.session_id, message.message_id)
-            if summary is None:
-                summary_result = self.fast_model.summarize(message.content)
-                summary = self.store.upsert_summary(
-                    message=message,
-                    summary_text=summary_result.summary_text,
-                    source_hash=summary_result.source_hash,
-                )
-            text = summary.summary_text
-        if not isinstance(text, str) or not text.strip():
-            if not message_id:
-                return error_frame(
-                    "missing_audio_source",
-                    "playback_audio requires payload.text or payload.message_id",
-                    request_id=envelope.request_id,
-                    device_id=envelope.device_id,
-                    project_key=project_key,
-                )
+        text = None
+        if message_id:
             message = self.store.get_message(session_id, str(message_id))
             if message is None:
                 return error_frame(
@@ -941,6 +1257,16 @@ class LogosAdapter(BasePlatformAdapter):
                 text = summary.summary_text
             else:
                 text = message.content
+        else:
+            text = payload.get("text") or payload.get("summary_text")
+        if not isinstance(text, str) or not text.strip():
+            return error_frame(
+                "missing_audio_source",
+                "playback_audio requires payload.text or payload.message_id",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=project_key,
+            )
         audio_id = str(payload.get("audio_id") or f"audio-{uuid.uuid4()}")
         return await self._stream_tts_audio(
             text=text,
@@ -951,7 +1277,7 @@ class LogosAdapter(BasePlatformAdapter):
             device_id=envelope.device_id,
             message_id=str(message_id) if message_id else None,
             mode=mode,
-            source="deterministic_stub_tts",
+            source=getattr(self.tts, "source_name", "tts"),
         )
 
     async def _stream_tts_audio(
@@ -967,7 +1293,23 @@ class LogosAdapter(BasePlatformAdapter):
         mode: str,
         source: str,
     ) -> dict[str, Any] | None:
-        chunks = self.tts.iter_chunks(text=text, audio_id=audio_id)
+        try:
+            chunks = self.tts.iter_chunks(text=text, audio_id=audio_id)
+        except Exception as exc:
+            error_type = exc.__class__.__name__
+            logger.warning(
+                "Logos TTS failed for audio_id=%s provider=%s error_type=%s",
+                audio_id,
+                source,
+                error_type,
+            )
+            return error_frame(
+                "tts_failed",
+                f"TTS failed for provider {source} ({error_type})",
+                request_id=request_id,
+                device_id=device_id,
+                project_key=project_key,
+            )
         if not chunks:
             return error_frame(
                 "tts_empty_audio",
@@ -1081,6 +1423,22 @@ class LogosAdapter(BasePlatformAdapter):
         return chat_id or "default"
 
 
+def _platform_config_for_command() -> PlatformConfig:
+    try:
+        from gateway.config import load_gateway_config
+
+        gateway_config = load_gateway_config()
+        return gateway_config.platforms.get(_platform()) or PlatformConfig(enabled=True, extra={})
+    except Exception:
+        logger.debug("Logos: falling back to env-only platform config for pairing command", exc_info=True)
+        return PlatformConfig(enabled=True, extra={})
+
+
+def _handle_pair_command(raw_args: str) -> str:
+    adapter = LogosAdapter(_platform_config_for_command())
+    return adapter.build_pairing_command_response(raw_args or "")
+
+
 def register(ctx: Any) -> None:
     ctx.register_platform(
         name="logos",
@@ -1093,4 +1451,10 @@ def register(ctx: Any) -> None:
         allow_all_env="LOGOS_ALLOW_ALL_USERS",
         pii_safe=True,
         emoji="📱",
+    )
+    ctx.register_command(
+        name="logos-pair",
+        handler=_handle_pair_command,
+        description="Generate a short-lived Logos iPhone pairing QR code.",
+        args_hint="device_id=<id> ttl=120 adapter_url=wss://<host>/",
     )

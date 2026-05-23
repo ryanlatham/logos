@@ -26,11 +26,13 @@ CLIENT_FRAME_TYPES: set[str] = {
     "clarify_response",
     "run_cancel",
     "heartbeat",
+    "pair",
 }
 
 SERVER_FRAME_TYPES: set[str] = {
     "hello",
     "registered",
+    "pairing_complete",
     "projects_list",
     "messages_batch",
     "state_update",

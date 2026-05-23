@@ -1,6 +1,6 @@
 # Logos Code Review Report
 
-Last updated: 2026-05-15T07:46:18-07:00
+Last updated: 2026-05-18T01:26:51-07:00
 
 ## Summary
 
@@ -121,6 +121,6 @@ Nonblocking suggestions:
 
 ## Remaining nonblocking follow-ups
 
-- Physical-device validation remains required for real iPhone networking, microphone/ASR behavior, APNS delivery, background reconnect behavior, signing, and Tailscale behavior.
+- Physical/manual validation has been accepted complete by Ryan as of 2026-05-18 after follow-up field fixes. Detailed hardware metadata was not captured in this code-review report.
 - Apple Watch relay remains intentionally deferred.
-- Minor hardening/doc refresh items above can be handled before or during physical-device validation.
+- Minor hardening/doc refresh items above remain post-v1 polish, not blockers.

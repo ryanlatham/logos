@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.run_stage_f_mock_adapter import format_traffic_log_line
 

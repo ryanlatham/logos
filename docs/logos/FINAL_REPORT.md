@@ -1,443 +1,200 @@
-# Logos Final Report — Simulator Complete / Physical Device Gate
+# Logos Final Report — Live Architecture Gate Complete, Physical Manual Gate Ready
 
-Last updated: 2026-05-15T12:23:21-07:00
+Last updated: 2026-05-22T20:42:43-07:00
 
 Workspace: `/Users/ryan/Development/logos`
 
-Reference archive: `/Users/ryan/Development/logos-agent-reference`
-
 Kanban board: `logos-agent-voice-app`
 
-Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 15 Pro
+Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 17 Pro
 
 Bundle id: `com.ryan.logos`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 
-## 1. What was implemented
+## Bottom line
 
-### Mac / Hermes side
+Logos is no longer merely a mock/simulator demo. The live Hermes Logos platform plugin path has been validated end-to-end from an authenticated WebSocket client through the running Hermes gateway, real local fast LLM, real TTS, live clarification callback, and live approval callback.
 
-- Logos Hermes platform plugin scaffold under `plugins/logos/`.
-- Plugin manifest `plugins/logos/plugin.yaml` using installed Hermes lowercase `plugin.yaml` convention.
-- WebSocket server with shared-secret authentication.
-- Typed JSON envelope parsing and serialization.
-- Inbound `text_input`, `text_message`, and final `speech` forwarding through adapter/gateway `handle_message(...)` path, not direct `AIAgent` construction.
-- Slash-command pass-through for text beginning with `/`.
-- Protocol sequencing with adapter-generated `server_seq`.
-- SQLite-backed adapter store for:
-  - projects,
-  - device active project pointers,
-  - mirrored messages,
-  - summaries,
-  - registered devices/APNS tokens,
-  - adapter event sequence state.
-- Reconnect-safe message fetch using `messages_get` / `messages_batch` with `after_server_seq` and `before_message_id` behavior.
-- Project/session operations:
-  - `list_projects`,
-  - `switch_project`,
-  - `new_project`,
-  - `rename_project`,
-  - `/resume` pass-through/intention path.
-- Run-state mirroring:
-  - `idle`,
-  - `running`,
-  - `queued`,
-  - `awaiting_approval`,
-  - `awaiting_clarification`,
-  - `cancelling`,
-  - `error`.
-- Stop/cancel via `run_cancel` mapping to Hermes `/stop` semantics.
-- Approval request and response surfaces, mapped through normal Hermes approval/deny command semantics.
-- Clarification request and response surfaces, including Hermes clarify callback integration where available.
-- Deterministic stub TTS backend producing chunked WAV audio frames for `playback_audio`.
-- Fast-model interface/stub for:
-  - immediate acknowledgment,
-  - conservative intent extraction,
-  - response summaries keyed by message id.
-- Private APNS scaffolding:
-  - device registration protocol,
-  - APNS token storage,
-  - token-auth APNS client when credentials exist,
-  - deterministic no-credential skip behavior,
-  - private completion/approval/clarification payload builder.
+Automated verification is green:
 
-### iOS side
+- Python suite: `75 passed, 1 warning in 0.57s`
+- Python compile check: passed
+- Live Logos smoke against real gateway/plugin: text, TTS, clarification, approval all passed
+- Xcode/Simulator model tests: `LogosModelTests` 67 passed, `** TEST SUCCEEDED **`; focused UI smoke previously passed.
 
-- SwiftUI iOS app under `clients/ios/Logos` using XcodeGen.
-- Native `URLSessionWebSocketTask` client.
-- HMAC signing compatible with the Python WebSocket server.
-- Local SQLite message store.
-- Text chat UI.
-- Project picker and new-project field.
-- Run status display and stop button.
-- Approval card UI.
-- Clarification card UI.
-- Playback button and AVFoundation audio chunk assembly/playback with explicit `.playback` audio-session activation before starting `AVAudioPlayer`.
-- Ack/playback status surfaces.
-- Voice panel with:
-  - `SFSpeechRecognizer` capability check,
-  - on-device-only recognition policy,
-  - hold-to-talk,
-  - tap-to-talk,
-  - microphone-stop finalization that waits for recognizer final output or a bounded timeout before sending to Hermes,
-  - partial transcript display,
-  - tap-to-talk energy/silence state machine.
-- Notification panel with explicit `Enable` action.
-- iOS APNS registration delegate.
-- Notification route parsing from APNS `userInfo`.
-- `logos://` deep-link route parsing for Simulator/development validation.
-- Reconnect + delta-sync path on notification route.
-- Accessibility identifiers for UI tests.
+The only remaining validation is the physical/manual hardware pass Ryan said he will run after handoff: real iPhone microphone, physical audio, device network reachability, signing/device install, and APNS delivery.
 
-### Documentation/artifacts
+## What is implemented
 
-- `docs/logos/IMPLEMENTATION_NOTES.md`
-- `docs/logos/TEST_REPORT.md`
-- `docs/logos/DEVICE_TEST_CHECKLIST.md`
-- `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`
-- `docs/logos/IOS_SIMULATOR_STAGE_F.md`
-- Simulator screenshots:
-  - `docs/logos/stage-g-playback-simulator.png`
-  - `docs/logos/stage-i-voice-ui-simulator.png`
-  - `docs/logos/stage-j-notification-route-simulator.png`
-  - `docs/logos/stage-k-simulator-app.png`
-- Private push fixture:
-  - `docs/logos/stage-j-private-push.apns`
+### Hermes / Mac plugin path
 
-## 2. What was verified by tests
+- Logos platform plugin under `plugins/logos/`.
+- WebSocket server with HMAC/shared-secret authentication.
+- Config/database enrollment, including local development `allow_all_users` support.
+- Adapter message routing through Hermes gateway platform events rather than direct agent construction.
+- Project/session persistence in `/Users/ryan/.hermes/logos/logos.db`.
+- Message mirroring, summaries, project state, pending interaction storage, and reconnect replay.
+- Fast acknowledgment/intent/summary path backed by configured local Ollama model `gemma3:12b`.
+- Real TTS provider support with `macos_say` producing WAV chunks.
+- Approval and clarification callback forwarding from live Hermes runs to Logos frames and back to Hermes response paths.
+- Private APNS payload scaffolding and token storage without embedding sensitive response content.
+- Live smoke script: `scripts/logos_live_smoke.py`.
 
-### Python
+### iOS client
+
+- SwiftUI iOS app under `clients/ios/Logos`.
+- Native `URLSessionWebSocketTask` client with HMAC hello signing.
+- Auto-connect/reconnect lifecycle with generation gating and first-connection policy.
+- Local SQLite message store with explicit same-message replacement for progress/message updates.
+- Text chat, project picker, project creation, run status, stop/cancel surface.
+- Approval and clarification cards.
+- Audio request/playback path with chunk filtering, audio assembly, explicit playback session setup, retained player lifecycle, and playback status UI.
+- Voice UI with hold-to-talk and tap-to-talk, local-only speech-recognition policy, natural-pause/quiet-speech/silence handling, bounded finalization wait, duplicate-finalization protection, and disconnect/send-failure draft recovery.
+- Notification route parsing and private-payload handling for APNS/deep-link flows.
+- Accessibility identifiers for deterministic UI tests.
+
+## Latest verification evidence
+
+### Live Hermes gateway/plugin smoke
 
 Command:
 
 ```bash
 cd /Users/ryan/Development/logos
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
-```
-
-Result:
-
-```text
-45 passed
-```
-
-Coverage includes:
-
-- protocol envelope validation,
-- WebSocket authentication and bridge behavior,
-- slash-command pass-through,
-- sequencing/reconnect/message pagination,
-- project/session routing,
-- `/resume` intent path,
-- run status/cancel/queue behavior,
-- approval and clarification frames/responses,
-- TTS `playback_audio` → `audio_chunk` / `audio_end`,
-- deterministic fast-model ack/intent/summary behavior,
-- APNS private payloads and no-credential skip,
-- device registration storage without echoing raw tokens.
-
-Compile check:
-
-```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins/logos scripts tests
+python scripts/logos_live_smoke.py --scenario all --timeout 360
 ```
 
 Result: passed.
 
-### iOS unit/UI tests
+Observed live scenarios:
 
-Command:
+- `text`: authenticated to `ws://ryans-mac-studio:8765`, received exact sentinel response through live Hermes path.
+- `tts`: received `audio/wav` chunks from `macos_say_tts`; first bytes had `RIFF` prefix.
+- `clarify`: live Hermes clarify request surfaced question/choices and resumed after Logos answer.
+- `approval`: live Hermes approval request surfaced command preview and accepted Logos deny response.
+
+Sanitized runtime summary:
+
+```text
+logos_enabled: True
+fast_model_provider: ollama
+fast_model_model: gemma3:12b
+tts_provider: macos_say
+allow_all_users: True
+device_secret_present: True
+```
+
+Gateway status:
+
+```text
+Launchd plist: /Users/ryan/Library/LaunchAgents/ai.hermes.gateway.plist
+Gateway service is loaded
+PID: 96285
+LastExitStatus: 0
+```
+
+### Python verification
 
 ```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
-xcodegen generate --spec project.yml
-xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+cd /Users/ryan/Development/logos
+python -m pytest tests -q
+python -m compileall -q plugins/logos scripts tests
 ```
 
 Result:
 
 ```text
-LogosModelTests: 22 tests, 0 failures
-LogosUITests: 3 tests, 0 failures
-** TEST SUCCEEDED **
+75 passed, 1 warning in 0.57s
+compileall passed with no output
 ```
 
-The UI tests validate:
+### Xcode verification
 
-- app launch with Simulator env vars,
-- adapter connection,
-- notification panel presence,
-- voice panel/control presence,
-- typed message round trip through the mock adapter,
-- assistant response rendering,
-- playback button/status path through `Playing audio` or `Audio finished`,
-- immediate project-title text field typing,
-- approval fixture card rendering,
-- clarification fixture card rendering and response submission.
-
-## 3. What was verified in iPhone Simulator
-
-- App builds for iOS Simulator.
-- App launches on iPhone 15 Pro Simulator.
-- Simulator app connects to local WebSocket adapter at `ws://127.0.0.1:8765`.
-- Typed text reaches the adapter and response renders in chat.
-- Project picker/default project UI is visible.
-- Approval/clarification cards render from fixtures.
-- Audio playback plumbing reaches `Playing audio` or `Audio finished` status.
-- Voice UI appears; Simulator reports on-device speech recognition availability in the captured run.
-- `xcrun simctl push` accepts the private notification payload fixture.
-- `logos://` open URL reaches the iOS route mechanism far enough for Simulator to display first-open confirmation; parser/route behavior is unit-tested.
-
-Primary report: `docs/logos/TEST_REPORT.md`.
-
-## 4. What could not be verified without physical device / credentials
-
-- Real iPhone microphone quality, latency, and interruption behavior.
-- Real `SFSpeechRecognizer` on-device recognition quality and locale support on hardware.
-- Real permission-prompt flows for microphone, speech recognition, and notifications.
-- iPhone-to-Mac connectivity over Tailscale/private network.
-- Real iOS foreground/background WebSocket suspension and reconnect behavior.
-- Real APNS device-token registration.
-- Real APNS delivery from Apple servers.
-- Notification tap routing after app background/suspend.
-- Apple Developer signing/provisioning setup.
-- Apple Watch relay. This remains intentionally out of scope until physical iPhone validation passes.
-
-## 5. Exact commands to run the adapter
-
-### Development/simulator mock adapter
-
-This is the command used for Simulator UI validation. It uses the real Logos protocol/server/store code and replaces only the Hermes agent run with deterministic echo fixtures.
+Mock adapter for deterministic UI tests:
 
 ```bash
 cd /Users/ryan/Development/logos
-export LOGOS_DEVICE_SECRET='[REDACTED]'
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python scripts/run_stage_f_mock_adapter.py \
+PYTHONPATH=plugins python scripts/run_stage_f_mock_adapter.py \
   --host 127.0.0.1 \
-  --port 8765 \
-  --secret "$LOGOS_DEVICE_SECRET" \
-  --store /tmp/logos-stage-k-simulator.db
+  --port 8766 \
+  --secret [REDACTED]
 ```
 
-### Real Hermes plugin install/run path
-
-Source of truth stays under `/Users/ryan/Development/logos/plugins/logos`.
-
-Install as a user plugin:
+Test command:
 
 ```bash
-mkdir -p /Users/ryan/.hermes/plugins
-ln -sfn /Users/ryan/Development/logos/plugins/logos /Users/ryan/.hermes/plugins/logos
-/Users/ryan/.hermes/hermes-agent/venv/bin/hermes plugins enable logos
+cd /Users/ryan/Development/logos
+xcodebuild test \
+  -project clients/ios/Logos/Logos.xcodeproj \
+  -scheme Logos \
+  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A'
 ```
 
-Configure environment:
+Result:
+
+```text
+LogosModelTests: 67 tests, 0 failures
+** TEST SUCCEEDED **
+```
+
+Result bundle:
+
+```text
+/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.22_20-42-18--0700.xcresult
+```
+
+Focused UI smoke uses the mock adapter on port `8766`; the latest backend and model-test gates above did not require a persistent mock adapter.
+
+## Changes made in the final live-architecture pass
+
+- Added config-driven Logos device allowance support to the live plugin path (`allow_all_users` / `allowed_users`) while preserving database enrollment.
+- Enrolled `logos-live-smoke-cli` using only the SHA-256 secret hash; raw secret was not printed.
+- Added live-smoke coverage for real plugin text, TTS, clarification, and approval flows.
+- Hardened clarification response routing to send answer text through the callback path rather than ambiguous command text.
+- Added Swift regression coverage for `state_update` / `message_updated` replacing existing progress-message content.
+- Hardened local SQLite upsert behavior by explicitly deleting same `session_id` + `message_id` before insert; this avoids duplicate stale rows when older local stores lack the expected uniqueness constraint.
+- Updated verification docs from mock/simulator caveats to current live-architecture status.
+
+## Independent review gate
+
+Four independent post-fix reviews were run against the current uncommitted tree:
+
+- UX review: PASS — no handoff-blocking UX issues.
+- Architecture review: PASS — no handoff-blocking protocol/store/plugin issues.
+- Security/privacy review: PASS — no credential leaks or handoff-blocking privacy issues found.
+- General code review: PASS — no blocker-level correctness regressions found.
+
+Material blockers found during review were fixed before final verification: editable device-key setup, local-network usage description, APNS entitlement attachment, streaming edit `server_seq`/summary/project-state refresh, and TTS failure log redaction.
+
+## Manual validation handoff
+
+Open:
 
 ```bash
-export LOGOS_DEVICE_SECRET='[REDACTED]'
-export LOGOS_HOST='127.0.0.1'        # use a Tailscale/private-network bind address for physical iPhone testing
-export LOGOS_PORT='8765'
-export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'
+open /Users/ryan/Development/logos/docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html
 ```
 
-Optional APNS credentials:
+Use that guide for the physical iPhone pass. It covers:
 
-```bash
-export LOGOS_APNS_KEY_ID='[REDACTED]'
-export LOGOS_APNS_TEAM_ID='[REDACTED]'
-export LOGOS_APNS_BUNDLE_ID='com.ryan.logos'
-export LOGOS_APNS_AUTH_KEY_PATH='/path/to/AuthKey_[REDACTED].p8'
-export LOGOS_APNS_ENV='sandbox'
-```
+- real device install/signing,
+- private-network reachability to the Mac,
+- live Hermes text path,
+- microphone/on-device ASR,
+- physical speaker/TTS audibility,
+- approval and clarification cards,
+- stop/cancel and reconnect behavior,
+- APNS/private notification checks when credentials/signing are available,
+- a fillable report form with copyable Markdown output.
 
-Enable platform config if needed:
+## Known limits / deferred work
 
-```bash
-/Users/ryan/.hermes/hermes-agent/venv/bin/hermes config set platforms.logos.enabled true
-```
+- Physical iPhone validation remains Ryan-owned after this handoff.
+- APNS live delivery cannot be honestly completed without the physical/device-signing path.
+- Apple Watch relay remains post-v1/deferred.
+- `allow_all_users: true` is a development validation convenience. Before using Logos as a stricter always-on personal agent surface, switch back to explicit device enrollment/allow-listing.
+- Gateway logs contain unrelated Discord privileged-intents and Telegram chat-not-found warnings; they did not block Logos WebSocket/plugin validation.
 
-Then run Hermes normally from the installed environment. Exact gateway invocation depends on the active Hermes deployment mode; the plugin itself is now ready for the installed plugin manager. I did not enable it on the live profile during this run to avoid surprising the active chat/gateway process without a physical phone ready. Boring caution. Correct caution.
+## Kanban disposition
 
-## 6. Exact commands to build/run the iOS app
-
-Generate project and build/test:
-
-```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
-xcodegen generate --spec project.yml
-xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
-xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
-```
-
-Install/launch on Simulator with environment variables:
-
-```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
-APP_PATH=$(xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
-  -showBuildSettings 2>/dev/null | \
-  awk -F' = ' '/ TARGET_BUILD_DIR = /{dir=$2} / WRAPPER_NAME = /{wrap=$2} END{print dir "/" wrap}')
-
-xcrun simctl install FD91D719-6C01-4917-A654-B81D3465595A "$APP_PATH"
-
-SIMCTL_CHILD_LOGOS_WS_URL='ws://127.0.0.1:8765' \
-SIMCTL_CHILD_LOGOS_DEVICE_SECRET='[REDACTED]' \
-SIMCTL_CHILD_LOGOS_DEVICE_ID='ios-simulator' \
-SIMCTL_CHILD_LOGOS_AUTOCONNECT='1' \
-xcrun simctl launch --terminate-running-process \
-  FD91D719-6C01-4917-A654-B81D3465595A com.ryan.logos
-```
-
-Simulator private push fixture:
-
-```bash
-xcrun simctl push FD91D719-6C01-4917-A654-B81D3465595A \
-  com.ryan.logos /Users/ryan/Development/logos/docs/logos/stage-j-private-push.apns
-```
-
-Simulator route fixture:
-
-```bash
-xcrun simctl openurl FD91D719-6C01-4917-A654-B81D3465595A \
-  'logos://notification?kind=approval&project_key=default&request_id=appr-sim&server_seq=1'
-```
-
-## 7. Required environment variables / config values
-
-### Required
-
-- `LOGOS_DEVICE_SECRET` — shared secret used by WebSocket clients.
-
-### Adapter/server optional
-
-- `LOGOS_HOST` — host/interface to bind; default `127.0.0.1`.
-- `LOGOS_PORT` — WebSocket port; default `8765`.
-- `LOGOS_STORE_PATH` — SQLite adapter metadata path.
-- `LOGOS_ALLOWED_USERS` — comma-separated allowed device/user ids.
-- `LOGOS_ALLOW_ALL_USERS` — dev-only allow-all switch.
-
-### iOS Simulator launch env
-
-- `LOGOS_WS_URL`
-- `LOGOS_DEVICE_SECRET`
-- `LOGOS_DEVICE_ID`
-- `LOGOS_AUTOCONNECT=1`
-
-### APNS optional
-
-- `LOGOS_APNS_KEY_ID`
-- `LOGOS_APNS_TEAM_ID`
-- `LOGOS_APNS_BUNDLE_ID`
-- `LOGOS_APNS_AUTH_KEY_PATH`
-- `LOGOS_APNS_ENV` — `sandbox` or `production`.
-
-## 8. Physical iPhone validation checklist
-
-Detailed checklist: `docs/logos/DEVICE_TEST_CHECKLIST.md`.
-
-Minimum physical gate checklist:
-
-1. Install/run Logos on physical iPhone with real signing.
-2. Configure adapter URL to Mac Tailscale/private-network address.
-3. Confirm WebSocket foreground live updates.
-4. Send typed text from iPhone → Logos adapter → Hermes → response rendered.
-5. Verify project picker and `/resume` from phone.
-6. Hold-to-talk ASR:
-   - allow mic/speech permissions,
-   - speak,
-   - release,
-   - verify final transcript dispatches once.
-7. Tap-to-talk ASR/silence detection:
-   - speak then stop,
-   - verify auto-stop and single final transcript.
-8. Hold/tap silence cases:
-   - no empty final turn should be sent.
-9. Summary playback / TTS audio path on device speaker/Bluetooth.
-10. Background/reconnect behavior:
-    - background app during/after a run,
-    - reopen,
-    - verify delta sync.
-11. Real APNS registration and delivery:
-    - enable notifications,
-    - verify device token registration,
-    - verify private completion notification.
-12. Approval request flow while foregrounded and backgrounded.
-13. Clarification request flow while foregrounded and backgrounded.
-14. `/resume` from phone into a known desktop session.
-15. Stop/cancel during a running task.
-16. Inspect logs for secret/token/transcript leakage; none should appear in normal logs.
-
-## 9. Known issues and suggested next fixes
-
-- **Physical install not performed**: no iPhone/Apple signing validation yet. Next: provision bundle id and install from Xcode.
-- **Live APNS not verified**: APNS client is scaffolded and private-payload tested, but no credentials/device token were available. Next: set `LOGOS_APNS_*`, enable notifications on iPhone, and run the Stage J checklist.
-- **TTS is stubbed**: Kokoro was unavailable in the Hermes venv. Next: install/benchmark Kokoro or keep the stub until the real iPhone loop is stable. Do not let voice prettiness outrank transport correctness.
-- **Fast model is stubbed**: MLX/Qwen packages were unavailable. Next: add a real local model behind `fast_llm.py` only after phone path is stable; preserve deterministic fallback.
-- **Simulator URL route confirmation**: first `logos://` open prompts `Open in “Logos”?`. Unit parser/reconnect path is covered; hardware notification tap still needs validation.
-- **Plugin not enabled in live Hermes profile**: implementation source exists and install commands are documented. Next: install/enable when ready to test with the phone. I avoided altering the active live gateway without hardware ready.
-- **Mock adapter vs real gateway**: Simulator UI tests use deterministic mock Hermes responses. Python tests cover adapter/gateway semantics, but a real Hermes end-to-end task from phone should be the first physical-device smoke test.
-
-## 10. Kanban board summary
-
-Board: `logos-agent-voice-app`
-
-Completed stages:
-
-- Stage 0 — Workspace, references, and Kanban setup
-- Stage A — Environment and contract verification
-- Stage B — Platform plugin and WebSocket text bridge
-- Stage C — Protocol, sequencing, and message replication
-- Stage D — Sessions, project routing, and `/resume`
-- Stage E — Run state, queue, stop/cancel, approval, and clarification
-- Stage F — iOS app skeleton in Xcode Simulator
-- Stage G — TTS playback
-- Stage H — Fast local model for ack, intent, and summaries
-- Stage I — ASR UI and speech state machine
-- Stage J — Notifications and private APNS path
-- Stage K — End-to-end Simulator validation
-- Stage L — Physical-device gate and final report
-
-Feature-note tasks on the board remain as ledger/backlog notes, not implementation blockers:
-
-- plugin loading and gateway message routing
-- slash command pass-through
-- reconnect replay and local message store
-- project picker and session routing
-- approval and clarification cards
-- private notification payloads
-- summary playback and TTS
-- physical device validation checklist
-- deferred / not v1
-
-Physical-device-gated items:
-
-- real iPhone/Tailscale connection,
-- real mic/on-device ASR,
-- real APNS registration/delivery,
-- real iOS foreground/background socket behavior,
-- Apple Watch relay after iPhone path passes.
-
-## 11. Intentionally deferred scope
-
-- Apple Watch relay.
-- Persistent approval policies.
-- Durable run recovery across adapter restarts.
-- Separate Logos Kanban UI.
-- Multi-user device/account model.
-- Public internet exposure.
-- Fine-tuned fast model.
-- Full-response automatic TTS.
-- Global desktop/phone active-session synchronization.
-
-## Final gate
-
-The next meaningful validation requires physical user/device action: a signed physical iPhone build, Tailscale/private-network testing, APNS credentials/device token registration, and real microphone/on-device ASR validation.
-
-Stop condition reached. The simulator path is as far as it can honestly go. Anything beyond this without hardware would be theater, and theater does not ship reliable software.
+The implementation/automation cards are closed. The physical/manual-validation Kanban card is blocked on Ryan's hardware test, with this report and the HTML guide as the handoff artifact.

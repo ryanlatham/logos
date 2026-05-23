@@ -1,6 +1,38 @@
 # Logos Implementation Notes
 
-Last updated: 2026-05-15T05:47:05-07:00
+Last updated: 2026-05-18T06:42:03-07:00
+
+## Architecture-completion correction
+
+The previous Kanban/project closure overstated completion. Current implementation includes a source Logos platform plugin scaffold and the adapter does construct `MessageEvent` and call `self.handle_message(...)`, but the end-to-end validation that was repeatedly run used `scripts/run_stage_f_mock_adapter.py`, not the live Hermes gateway/plugin deployment. Several architecture-critical components are still stubs or unproven in live operation:
+
+- `plugins/logos/fast_llm.py` uses `DeterministicFastModel`, a regex/deterministic fallback rather than a real local fast LLM runtime/client.
+- `plugins/logos/tts.py` uses `DeterministicStubTTS`, explicitly non-speech WAV beeps rather than real TTS.
+- UI tests exercise mock adapter fixtures such as `/mock_approval` and `/mock_clarify`, not necessarily live Hermes-origin approval/clarification callbacks.
+- Physical/manual validation was performed against the mock/client flow, not the full live Logos architecture.
+
+The `logos-agent-voice-app` Kanban board has been reopened with corrective tasks:
+
+- `t_770be11f` — Correction parent: reopen Logos v1 real-architecture completion.
+- `t_76133bd4` — Implement live Logos gateway plugin end-to-end path.
+- `t_e7efd02c` — Replace deterministic fast-model stub with real configurable local fast LLM.
+- `t_21b1d429` — Replace deterministic beep WAV TTS with real TTS runtime/client.
+- `t_7d9c8fed` — Wire real Hermes approval, clarification, run progress, and tool progress to Logos.
+- `t_7629f3e0` — Run physical/manual validation against real plugin, not mock adapter.
+
+## Closure verification follow-up — playback status accessibility
+
+During the final Logos Kanban closure rerun, the adapter correctly received the UI-test playback request and streamed `audio_chunk` / `audio_end` frames, but the UI test could miss the playback status because the custom SwiftUI `ToolStrip` did not expose a stable playback-status accessibility node. The app now marks the playback strip with `playbackStatusLabel` and an accessibility label equal to the current status (`Receiving audio`, `Playing audio`, or `Audio finished`), and the UI test waits on that explicit element instead of brittle exact `StaticText` discovery.
+
+Verification after this fix:
+
+- Focused UI regression: `LogosUITests/testTextMessageRoundTripThroughMockAdapter` passed.
+- Full Xcode target: `LogosModelTests` 50/50 and `LogosUITests` 5/5 passed on Simulator `FD91D719-6C01-4917-A654-B81D3465595A`.
+- Python tests: `49 passed`.
+- Python compile check: passed.
+- `git diff --check`: passed.
+- Diff secret scan: `secret_scan_findings=0`.
+- Mock adapter cleanup: no tracked Hermes background process and no listener on `127.0.0.1:8766` after tests.
 
 ## Stage A — environment and contract verification
 
@@ -1131,7 +1163,53 @@ Stage L conclusion:
 - Stage K test report is complete.
 - Device checklist is complete enough for first hardware pass and should be filled in during real iPhone testing.
 - No Apple Watch relay work was started.
-- Next meaningful work requires physical iPhone / Apple Developer signing / APNS credentials / Tailscale hardware validation.
+- Physical/manual gate has now been accepted complete by Ryan; no v1 implementation blocker remains.
+
+## Post-physical/manual closure — 2026-05-18
+
+Status: accepted complete by Ryan after direct code fixes to the remaining field issues.
+
+Post-manual code changes reviewed in this closure pass:
+
+- `53d6a47` — hardens iOS speech delivery:
+  - configures recording through the audio-session manager,
+  - preserves/recovers undelivered final speech drafts on socket failure or disconnect,
+  - adds pending-message reconciliation for final speech send confirmation.
+- `36dc581` — adds iOS auto-connect and initial scroll hardening:
+  - auto-connect resumes only after first successful connection unless launch environment explicitly forces it,
+  - thread scrolls to the latest item on first layout and project switch.
+- Follow-up verification fixes in this pass:
+  - `tests/test_stage_f_mock_adapter.py` imports the mock adapter under the documented pytest command,
+  - `LogosUITests.testTextMessageRoundTripThroughMockAdapter` now verifies playback status after tapping Play instead of requiring the Play button to remain visible.
+
+Fresh verification from this pass:
+
+```bash
+PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
+  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+# 49 passed
+
+PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
+  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins scripts tests
+# passed
+
+xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
+  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -only-testing:LogosTests test
+# LogosModelTests: 50 passed
+
+LOGOS_UI_TEST_WS_URL=ws://127.0.0.1:8766 \
+  xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
+  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' test
+# LogosUITests: 5 passed against Stage F mock adapter
+```
+
+Process hygiene after verification:
+
+- Hermes background process registry empty.
+- No listener on `127.0.0.1:8766`.
+
+No v1 implementation blocker remains. Remaining ideas are post-v1 hardening/deferred scope: real TTS engine, real fast local model, Apple Watch relay, durable run recovery, and larger product-surface expansion.
 
 Smoke verification after report generation:
 

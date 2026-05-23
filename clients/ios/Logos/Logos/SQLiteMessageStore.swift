@@ -4,14 +4,20 @@ import SQLite3
 final class SQLiteMessageStore {
     private var db: OpaquePointer?
 
-    init(filename: String = "LogosMessages.sqlite3") {
+    init(filename: String? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Logos", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent(filename)
+        let url = directory.appendingPathComponent(Self.resolvedFilename(filename: filename, environment: environment))
         if sqlite3_open(url.path, &db) == SQLITE_OK {
             createSchema()
         }
+    }
+
+    static func resolvedFilename(filename: String? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        let candidate = filename ?? environment["LOGOS_MESSAGE_STORE_FILENAME"] ?? "LogosMessages.sqlite3"
+        let lastPathComponent = URL(fileURLWithPath: candidate).lastPathComponent
+        return lastPathComponent.isEmpty ? "LogosMessages.sqlite3" : lastPathComponent
     }
 
     deinit {
@@ -19,8 +25,9 @@ final class SQLiteMessageStore {
     }
 
     func upsert(_ message: LogosMessage) {
+        deleteExisting(sessionID: message.sessionID, messageID: message.messageID)
         let sql = """
-        INSERT OR REPLACE INTO messages (
+        INSERT INTO messages (
             project_key, session_id, message_id, server_seq, role, content, timestamp, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
@@ -66,6 +73,16 @@ final class SQLiteMessageStore {
             ))
         }
         return results
+    }
+
+    private func deleteExisting(sessionID: String, messageID: String) {
+        let sql = "DELETE FROM messages WHERE session_id = ? AND message_id = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, at: 1, statement: statement)
+        bind(messageID, at: 2, statement: statement)
+        sqlite3_step(statement)
     }
 
     private func createSchema() {

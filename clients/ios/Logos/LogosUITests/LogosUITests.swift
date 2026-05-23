@@ -19,7 +19,7 @@ final class LogosUITests: XCTestCase {
         XCTAssertTrue(playButtons.firstMatch.waitForExistence(timeout: 8))
         let playButton = playButtons.element(boundBy: max(playButtons.count - 1, 0))
         playButton.tap()
-        XCTAssertTrue(playButton.exists)
+        XCTAssertTrue(waitForPlaybackStatus(in: app))
     }
 
     func testApprovalAndClarificationCardsRenderFromMockAdapterFixtures() throws {
@@ -85,10 +85,12 @@ final class LogosUITests: XCTestCase {
     private func launchConfiguredApp() -> XCUIApplication {
         let app = XCUIApplication()
         let environment = ProcessInfo.processInfo.environment
+        let testID = UUID().uuidString
         app.launchEnvironment = [
             "LOGOS_WS_URL": environment["LOGOS_UI_TEST_WS_URL"] ?? "ws://127.0.0.1:8766",
             "LOGOS_DEVICE_SECRET": environment["LOGOS_UI_TEST_DEVICE_SECRET"] ?? "stage-f-secret",
-            "LOGOS_DEVICE_ID": "ios-ui-test-\(UUID().uuidString)",
+            "LOGOS_DEVICE_ID": "ios-ui-test-\(testID)",
+            "LOGOS_MESSAGE_STORE_FILENAME": "LogosUITests-\(testID).sqlite3",
             "LOGOS_AUTOCONNECT": "1"
         ]
         app.launch()
@@ -121,11 +123,10 @@ final class LogosUITests: XCTestCase {
 
     private func waitForPlaybackStatus(in app: XCUIApplication, timeout: TimeInterval = 10) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+        let explicitStatus = app.descendants(matching: .any).matching(identifier: "playbackStatusLabel").firstMatch
         while Date() < deadline {
-            if app.staticTexts["Requesting audio"].exists
-                || app.staticTexts["Receiving audio"].exists
-                || app.staticTexts["Playing audio"].exists
-                || app.staticTexts["Audio finished"].exists {
+            if explicitStatus.exists,
+               ["Receiving audio", "Playing audio", "Audio finished"].contains(explicitStatus.label) {
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))

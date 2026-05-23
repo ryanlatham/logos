@@ -23,6 +23,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ryan.logos
         PRODUCT_NAME: Logos
         INFOPLIST_FILE: Logos/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Logos/Logos.entitlements
         CODE_SIGN_STYLE: Automatic
         ENABLE_TESTABILITY: YES
   LogosTests:
