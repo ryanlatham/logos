@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-from dataclasses import dataclass
-from typing import Any
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, replace
+from typing import Any, Callable
 
 
 _SECRET_PATTERNS = [
@@ -13,6 +16,8 @@ _SECRET_PATTERNS = [
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{10,}"),
 ]
+
+OllamaTransport = Callable[..., str]
 
 
 @dataclass(frozen=True)
@@ -58,7 +63,7 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
         data = raw
     else:
         try:
-            data = json.loads(raw)
+            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
         except json.JSONDecodeError as exc:
             raise ValueError(f"fast model output is not valid JSON: {exc.msg}") from exc
     if not isinstance(data, dict):
@@ -92,6 +97,30 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     )
 
 
+def parse_summary_json(raw: str | bytes | dict[str, Any], *, source_text: str, summary_max_chars: int) -> SummaryResult:
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        try:
+            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"summary model output is not valid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("summary model output must be a JSON object")
+    summary_text = _optional_nonempty_str(data.get("summary_text"), "summary_text")
+    if not summary_text:
+        raise ValueError("summary_text is required")
+    summary = sanitize_summary_text(summary_text)
+    if len(summary) > summary_max_chars:
+        summary = summary[: max(0, summary_max_chars - 1)].rstrip() + "…"
+    original = str(source_text or "")
+    return SummaryResult(
+        summary_text=summary,
+        source_hash=hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        source_chars=len(original),
+    )
+
+
 def sanitize_summary_text(text: str) -> str:
     sanitized = str(text or "")
     for pattern in _SECRET_PATTERNS:
@@ -101,12 +130,14 @@ def sanitize_summary_text(text: str) -> str:
 
 
 class DeterministicFastModel:
-    """Strict, deterministic Stage H fallback for ack, safe intents, and summaries.
+    """Strict, deterministic fallback for ack, safe intents, and summaries.
 
-    This is intentionally conservative. It only emits control intents for narrow,
-    low-ambiguity utterance shapes; everything else returns an ack and lets Hermes
-    handle the text normally.
+    This remains the test double and safety fallback. Production Logos can use a
+    local fast LLM via :class:`OllamaFastModel`; malformed/slow/low-confidence
+    model output falls back here instead of blocking the main Hermes response.
     """
+
+    provider_name = "deterministic"
 
     def __init__(self, *, summary_max_chars: int = 240) -> None:
         self.summary_max_chars = max(40, int(summary_max_chars))
@@ -195,6 +226,155 @@ class DeterministicFastModel:
         return "Got it."
 
 
+class OllamaFastModel:
+    """Configurable local fast-model client backed by Ollama's generate API."""
+
+    provider_name = "ollama"
+
+    def __init__(
+        self,
+        *,
+        endpoint: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float = 2.5,
+        min_confidence: float = 0.55,
+        summary_max_chars: int = 240,
+        transport: OllamaTransport | None = None,
+        fallback: DeterministicFastModel | None = None,
+    ) -> None:
+        self.endpoint = (endpoint or os.getenv("OLLAMA_HOST") or os.getenv("LOGOS_FAST_MODEL_ENDPOINT") or "http://127.0.0.1:11434").rstrip("/")
+        self.model = model or os.getenv("LOGOS_FAST_MODEL_MODEL") or os.getenv("OLLAMA_MODEL") or "gemma3:12b"
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+        self.min_confidence = min(1.0, max(0.0, float(min_confidence)))
+        self.summary_max_chars = max(40, int(summary_max_chars))
+        self.transport = transport or ollama_generate
+        self.fallback = fallback or DeterministicFastModel(summary_max_chars=self.summary_max_chars)
+        self.last_error: str | None = None
+
+    def analyze_input(self, text: str, *, projects: list[str] | None = None) -> FastModelResult:
+        prompt = _analysis_prompt(text, projects=projects)
+        try:
+            raw = self.transport(
+                endpoint=self.endpoint,
+                model=self.model,
+                prompt=prompt,
+                timeout_seconds=self.timeout_seconds,
+            )
+            result = parse_fast_model_json(raw)
+            if result.confidence < self.min_confidence:
+                raise ValueError(f"fast model confidence {result.confidence:.2f} below threshold {self.min_confidence:.2f}")
+            result = self._ensure_ack_text(result, text)
+            self.last_error = None
+            return result
+        except Exception as exc:
+            self.last_error = str(exc)
+            return self.fallback.analyze_input(text, projects=projects)
+
+    def summarize(self, text: str) -> SummaryResult:
+        prompt = _summary_prompt(text, summary_max_chars=self.summary_max_chars)
+        try:
+            raw = self.transport(
+                endpoint=self.endpoint,
+                model=self.model,
+                prompt=prompt,
+                timeout_seconds=self.timeout_seconds,
+            )
+            result = parse_summary_json(raw, source_text=text, summary_max_chars=self.summary_max_chars)
+            self.last_error = None
+            return result
+        except Exception as exc:
+            self.last_error = str(exc)
+            return self.fallback.summarize(text)
+
+    def _ensure_ack_text(self, result: FastModelResult, text: str) -> FastModelResult:
+        if not result.ack or result.ack_text:
+            return result
+        fallback_ack = self.fallback.analyze_input(text).ack_text or "Got it."
+        return replace(result, ack_text=fallback_ack)
+
+
+def build_fast_model(extra: dict[str, Any] | None = None):
+    extra = dict(extra or {})
+    provider = str(os.getenv("LOGOS_FAST_MODEL_PROVIDER") or extra.get("fast_model_provider") or "deterministic").strip().lower()
+    summary_max_chars = int(os.getenv("LOGOS_SUMMARY_MAX_CHARS") or extra.get("summary_max_chars") or 240)
+    fallback = DeterministicFastModel(summary_max_chars=summary_max_chars)
+    if provider in {"", "deterministic", "stub", "test"}:
+        return fallback
+    if provider in {"ollama", "local", "auto"}:
+        return OllamaFastModel(
+            endpoint=_optional_text(os.getenv("LOGOS_FAST_MODEL_ENDPOINT") or extra.get("fast_model_endpoint")),
+            model=_optional_text(os.getenv("LOGOS_FAST_MODEL_MODEL") or extra.get("fast_model_model")),
+            timeout_seconds=float(os.getenv("LOGOS_FAST_MODEL_TIMEOUT") or extra.get("fast_model_timeout", 2.5)),
+            min_confidence=float(os.getenv("LOGOS_FAST_MODEL_MIN_CONFIDENCE") or extra.get("fast_model_min_confidence", 0.55)),
+            summary_max_chars=summary_max_chars,
+            transport=extra.get("fast_model_transport"),
+            fallback=fallback,
+        )
+    return fallback
+
+
+def ollama_generate(*, endpoint: str, model: str, prompt: str, timeout_seconds: float) -> str:
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.0, "num_predict": 256},
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"ollama request failed: {exc}") from exc
+    try:
+        outer = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ollama response was not JSON: {exc.msg}") from exc
+    generated = outer.get("response") if isinstance(outer, dict) else None
+    if not isinstance(generated, str) or not generated.strip():
+        raise RuntimeError("ollama response did not include generated text")
+    return generated
+
+
+def _analysis_prompt(text: str, *, projects: list[str] | None = None) -> str:
+    projects_text = ", ".join(projects or []) or "none"
+    return (
+        "You are Logos' fast local control model. Return only strict JSON with these keys: "
+        "ack(boolean), ack_text(string|null), switch_intent(object|null), create_intent(object|null), "
+        "resume_intent(object|null), cancel_intent(boolean), approval_decision(approve|deny|null), confidence(number 0..1). "
+        "Only emit control intents for explicit, low-ambiguity user requests. Do not invent project names. "
+        "switch_intent shape: {\"project_title\":\"...\"}; create_intent: {\"title\":\"...\"}; resume_intent: {\"target\":\"...\"}. "
+        f"Known projects: {projects_text}. User text: {json.dumps(str(text or ''))}"
+    )
+
+
+def _summary_prompt(text: str, *, summary_max_chars: int) -> str:
+    return (
+        "Summarize this Hermes assistant response for spoken playback. Return only strict JSON: "
+        "{\"summary_text\":\"...\"}. One sentence, no secrets, no markdown, "
+        f"maximum {summary_max_chars} characters. Text: {json.dumps(str(text or ''))}"
+    )
+
+
+def _extract_json_object(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 def _optional_nonempty_str(value: Any, field_name: str) -> str | None:
     if value is None:
         return None
@@ -225,3 +405,10 @@ def _clean_title(text: str) -> str:
 def _first_sentence(text: str) -> str:
     match = re.search(r"(.+?[.!?])(?:\s|$)", text)
     return match.group(1).strip() if match else text.strip()
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

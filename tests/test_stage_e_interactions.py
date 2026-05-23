@@ -1,22 +1,55 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
-
 import pytest
 
 from gateway.config import PlatformConfig
-from logos.adapter import LogosAdapter
+from logos.adapter import LogosAdapter, _validate_config
 from logos.schema import Envelope
 
 
-@dataclass
 class FakeServer:
-    frames: list[dict[str, Any]] = field(default_factory=list)
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
 
-    async def broadcast(self, frame: dict[str, Any], *, project_key: str | None = None) -> None:
+    async def broadcast(self, frame: dict, *, project_key: str | None = None) -> None:
         self.frames.append({"frame": frame, "project_key": project_key})
 
+
+def test_live_plugin_config_accepts_config_secret_without_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOGOS_DEVICE_SECRET", raising=False)
+    config = PlatformConfig(enabled=True, extra={"device_secret": "configured-secret", "store_path": str(tmp_path / "logos.db")})
+    assert _validate_config(config) is True
+    adapter = LogosAdapter(config)
+    assert adapter.device_secret == "configured-secret"
+
+
+def test_live_plugin_config_accepts_configured_allowed_devices(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOGOS_ALLOW_ALL_USERS", raising=False)
+    monkeypatch.delenv("LOGOS_ALLOWED_USERS", raising=False)
+    configured = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "configured-secret",
+                "store_path": str(tmp_path / "configured.db"),
+                "allowed_users": ["iphone-live", "logos-live-smoke-cli"],
+            },
+        )
+    )
+    assert configured.is_device_allowed("logos-live-smoke-cli") is True
+    assert configured.is_device_allowed("unknown-device") is False
+
+    allow_all = LogosAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "device_secret": "configured-secret",
+                "store_path": str(tmp_path / "allow-all.db"),
+                "allow_all_users": True,
+            },
+        )
+    )
+    assert allow_all.is_device_allowed("first-time-iphone") is True
 
 class CapturingLogosAdapter(LogosAdapter):
     def __init__(self, config: PlatformConfig):
@@ -74,6 +107,34 @@ async def test_approval_response_requires_matching_pending_request(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_approval_response_resolves_gateway_approval_directly(tmp_path, monkeypatch):
+    adapter = CapturingLogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    calls: list[tuple[str, str]] = []
+
+    def fake_resolve(session_key: str, choice: str, resolve_all: bool = False) -> int:
+        calls.append((session_key, choice))
+        return 1
+
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", fake_resolve)
+    adapter.store.upsert_pending_interaction(
+        request_id="a-live",
+        kind="approval",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="approval_request",
+        payload={"approval_id": "a-live", "session_key": "agent:main:logos:dm:project:alpha"},
+        server_seq=1,
+    )
+
+    response = await adapter.handle_ws_envelope(Envelope(type="approval_response", request_id="a-live", device_id="iphone", project_key="alpha", payload={"decision": "approve"}))
+
+    assert response["type"] == "run_status"
+    assert calls == [("agent:main:logos:dm:project:alpha", "once")]
+    assert adapter.captured_events == []
+    assert adapter.store.get_pending_interaction("a-live") is None
+
+
+@pytest.mark.asyncio
 async def test_clarify_response_routes_answer_text_to_gateway_path(tmp_path):
     adapter = CapturingLogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
 
@@ -82,6 +143,63 @@ async def test_clarify_response_routes_answer_text_to_gateway_path(tmp_path):
     assert response["type"] == "run_status"
     assert response["payload"]["status"] == "running"
     assert adapter.captured_events[-1].text == "Use feature/auth."
+
+
+@pytest.mark.asyncio
+async def test_clarify_response_resolves_gateway_clarify_directly(tmp_path, monkeypatch):
+    adapter = CapturingLogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    calls: list[tuple[str, str]] = []
+
+    def fake_resolve(clarify_id: str, text: str) -> bool:
+        calls.append((clarify_id, text))
+        return True
+
+    monkeypatch.setattr("tools.clarify_gateway.resolve_gateway_clarify", fake_resolve)
+    adapter.store.upsert_pending_interaction(
+        request_id="clar-live",
+        kind="clarification",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="clarify_request",
+        payload={"clarify_id": "clar-live", "session_key": "agent:main:logos:dm:project:alpha"},
+        server_seq=1,
+    )
+
+    response = await adapter.handle_ws_envelope(Envelope(type="clarify_response", request_id="clar-live", device_id="iphone", project_key="alpha", payload={"text": "alpha"}))
+
+    assert response["type"] == "run_status"
+    assert response["payload"]["clarify_resolved"] is True
+    assert calls == [("clar-live", "alpha")]
+    assert adapter.captured_events == []
+    assert adapter.store.get_pending_interaction("clar-live") is None
+
+
+@pytest.mark.asyncio
+async def test_clarify_response_rejects_wrong_project_without_resolving_gateway(tmp_path, monkeypatch):
+    adapter = CapturingLogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    calls: list[tuple[str, str]] = []
+
+    def fake_resolve(clarify_id: str, text: str) -> bool:
+        calls.append((clarify_id, text))
+        return True
+
+    monkeypatch.setattr("tools.clarify_gateway.resolve_gateway_clarify", fake_resolve)
+    adapter.store.upsert_pending_interaction(
+        request_id="clar-live",
+        kind="clarification",
+        project_key="alpha",
+        session_id="project:alpha",
+        frame_type="clarify_request",
+        payload={"clarify_id": "clar-live"},
+        server_seq=1,
+    )
+
+    response = await adapter.handle_ws_envelope(Envelope(type="clarify_response", request_id="clar-live", device_id="iphone", project_key="beta", payload={"text": "wrong project"}))
+
+    assert response["type"] == "error"
+    assert response["payload"]["code"] == "clarify_not_pending"
+    assert calls == []
+    assert adapter.store.get_pending_interaction("clar-live") is not None
 
 
 @pytest.mark.asyncio

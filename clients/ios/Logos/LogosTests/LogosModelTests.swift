@@ -3,6 +3,18 @@ import AVFoundation
 @testable import Logos
 
 final class LogosModelTests: XCTestCase {
+    func testProjectSwitcherLayoutCapsDropdownAndMakesOverflowScrollable() throws {
+        let metrics = ProjectSwitcherLayout.metrics(
+            screenHeight: 812,
+            projectCount: 30,
+            isCreatingProject: false
+        )
+
+        XCTAssertLessThanOrEqual(metrics.dropdownMaxHeight, 812 * 0.75)
+        XCTAssertLessThan(metrics.projectListMaxHeight, metrics.projectListContentHeight)
+        XCTAssertTrue(metrics.isProjectListScrollable)
+    }
+
     func testProjectDecodesFromAdapterDictionary() throws {
         let project = LogosProject.from(dictionary: [
             "project_key": "alpha",
@@ -50,7 +62,128 @@ final class LogosModelTests: XCTestCase {
 
         let settings = LogosSettings(environment: [:], userDefaults: userDefaults)
 
-        XCTAssertEqual(settings.urlString, "ws://ryans-mac-studio:8765")
+        XCTAssertEqual(settings.urlString, "wss://studio.tail752253.ts.net/")
+    }
+
+    @MainActor
+    func testConnectWaitsForWebSocketOpenBeforeStartupFrames() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.secret = "test-secret"
+
+        client.connect()
+
+        XCTAssertEqual(client.connectionState, .connecting)
+        XCTAssertTrue(socket.sentMessages.isEmpty)
+
+        socket.open()
+        await Task.yield()
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
+        XCTAssertEqual(client.connectionState, .connecting)
+
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+
+        XCTAssertEqual(client.connectionState, .connected)
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
+            "hello",
+            "register_device",
+            "list_projects"
+        ])
+    }
+
+    @MainActor
+    func testRegisterDeviceBeforeSocketOpenQueuesTokenWithoutSending() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.secret = "test-secret"
+
+        client.connect()
+        client.registerDevice(apnsToken: "apns-token")
+
+        XCTAssertEqual(client.connectionState, .connecting)
+        XCTAssertNil(client.lastError)
+        XCTAssertTrue(socket.sentMessages.isEmpty)
+
+        socket.open()
+        await Task.yield()
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
+
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
+            "hello",
+            "register_device",
+            "list_projects"
+        ])
+        let registerFrame = try frameRoot(from: socket.sentMessages[1])
+        let registerPayload = try XCTUnwrap(registerFrame["payload"] as? [String: Any])
+        XCTAssertEqual(registerPayload["apns_token"] as? String, "apns-token")
+
+        client.handleFrameString(#"{"type":"registered","request_id":"register-1","payload":{"device":{"device_id":"iphone-a","apns_registered":true}}}"#)
+        client.registerDevice(apnsToken: nil)
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
+            "hello",
+            "register_device",
+            "list_projects",
+            "register_device"
+        ])
+        let postAckRegisterFrame = try frameRoot(from: socket.sentMessages[3])
+        let postAckRegisterPayload = try XCTUnwrap(postAckRegisterFrame["payload"] as? [String: Any])
+        XCTAssertNil(postAckRegisterPayload["apns_token"])
+    }
+
+    @MainActor
+    func testAuthErrorDuringHandshakeDoesNotMarkConnectedOrSendStartupFrames() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.secret = "wrong-secret"
+
+        client.connect()
+        socket.open()
+        await Task.yield()
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
+
+        socket.receiveString(#"{"type":"error","request_id":"hello-1","project_key":"default","payload":{"code":"auth_failed","reason":"invalid_signature","message":"invalid Logos signed hello: signature mismatch"}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(client.connectionState, .error)
+        XCTAssertEqual(client.lastError, "Logos authentication failed: signature mismatch. Check that the iOS Device key matches LOGOS_DEVICE_SECRET on the Logos adapter.")
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
+    }
+
+    @MainActor
+    func testSocketFailureBeforeOpenReportsErrorWithoutStartupFrames() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.secret = "test-secret"
+
+        client.connect()
+        socket.fail(message: "Socket is not connected")
+        await Task.yield()
+
+        XCTAssertEqual(client.connectionState, .error)
+        XCTAssertEqual(client.lastError, "Socket is not connected")
+        XCTAssertTrue(socket.sentMessages.isEmpty)
     }
 
     func testAutoConnectDefaultsOnButWaitsForFirstSuccessfulConnection() throws {
@@ -103,6 +236,19 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(settings.hasCompletedFirstConnection)
     }
 
+    func testSettingsTrimsDeviceSecretFromEnvironment() throws {
+        let suiteName = "LogosSettingsSecretTrim-\(UUID().uuidString)"
+        let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = LogosSettings(
+            environment: ["LOGOS_DEVICE_SECRET": "  configured-secret\n"],
+            userDefaults: userDefaults
+        )
+
+        XCTAssertEqual(settings.secret, "configured-secret")
+    }
+
     func testMessageStoreFilenameCanBeIsolatedByLaunchEnvironment() throws {
         XCTAssertEqual(
             SQLiteMessageStore.resolvedFilename(environment: ["LOGOS_MESSAGE_STORE_FILENAME": "LogosUITests-one.sqlite3"]),
@@ -113,6 +259,186 @@ final class LogosModelTests: XCTestCase {
             "escape.sqlite3"
         )
         XCTAssertEqual(SQLiteMessageStore.resolvedFilename(environment: [:]), "LogosMessages.sqlite3")
+    }
+
+    func testPairingRouteParsesVersionedBase64URLFragment() throws {
+        let payload: [String: Any] = [
+            "v": 1,
+            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "device_id": "iphone-17-pro",
+            "pair_token": "one-time-token",
+            "expires_at": 1_778_760_000.0,
+            "autoconnect": true
+        ]
+        let url = try XCTUnwrap(URL(string: "logos://pair#\(base64URLPayload(payload))"))
+
+        let route = try XCTUnwrap(LogosPairingRoute.from(url: url))
+
+        XCTAssertEqual(route.adapterURL, "wss://studio.tail752253.ts.net/")
+        XCTAssertEqual(route.deviceID, "iphone-17-pro")
+        XCTAssertEqual(route.pairToken, "one-time-token")
+        XCTAssertEqual(route.expiresAt, Date(timeIntervalSince1970: 1_778_760_000.0))
+        XCTAssertTrue(route.autoConnect)
+        XCTAssertNil(route.deviceSecret)
+    }
+
+    func testPairingRouteRejectsPayloadWithoutTokenOrSecret() throws {
+        let payload: [String: Any] = [
+            "v": 1,
+            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "device_id": "iphone-17-pro"
+        ]
+        let url = try XCTUnwrap(URL(string: "logos://pair#\(base64URLPayload(payload))"))
+
+        XCTAssertNil(LogosPairingRoute.from(url: url))
+        XCTAssertNil(LogosPairingRoute.from(url: URL(string: "logos://notification?kind=approval")!))
+    }
+
+    func testPairingRouteRejectsDirectDeviceSecretPayload() throws {
+        let payload: [String: Any] = [
+            "v": 1,
+            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "device_id": "iphone-17-pro",
+            "device_secret": "do-not-accept-secrets-in-qr"
+        ]
+        let url = try XCTUnwrap(URL(string: "logos://pair#\(base64URLPayload(payload))"))
+
+        XCTAssertNil(LogosPairingRoute.from(url: url))
+    }
+
+    func testPairingRouteRequiresSecureTransportExceptLoopback() throws {
+        let secure = LogosPairingRoute(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(120),
+            autoConnect: true
+        )
+        let simulatorLoopback = LogosPairingRoute(
+            adapterURL: "ws://127.0.0.1:8766",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(120),
+            autoConnect: true
+        )
+        let lanPlaintext = LogosPairingRoute(
+            adapterURL: "ws://192.168.1.44:8765",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(120),
+            autoConnect: true
+        )
+
+        XCTAssertTrue(secure.allowsPairingTransport)
+        XCTAssertTrue(simulatorLoopback.allowsPairingTransport)
+        XCTAssertFalse(lanPlaintext.allowsPairingTransport)
+    }
+
+    @MainActor
+    func testApplyPairingRouteExchangesTokenPersistsCredentialAndConnects() async throws {
+        let socket = RecordingWebSocketTask()
+        let exchanger = RecordingPairingCredentialExchanger()
+        exchanger.credential = LogosPairingCredential(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            deviceSecret: "per-device-secret"
+        )
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket),
+            pairingExchanger: exchanger
+        )
+        let route = LogosPairingRoute(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(120),
+            autoConnect: true
+        )
+
+        await client.applyPairingRoute(route)
+
+        XCTAssertEqual(exchanger.routes, [route])
+        XCTAssertEqual(client.settings.urlString, "wss://studio.tail752253.ts.net/")
+        XCTAssertEqual(client.settings.deviceID, "iphone-17-pro")
+        XCTAssertEqual(client.settings.secret, "per-device-secret")
+        XCTAssertTrue(client.settings.autoConnect)
+        XCTAssertTrue(client.settings.hasCompletedFirstConnection)
+        XCTAssertEqual(client.connectionState, .connecting)
+        XCTAssertNil(client.lastError)
+        XCTAssertTrue(socket.sentMessages.isEmpty)
+    }
+
+    @MainActor
+    func testFailedPairingWhileConnectedKeepsExistingConnectionUsable() async throws {
+        let socket = RecordingWebSocketTask()
+        let exchanger = RecordingPairingCredentialExchanger()
+        exchanger.error = LogosPairingExchangeError.adapterRejected("Pairing token expired")
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket),
+            pairingExchanger: exchanger
+        )
+        client.settings.urlString = "wss://old-adapter.tail752253.ts.net/"
+        client.settings.deviceID = "old-device"
+        client.settings.secret = "old-secret"
+        client.connect()
+        socket.open()
+        await Task.yield()
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+        XCTAssertEqual(client.connectionState, .connected)
+
+        let route = LogosPairingRoute(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(120),
+            autoConnect: true
+        )
+        await client.applyPairingRoute(route)
+
+        XCTAssertEqual(exchanger.routes, [route])
+        XCTAssertEqual(client.connectionState, .connected)
+        XCTAssertEqual(client.settings.urlString, "wss://old-adapter.tail752253.ts.net/")
+        XCTAssertEqual(client.settings.deviceID, "old-device")
+        XCTAssertEqual(client.settings.secret, "old-secret")
+        XCTAssertTrue(client.lastError?.contains("Logos pairing failed") == true)
+        XCTAssertTrue(client.createProject(title: "Still usable"))
+    }
+
+    @MainActor
+    func testExpiredPairingRouteFailsBeforeExchange() async throws {
+        let socket = RecordingWebSocketTask()
+        let exchanger = RecordingPairingCredentialExchanger()
+        exchanger.credential = LogosPairingCredential(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            deviceSecret: "per-device-secret"
+        )
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket),
+            pairingExchanger: exchanger
+        )
+        let route = LogosPairingRoute(
+            adapterURL: "wss://studio.tail752253.ts.net/",
+            deviceID: "iphone-17-pro",
+            pairToken: "one-time-token",
+            deviceSecret: nil,
+            expiresAt: Date().addingTimeInterval(-1),
+            autoConnect: true
+        )
+
+        await client.applyPairingRoute(route)
+
+        XCTAssertTrue(exchanger.routes.isEmpty)
+        XCTAssertEqual(client.connectionState, .error)
+        XCTAssertTrue(client.lastError?.contains("expired") == true)
     }
 
     func testHelloSignatureMatchesServerCanonicalHMAC() throws {
@@ -549,11 +875,27 @@ final class LogosModelTests: XCTestCase {
     }
 
     func testRemoteNotificationBackgroundModeConfigured() throws {
-        let modes = try XCTUnwrap(Bundle.main.infoDictionary?["UIBackgroundModes"] as? [String])
+        let info = Bundle.main.infoDictionary ?? [:]
+        let modes = try XCTUnwrap(info["UIBackgroundModes"] as? [String])
         XCTAssertTrue(modes.contains("remote-notification"))
-        let urlTypes = try XCTUnwrap(Bundle.main.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]])
+        XCTAssertNotNil(info["NSLocalNetworkUsageDescription"] as? String)
+        let urlTypes = try XCTUnwrap(info["CFBundleURLTypes"] as? [[String: Any]])
         let schemes = urlTypes.flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }
         XCTAssertTrue(schemes.contains("logos"))
+    }
+
+    func testPushNotificationEntitlementAndProjectSettingConfigured() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let projectDirectory = testsDirectory.deletingLastPathComponent()
+        let entitlementsURL = projectDirectory.appendingPathComponent("Logos/Logos.entitlements")
+        let entitlementsData = try Data(contentsOf: entitlementsURL)
+        let entitlements = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: entitlementsData, options: [], format: nil) as? [String: Any]
+        )
+        XCTAssertEqual(entitlements["aps-environment"] as? String, "development")
+
+        let projectYAML = try String(contentsOf: projectDirectory.appendingPathComponent("project.yml"), encoding: .utf8)
+        XCTAssertTrue(projectYAML.contains("CODE_SIGN_ENTITLEMENTS: Logos/Logos.entitlements"))
     }
 
     func testConnectionLifecycleRejectsStaleCallbacksAfterDisconnectOrReconnect() throws {
@@ -606,6 +948,82 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testStateUpdateMessageUpdatedReplacesExistingMessageContent() throws {
+        let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
+
+        client.handleFrameString("""
+        {"type":"state_update","project_key":"default","payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"tool-progress-1","server_seq":10,"role":"assistant","content":"🔧 terminal…","timestamp":123.0}}}
+        """)
+        XCTAssertEqual(client.messages.count, 1)
+        XCTAssertEqual(client.messages.first?.content, "🔧 terminal…")
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"tool-progress-1","server_seq":11,"role":"assistant","content":"🔧 terminal…\n✅ terminal done","timestamp":124.0}}}
+        """#)
+
+        XCTAssertEqual(client.messages.count, 1)
+        XCTAssertEqual(client.messages.first?.content, "🔧 terminal…\n✅ terminal done")
+        XCTAssertEqual(client.messages.first?.serverSeq, 11)
+    }
+
+    @MainActor
+    func testManualPlaybackRequestsFullMessageAudio() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-full",
+            messageID: "assistant-full-1",
+            serverSeq: 42,
+            role: "assistant",
+            content: "First sentence. Second sentence should also be spoken, not silently dropped into a summary.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+
+        XCTAssertEqual(socket.sentMessages.count, baselineCount + 1)
+        let root = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        XCTAssertEqual(root["type"] as? String, "playback_audio")
+        XCTAssertEqual(root["project_key"] as? String, "default")
+        XCTAssertEqual(root["session_id"] as? String, "session-full")
+        let payload = try XCTUnwrap(root["payload"] as? [String: Any])
+        XCTAssertEqual(payload["message_id"] as? String, "assistant-full-1")
+        XCTAssertEqual(payload["mode"] as? String, "full")
+        XCTAssertEqual(payload["text"] as? String, message.content)
+    }
+
+    @MainActor
+    func testLiveAssistantMessageAutoplaysFullAudioOnce() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"session-live","server_seq":50,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live","message_id":"assistant-live-1","server_seq":50,"role":"assistant","content":"Hello. Ada here. What are we tackling?","timestamp":123.0}}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        let payload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        XCTAssertEqual(playbackFrames.first?["project_key"] as? String, "default")
+        XCTAssertEqual(playbackFrames.first?["session_id"] as? String, "session-live")
+        XCTAssertEqual(payload["message_id"] as? String, "assistant-live-1")
+        XCTAssertEqual(payload["mode"] as? String, "full")
+        XCTAssertEqual(payload["text"] as? String, "Hello. Ada here. What are we tackling?")
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"session-live","server_seq":50,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live","message_id":"assistant-live-1","server_seq":50,"role":"assistant","content":"Hello. Ada here. What are we tackling?","timestamp":123.0}}}
+        """#)
+
+        let framesAfterDuplicate = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(framesAfterDuplicate.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+    }
+
+    @MainActor
     func testAudioFramesForOtherDevicesAreIgnored() throws {
         let client = LogosClient()
         client.settings.deviceID = "iphone-a"
@@ -653,6 +1071,28 @@ final class LogosModelTests: XCTestCase {
             }
         }
         XCTAssertEqual(session.finishCalls, 1)
+    }
+
+    private func base64URLPayload(_ payload: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        return data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func frameType(from message: URLSessionWebSocketTask.Message) throws -> String {
+        let root = try frameRoot(from: message)
+        return try XCTUnwrap(root["type"] as? String)
+    }
+
+    private func frameRoot(from message: URLSessionWebSocketTask.Message) throws -> [String: Any] {
+        guard case .string(let string) = message else {
+            XCTFail("Expected string websocket frame")
+            return [:]
+        }
+        let data = try XCTUnwrap(string.data(using: .utf8))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }
 
@@ -707,6 +1147,19 @@ private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
     }
 }
 
+private final class RecordingPairingCredentialExchanger: PairingCredentialExchanging {
+    var credential: LogosPairingCredential?
+    var error: Error?
+    private(set) var routes: [LogosPairingRoute] = []
+
+    func exchange(route: LogosPairingRoute) async throws -> LogosPairingCredential {
+        routes.append(route)
+        if let error { throw error }
+        guard let credential else { throw RecordingSocketError() }
+        return credential
+    }
+}
+
 @MainActor
 private func makeSocketBackedClient(socket: RecordingWebSocketTask, autoConnect: Bool = true) -> LogosClient {
     let client = LogosClient(
@@ -717,6 +1170,7 @@ private func makeSocketBackedClient(socket: RecordingWebSocketTask, autoConnect:
     client.settings.secret = "test-secret"
     client.settings.autoConnect = autoConnect
     client.connect()
+    socket.open()
     client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)
     return client
 }
@@ -728,8 +1182,9 @@ private final class RecordingWebSocketTaskFactory: WebSocketTaskMaking {
         self.socket = socket
     }
 
-    func webSocketTask(with url: URL) -> any WebSocketTasking {
-        socket
+    func webSocketTask(with url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?) -> any WebSocketTasking {
+        socket.lifecycleObserver = lifecycleObserver
+        return socket
     }
 }
 
@@ -737,10 +1192,19 @@ private final class RecordingWebSocketTask: WebSocketTasking {
     private(set) var sentMessages: [URLSessionWebSocketTask.Message] = []
     private var sendCompletions: [@Sendable (Error?) -> Void] = []
     private var receiveCompletions: [@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void] = []
+    weak var lifecycleObserver: (any WebSocketLifecycleObserving)?
 
     func resume() {}
 
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {}
+
+    func open() {
+        lifecycleObserver?.webSocketDidOpen(taskID: ObjectIdentifier(self))
+    }
+
+    func fail(message: String = "Socket is not connected") {
+        lifecycleObserver?.webSocketDidFail(taskID: ObjectIdentifier(self), message: message)
+    }
 
     func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void) {
         sentMessages.append(message)
@@ -749,6 +1213,11 @@ private final class RecordingWebSocketTask: WebSocketTasking {
 
     func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
         receiveCompletions.append(completionHandler)
+    }
+
+    func receiveString(_ string: String) {
+        let completion = receiveCompletions.removeFirst()
+        completion(.success(.string(string)))
     }
 
     func completeLastSend(error: Error?) {

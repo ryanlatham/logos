@@ -3,8 +3,14 @@ from __future__ import annotations
 import base64
 import io
 import math
+import os
+import shutil
+import subprocess
+import tempfile
 import wave
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -17,15 +23,15 @@ class AudioChunk:
 
 
 class DeterministicStubTTS:
-    """Tiny deterministic TTS stand-in used until a real local TTS runtime is available.
+    """Tiny deterministic TTS stand-in for tests and safety fallback.
 
-    The output is a valid mono PCM WAV. It is intentionally not speech; it proves
-    protocol, chunking, transfer, caching seams, and iOS playback without pulling
-    Kokoro/model packaging into the critical path.
+    The output is a valid mono PCM WAV. It is intentionally not speech; use
+    ``LOGOS_TTS_PROVIDER=macos_say`` for intelligible local speech on macOS.
     """
 
     sample_rate = 16_000
     mime_type = "audio/wav"
+    source_name = "deterministic_stub_tts"
 
     def synthesize(self, text: str) -> bytes:
         text = str(text or "")
@@ -46,16 +52,113 @@ class DeterministicStubTTS:
         return buffer.getvalue()
 
     def iter_chunks(self, *, text: str, audio_id: str, chunk_size: int = 4096) -> list[AudioChunk]:
-        audio = self.synthesize(text)
-        chunks: list[AudioChunk] = []
-        for index, start in enumerate(range(0, len(audio), chunk_size)):
-            raw = audio[start : start + chunk_size]
-            chunks.append(
-                AudioChunk(
-                    audio_id=audio_id,
-                    index=index,
-                    data_b64=base64.b64encode(raw).decode("ascii"),
-                    mime_type=self.mime_type,
-                )
+        return _chunk_audio(self.synthesize(text), audio_id=audio_id, chunk_size=chunk_size, mime_type=self.mime_type)
+
+
+class MacOSSayTTS:
+    """Intelligible local TTS using macOS ``say`` and ``afconvert``.
+
+    ``say`` produces an AIFF-C file. ``afconvert`` normalizes it to mono 16 kHz
+    PCM WAV so the existing Logos chunked-audio protocol and iOS playback path
+    keep working without extra Python audio dependencies.
+    """
+
+    sample_rate = 16_000
+    mime_type = "audio/wav"
+    source_name = "macos_say_tts"
+
+    def __init__(
+        self,
+        *,
+        voice: str | None = None,
+        timeout_seconds: float = 20.0,
+        runner: Callable[..., subprocess.CompletedProcess] | None = None,
+        say_path: str | None = None,
+        afconvert_path: str | None = None,
+    ) -> None:
+        self.voice = str(voice or os.getenv("LOGOS_TTS_VOICE") or "").strip() or None
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.runner = runner or _run_subprocess
+        self.say_path = say_path or shutil.which("say") or "/usr/bin/say"
+        self.afconvert_path = afconvert_path or shutil.which("afconvert") or "/usr/bin/afconvert"
+
+    def synthesize(self, text: str) -> bytes:
+        text = _clean_tts_text(text)
+        if not text:
+            text = "Hermes finished."
+        with tempfile.TemporaryDirectory(prefix="logos-tts-") as tmpdir:
+            base = Path(tmpdir)
+            aiff_path = base / "speech.aiff"
+            wav_path = base / "speech.wav"
+            say_cmd = [self.say_path]
+            if self.voice:
+                say_cmd.extend(["-v", self.voice])
+            say_cmd.extend(["-o", str(aiff_path), text])
+            self.runner(say_cmd, timeout_seconds=self.timeout_seconds)
+            convert_cmd = [
+                self.afconvert_path,
+                "-f",
+                "WAVE",
+                "-d",
+                f"LEI16@{self.sample_rate}",
+                str(aiff_path),
+                str(wav_path),
+            ]
+            self.runner(convert_cmd, timeout_seconds=self.timeout_seconds)
+            audio = wav_path.read_bytes()
+        if not audio.startswith(b"RIFF"):
+            raise RuntimeError("macOS say TTS did not produce a WAV RIFF file")
+        return audio
+
+    def iter_chunks(self, *, text: str, audio_id: str, chunk_size: int = 4096) -> list[AudioChunk]:
+        return _chunk_audio(self.synthesize(text), audio_id=audio_id, chunk_size=chunk_size, mime_type=self.mime_type)
+
+
+def build_tts(extra: dict[str, Any] | None = None):
+    extra = dict(extra or {})
+    provider = str(os.getenv("LOGOS_TTS_PROVIDER") or extra.get("tts_provider") or "deterministic").strip().lower()
+    if provider in {"macos_say", "say", "local", "real"}:
+        return MacOSSayTTS(
+            voice=_optional_text(os.getenv("LOGOS_TTS_VOICE") or extra.get("tts_voice")),
+            timeout_seconds=float(os.getenv("LOGOS_TTS_TIMEOUT") or extra.get("tts_timeout", 20.0)),
+            runner=extra.get("tts_runner"),
+            say_path=_optional_text(extra.get("say_path")),
+            afconvert_path=_optional_text(extra.get("afconvert_path")),
+        )
+    return DeterministicStubTTS()
+
+
+def _chunk_audio(audio: bytes, *, audio_id: str, chunk_size: int, mime_type: str) -> list[AudioChunk]:
+    chunks: list[AudioChunk] = []
+    for index, start in enumerate(range(0, len(audio), int(chunk_size))):
+        raw = audio[start : start + int(chunk_size)]
+        chunks.append(
+            AudioChunk(
+                audio_id=audio_id,
+                index=index,
+                data_b64=base64.b64encode(raw).decode("ascii"),
+                mime_type=mime_type,
             )
-        return chunks
+        )
+    return chunks
+
+
+def _run_subprocess(args: list[str], *, timeout_seconds: float) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
+    )
+
+
+def _clean_tts_text(text: str) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
