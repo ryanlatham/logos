@@ -1726,6 +1726,39 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testLateUnscopedFinalAfterCancelCompleteDoesNotClearNewSameSessionRunOrAutoplay() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-old-before-cancel","project_key":"default","session_id":"session-shared-rerun","payload":{"kind":"terminal","text":"Old request is running"}}
+        """#)
+        client.cancelRun()
+        let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"session-shared-rerun","payload":{"status":"idle","cancelled":true}}
+        """)
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertNil(client.progressActivity)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-new-after-cancel","project_key":"default","session_id":"session-shared-rerun","payload":{"kind":"terminal","text":"New request is running"}}
+        """#)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-new-after-cancel")
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"session-shared-rerun","server_seq":133,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-shared-rerun","message_id":"assistant-old-unscoped-after-cancel","server_seq":133,"role":"assistant","content":"Old final after the user started over.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+
+        XCTAssertEqual(client.runStatus, .running)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-new-after-cancel")
+        XCTAssertEqual(client.progressActivity?.sessionID, "session-shared-rerun")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
     func testOutboundTextAndSpeechAreRejectedWhileCancelling() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)

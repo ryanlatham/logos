@@ -1218,6 +1218,7 @@ class LogosAdapter(BasePlatformAdapter):
     def _message_state_update(self, message: LogosMessage) -> dict[str, Any]:
         return {
             "type": "state_update",
+            "request_id": str(message.metadata.get("request_id") or message.message_id),
             "project_key": message.project_key,
             "session_id": message.session_id,
             "server_seq": message.server_seq,

@@ -1460,6 +1460,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if let requestID, requestID.isEmpty == false {
             return activity.requestID == requestID
         }
+        // A request-scoped progress card must not be released by an unscoped final
+        // message. After a cancel/re-ask in the same session, old adapter frames may
+        // still arrive without a request_id; accepting a session-only match here can
+        // clear the new run and trigger stale autoplay.
+        guard activity.requestID.isEmpty else { return false }
         if let activitySessionID = activity.sessionID {
             return activitySessionID == message.sessionID
         }

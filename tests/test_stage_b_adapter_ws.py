@@ -188,6 +188,7 @@ async def test_progress_message_id_finalize_persists_final_content_instead_of_pr
     assert frames[0]["type"] == "tool_progress"
     assert frames[-1]["type"] == "run_status"
     state_updates = [frame for frame in frames if frame["type"] == "state_update"]
+    assert state_updates[-2]["request_id"] == sent.message_id
     assert state_updates[-2]["payload"]["op"] == "message_appended"
     assert state_updates[-2]["payload"]["message"]["content"] == "Final answer after the tool finished."
     assert state_updates[-1]["payload"]["op"] == "summary_ready"
@@ -235,6 +236,7 @@ async def test_custom_progress_message_id_finalize_uses_original_session_and_per
     assert adapter.store.get_message("project:archwright", "hermes-msg-42") is None
     frames = [item["frame"] for item in fake_server.frames]
     assert [frame["type"] for frame in frames] == ["tool_progress", "tool_progress", "state_update", "state_update", "run_status"]
+    assert frames[2]["request_id"] == "hermes-msg-42"
     assert frames[2]["payload"]["op"] == "message_appended"
     assert frames[2]["payload"]["message"]["message_id"] == "hermes-msg-42"
     assert frames[2]["payload"]["message"]["metadata"].get("source") != "tool_progress"
