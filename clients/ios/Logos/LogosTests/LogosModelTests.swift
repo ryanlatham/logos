@@ -2189,6 +2189,212 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testReceivingAudioKeepsSpectrumIdleUntilPlaybackStarts() throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-receiving-idle",
+            messageID: "assistant-receiving-idle-1",
+            serverSeq: 101,
+            role: "assistant",
+            content: "Play this response.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-receiving-idle","payload":{"audio_id":"\(audioID)","message_id":"assistant-receiving-idle-1","chunk_index":0,"data":"\(Data([255, 255, 255, 255]).base64EncodedString())"}}
+        """)
+
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .receiving)
+        XCTAssertLessThanOrEqual(client.audioPlaybackOverlay?.spectrumBins.max() ?? 1, 0.08)
+    }
+
+    @MainActor
+    func testPlaybackSpectrumRefreshUsesDecodedPCMAtCurrentTime() async throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let sampleRate = 24_000.0
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(
+            samples: sineWave(frequency: 160, sampleRate: sampleRate) + sineWave(frequency: 3_000, sampleRate: sampleRate),
+            sampleRate: sampleRate
+        ))
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-spectrum-refresh",
+            messageID: "assistant-spectrum-refresh-1",
+            serverSeq: 103,
+            role: "assistant",
+            content: "Play this response.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-refresh","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-refresh-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
+        """)
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-refresh","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-refresh-1","chunk_count":1}}
+        """)
+        let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: audioID)
+        XCTAssertTrue(decoded)
+
+        factory.player.currentTime = 0.25
+        client.refreshPlaybackSpectrumForTesting(audioID: audioID)
+        let lowOverlay = try XCTUnwrap(client.audioPlaybackOverlay)
+        XCTAssertLessThanOrEqual(try dominantSpectrumIndex(in: lowOverlay.spectrumBins), 3)
+
+        factory.player.currentTime = 1.25
+        client.refreshPlaybackSpectrumForTesting(audioID: audioID)
+        let highOverlay = try XCTUnwrap(client.audioPlaybackOverlay)
+        XCTAssertGreaterThanOrEqual(try dominantSpectrumIndex(in: highOverlay.spectrumBins), 8)
+    }
+
+    @MainActor
+    func testPlaybackSpectrumTickerRefreshesWithoutManualCall() async throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let sampleRate = 24_000.0
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(
+            samples: sineWave(frequency: 160, sampleRate: sampleRate) + sineWave(frequency: 3_000, sampleRate: sampleRate),
+            sampleRate: sampleRate
+        ))
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-spectrum-ticker",
+            messageID: "assistant-spectrum-ticker-1",
+            serverSeq: 105,
+            role: "assistant",
+            content: "Play this response.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-ticker","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-ticker-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
+        """)
+        factory.player.currentTime = 0.25
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-ticker","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-ticker-1","chunk_count":1}}
+        """)
+        let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: audioID)
+        XCTAssertTrue(decoded)
+        try await waitUntilSpectrumDominantIndex(in: client, isAtMost: 3)
+
+        factory.player.currentTime = 1.25
+        try await waitUntilSpectrumDominantIndex(in: client, isAtLeast: 8)
+        client.stopPlayback()
+    }
+
+    @MainActor
+    func testLateAudioFramesAfterFinishedPlaybackAreIgnored() async throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-finished-late-audio",
+            messageID: "assistant-finished-late-audio-1",
+            serverSeq: 106,
+            role: "assistant",
+            content: "Play this response.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
+        """)
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_count":1}}
+        """)
+        let playCallsBeforeFinish = factory.player.playCalls
+
+        controller.onPlaybackFinished?(audioID, true)
+        try await Task.sleep(nanoseconds: 1_000_000)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .finished)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_index":1,"data":"\(Data([4, 5, 6]).base64EncodedString())"}}
+        """)
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_count":2}}
+        """)
+
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .finished)
+        XCTAssertEqual(factory.player.playCalls, playCallsBeforeFinish)
+    }
+
+    @MainActor
+    func testStoppedAudioRejectsStaleSpectrumRefresh() throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let sampleRate = 24_000.0
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(
+            samples: sineWave(frequency: 160, sampleRate: sampleRate),
+            sampleRate: sampleRate
+        ))
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-spectrum-stopped",
+            messageID: "assistant-spectrum-stopped-1",
+            serverSeq: 104,
+            role: "assistant",
+            content: "Play this response.",
+            timestamp: 123,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-stopped","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-stopped-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
+        """)
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-stopped","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-stopped-1","chunk_count":1}}
+        """)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
+
+        client.stopPlayback()
+        client.refreshPlaybackSpectrumForTesting(audioID: audioID)
+
+        XCTAssertNil(client.audioPlaybackOverlay)
+        XCTAssertNil(client.playbackStatus)
+    }
+
+    @MainActor
     func testFinishedPlaybackLeavesOverlayVisibleTemporarily() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
@@ -2649,6 +2855,213 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(factory.player.playCalls, 2)
     }
 
+    func testSpectrumAnalyzerMapsLowToneToLowerBands() throws {
+        let analyzer = AudioSpectrumAnalyzer()
+        let sampleRate = 24_000.0
+        let bins = analyzer.analyze(
+            samples: sineWave(frequency: 160, sampleRate: sampleRate),
+            sampleRate: sampleRate,
+            playheadTime: 0.25,
+            configuration: AudioSpectrumAnalyzer.Configuration(fftSize: 1024, binCount: 12, minimumFrequency: 80, maximumFrequency: 8000, floorDB: -80)
+        )
+
+        let dominantIndex = try XCTUnwrap(bins.indices.max(by: { bins[$0] < bins[$1] }))
+        let upperBandMax = bins[7...].max() ?? 0
+
+        XCTAssertLessThanOrEqual(dominantIndex, 3)
+        XCTAssertGreaterThan(bins[dominantIndex], 0.35)
+        XCTAssertGreaterThan(bins[dominantIndex], upperBandMax + 0.15)
+    }
+
+    func testSpectrumAnalyzerMapsHighToneToHigherBands() throws {
+        let analyzer = AudioSpectrumAnalyzer()
+        let sampleRate = 24_000.0
+        let bins = analyzer.analyze(
+            samples: sineWave(frequency: 3_000, sampleRate: sampleRate),
+            sampleRate: sampleRate,
+            playheadTime: 0.25,
+            configuration: AudioSpectrumAnalyzer.Configuration(fftSize: 1024, binCount: 12, minimumFrequency: 80, maximumFrequency: 8000, floorDB: -80)
+        )
+
+        let dominantIndex = try XCTUnwrap(bins.indices.max(by: { bins[$0] < bins[$1] }))
+        let lowerBandMax = bins[0...4].max() ?? 0
+
+        XCTAssertGreaterThanOrEqual(dominantIndex, 8)
+        XCTAssertGreaterThan(bins[dominantIndex], 0.35)
+        XCTAssertGreaterThan(bins[dominantIndex], lowerBandMax + 0.15)
+    }
+
+    func testSpectrumAnalyzerSilenceReturnsFloorBins() {
+        let analyzer = AudioSpectrumAnalyzer()
+        let bins = analyzer.analyze(
+            samples: Array(repeating: 0, count: 4096),
+            sampleRate: 24_000,
+            playheadTime: 0.05,
+            configuration: AudioSpectrumAnalyzer.Configuration(fftSize: 1024, binCount: 12, minimumFrequency: 80, maximumFrequency: 8000, floorDB: -80)
+        )
+
+        XCTAssertEqual(bins.count, 12)
+        XCTAssertTrue(bins.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 })
+        XCTAssertLessThanOrEqual(bins.max() ?? 1, 0.08)
+    }
+
+    func testAudioPlaybackControllerUsesDecodedSamplesForSpectrumBins() async throws {
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let sampleRate = 24_000.0
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(
+            samples: sineWave(frequency: 160, sampleRate: sampleRate) + sineWave(frequency: 3_000, sampleRate: sampleRate),
+            sampleRate: sampleRate
+        ))
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
+        try controller.appendChunk(audioID: "audio-decoded-spectrum", chunkIndex: 0, base64: Data([1, 2, 3]).base64EncodedString())
+        try controller.finish(audioID: "audio-decoded-spectrum", expectedChunkCount: 1)
+        let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: "audio-decoded-spectrum")
+        XCTAssertTrue(decoded)
+
+        factory.player.currentTime = 0.25
+        let lowBins = controller.spectrumBins(audioID: "audio-decoded-spectrum", count: 12)
+        factory.player.currentTime = 1.25
+        let highBins = controller.spectrumBins(audioID: "audio-decoded-spectrum", count: 12)
+
+        XCTAssertLessThanOrEqual(try dominantSpectrumIndex(in: lowBins), 3)
+        XCTAssertGreaterThanOrEqual(try dominantSpectrumIndex(in: highBins), 8)
+        XCTAssertEqual(decoder.decodeCalls, 1)
+    }
+
+    func testAudioPlaybackDecodeFailureDoesNotBlockPlaybackAndUsesFloorBins() async throws {
+        let session = RecordingAudioSessionManager()
+        let factory = RecordingAudioPlayerFactory()
+        let decoder = RecordingAudioSampleDecoder(error: RecordingAudioSampleDecoderError())
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
+        try controller.appendChunk(audioID: "audio-decode-fail", chunkIndex: 0, base64: Data([1, 2, 3]).base64EncodedString())
+
+        let result = try controller.finish(audioID: "audio-decode-fail", expectedChunkCount: 1)
+        let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: "audio-decode-fail")
+        XCTAssertTrue(decoded)
+        let bins = controller.spectrumBins(audioID: "audio-decode-fail", count: 12)
+
+        XCTAssertTrue(result.started)
+        XCTAssertEqual(factory.player.playCalls, 1)
+        XCTAssertLessThanOrEqual(bins.max() ?? 1, 0.08)
+        XCTAssertEqual(decoder.decodeCalls, 1)
+    }
+
+    func testAudioPlaybackRejectsOversizedChunkBeforeDecode() throws {
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000))
+        let controller = AudioPlaybackController(
+            sessionManager: RecordingAudioSessionManager(),
+            playerFactory: RecordingAudioPlayerFactory(),
+            sampleDecoder: decoder,
+            limits: AudioPlaybackLimits(maxChunkCount: 4, maxChunkBytes: 2, maxEncodedBytes: 4)
+        )
+
+        XCTAssertThrowsError(try controller.appendChunk(audioID: "audio-too-large-chunk", chunkIndex: 0, base64: Data([1, 2, 3]).base64EncodedString())) { error in
+            XCTAssertEqual(error as? AudioPlaybackError, .chunkTooLarge)
+        }
+        XCTAssertEqual(decoder.decodeCalls, 0)
+    }
+
+    func testAudioPlaybackRejectsEncodedAudioOverTotalLimit() throws {
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000))
+        let controller = AudioPlaybackController(
+            sessionManager: RecordingAudioSessionManager(),
+            playerFactory: RecordingAudioPlayerFactory(),
+            sampleDecoder: decoder,
+            limits: AudioPlaybackLimits(maxChunkCount: 4, maxChunkBytes: 4, maxEncodedBytes: 4)
+        )
+        try controller.appendChunk(audioID: "audio-total-too-large", chunkIndex: 0, base64: Data([1, 2]).base64EncodedString())
+
+        XCTAssertThrowsError(try controller.appendChunk(audioID: "audio-total-too-large", chunkIndex: 1, base64: Data([3, 4, 5]).base64EncodedString())) { error in
+            XCTAssertEqual(error as? AudioPlaybackError, .audioTooLarge)
+        }
+        XCTAssertEqual(decoder.decodeCalls, 0)
+    }
+
+    func testAudioPlaybackRejectsSparseChunksOnFinish() throws {
+        let factory = RecordingAudioPlayerFactory()
+        let controller = AudioPlaybackController(
+            sessionManager: RecordingAudioSessionManager(),
+            playerFactory: factory,
+            sampleDecoder: RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000)),
+            limits: AudioPlaybackLimits(maxChunkCount: 8, maxChunkBytes: 8, maxEncodedBytes: 16)
+        )
+        try controller.appendChunk(audioID: "audio-sparse", chunkIndex: 0, base64: Data([1]).base64EncodedString())
+        try controller.appendChunk(audioID: "audio-sparse", chunkIndex: 2, base64: Data([2]).base64EncodedString())
+
+        XCTAssertThrowsError(try controller.finish(audioID: "audio-sparse", expectedChunkCount: 2)) { error in
+            XCTAssertEqual(error as? AudioPlaybackError, .missingChunks)
+        }
+        XCTAssertEqual(factory.player.playCalls, 0)
+    }
+
+    func testAudioPlaybackRejectsExtraChunksOnFinish() throws {
+        let controller = AudioPlaybackController(
+            sessionManager: RecordingAudioSessionManager(),
+            playerFactory: RecordingAudioPlayerFactory(),
+            sampleDecoder: RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000)),
+            limits: AudioPlaybackLimits(maxChunkCount: 8, maxChunkBytes: 8, maxEncodedBytes: 16)
+        )
+        try controller.appendChunk(audioID: "audio-extra", chunkIndex: 0, base64: Data([1]).base64EncodedString())
+        try controller.appendChunk(audioID: "audio-extra", chunkIndex: 1, base64: Data([2]).base64EncodedString())
+
+        XCTAssertThrowsError(try controller.finish(audioID: "audio-extra", expectedChunkCount: 1)) { error in
+            XCTAssertEqual(error as? AudioPlaybackError, .missingChunks)
+        }
+    }
+
+    @MainActor
+    func testOversizedInboundFrameIsRejectedBeforeJSONParsing() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let previousState = client.connectionState
+
+        let oversizedMessage = String(repeating: "x", count: 2_000_000)
+        let frame = """
+        {"type":"error","request_id":"oversized-error","payload":{"code":"auth_failed","reason":"invalid_signature","message":"\(oversizedMessage)"}}
+        """
+        XCTAssertGreaterThan(frame.utf8.count, 2_000_000)
+
+        client.handleFrameString(frame)
+
+        XCTAssertEqual(client.connectionState, previousState)
+        XCTAssertNil(client.lastError)
+    }
+
+    func testAVAudioFileSampleDecoderDecodesGeneratedMonoWAV() throws {
+        let sampleRate = 8_000.0
+        let samples = sineWave(frequency: 440, sampleRate: sampleRate, seconds: 0.05)
+        let decoder = AVAudioFileSampleDecoder(maxDecodedDuration: 1, maxChannelCount: 1)
+
+        let decoded = try decoder.decodeSamples(from: wavData(samples: samples, sampleRate: Int(sampleRate)))
+
+        XCTAssertEqual(decoded.sampleRate, sampleRate, accuracy: 0.1)
+        XCTAssertFalse(decoded.samples.isEmpty)
+        XCTAssertGreaterThan(decoded.samples.map(abs).max() ?? 0, 0.1)
+    }
+
+    func testAVAudioFileSampleDecoderRejectsExcessiveDecodedDuration() throws {
+        let sampleRate = 8_000.0
+        let samples = sineWave(frequency: 440, sampleRate: sampleRate, seconds: 0.2)
+        let decoder = AVAudioFileSampleDecoder(maxDecodedDuration: 0.1, maxChannelCount: 1)
+
+        XCTAssertThrowsError(try decoder.decodeSamples(from: wavData(samples: samples, sampleRate: Int(sampleRate)))) { error in
+            XCTAssertEqual(error as? AudioSampleDecodingError, .tooManyDecodedFrames)
+        }
+    }
+
+    func testAVAudioFileSampleDecoderCleansStaleTemporaryFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("logos-spectrum-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staleFile = directory.appendingPathComponent("logos-spectrum-stale.wav")
+        try Data([1, 2, 3]).write(to: staleFile)
+
+        _ = AVAudioFileSampleDecoder(temporaryDirectory: directory, maxDecodedDuration: 1, maxChannelCount: 1)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleFile.path))
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     func testAudioPlaybackControllerPauseResumeStopAndSpectrumBins() throws {
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
@@ -2667,6 +3080,66 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(controller.stop(audioID: "audio-spectrum"))
         XCTAssertEqual(factory.player.stopCalls, 1)
         XCTAssertEqual(session.finishCalls, 1)
+    }
+
+    private func sineWave(frequency: Float, sampleRate: Double, seconds: Double = 1.0, amplitude: Float = 0.85) -> [Float] {
+        let sampleCount = Int(sampleRate * seconds)
+        return (0..<sampleCount).map { index in
+            amplitude * Float(sin(2 * Double.pi * Double(frequency) * Double(index) / sampleRate))
+        }
+    }
+
+    private func wavData(samples: [Float], sampleRate: Int) -> Data {
+        var data = Data()
+        let channelCount: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let byteRate = UInt32(sampleRate) * UInt32(channelCount) * UInt32(bitsPerSample / 8)
+        let blockAlign = channelCount * (bitsPerSample / 8)
+        let pcmBytes = UInt32(samples.count) * UInt32(blockAlign)
+
+        data.appendASCII("RIFF")
+        data.appendLittleEndian(UInt32(36) + pcmBytes)
+        data.appendASCII("WAVE")
+        data.appendASCII("fmt ")
+        data.appendLittleEndian(UInt32(16))
+        data.appendLittleEndian(UInt16(1))
+        data.appendLittleEndian(channelCount)
+        data.appendLittleEndian(UInt32(sampleRate))
+        data.appendLittleEndian(byteRate)
+        data.appendLittleEndian(blockAlign)
+        data.appendLittleEndian(bitsPerSample)
+        data.appendASCII("data")
+        data.appendLittleEndian(pcmBytes)
+        for sample in samples {
+            let clamped = max(-1, min(1, sample))
+            data.appendLittleEndian(Int16((clamped * Float(Int16.max)).rounded()))
+        }
+        return data
+    }
+
+    @MainActor
+    private func waitUntilSpectrumDominantIndex(
+        in client: LogosClient,
+        isAtMost maximum: Int? = nil,
+        isAtLeast minimum: Int? = nil,
+        timeout: TimeInterval = 1.0
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        var latestIndex: Int?
+        repeat {
+            if let bins = client.audioPlaybackOverlay?.spectrumBins {
+                let index = try dominantSpectrumIndex(in: bins)
+                latestIndex = index
+                if let maximum, index <= maximum { return }
+                if let minimum, index >= minimum { return }
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        } while Date() < deadline
+        XCTFail("Timed out waiting for spectrum dominant index. latest=\(latestIndex.map(String.init) ?? "<none>") max=\(maximum.map(String.init) ?? "<none>") min=\(minimum.map(String.init) ?? "<none>")")
+    }
+
+    private func dominantSpectrumIndex(in bins: [Double]) throws -> Int {
+        try XCTUnwrap(bins.indices.max(by: { bins[$0] < bins[$1] }))
     }
 
     private func base64URLPayload(_ payload: [String: Any]) throws -> String {
@@ -2689,6 +3162,27 @@ final class LogosModelTests: XCTestCase {
         }
         let data = try XCTUnwrap(string.data(using: .utf8))
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+}
+
+private extension Data {
+    mutating func appendASCII(_ string: String) {
+        append(Data(string.utf8))
+    }
+
+    mutating func appendLittleEndian(_ value: UInt16) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLittleEndian(_ value: UInt32) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLittleEndian(_ value: Int16) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
     }
 }
 
@@ -2770,6 +3264,42 @@ private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
     func makePlayer(data: Data) throws -> any AudioPlaying {
         receivedData = data
         return player
+    }
+}
+
+private final class RecordingAudioSampleDecoder: AudioSampleDecoding {
+    let decodedSamples: DecodedAudioSamples?
+    let error: Error?
+    private let lock = NSLock()
+    private var _decodeCalls = 0
+    var decodeCalls: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _decodeCalls
+    }
+
+    init(decodedSamples: DecodedAudioSamples? = nil, error: Error? = nil) {
+        self.decodedSamples = decodedSamples
+        self.error = error
+    }
+
+    func decodeSamples(from data: Data) throws -> DecodedAudioSamples {
+        lock.lock()
+        _decodeCalls += 1
+        lock.unlock()
+        if let error {
+            throw error
+        }
+        if let decodedSamples {
+            return decodedSamples
+        }
+        throw RecordingAudioSampleDecoderError()
+    }
+}
+
+private struct RecordingAudioSampleDecoderError: LocalizedError {
+    var errorDescription: String? {
+        "decode failed"
     }
 }
 
