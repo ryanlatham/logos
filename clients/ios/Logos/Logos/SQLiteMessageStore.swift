@@ -25,8 +25,9 @@ final class SQLiteMessageStore {
     }
 
     func upsert(_ message: LogosMessage) {
+        deleteExisting(sessionID: message.sessionID, messageID: message.messageID)
         let sql = """
-        INSERT OR REPLACE INTO messages (
+        INSERT INTO messages (
             project_key, session_id, message_id, server_seq, role, content, timestamp, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
@@ -72,6 +73,16 @@ final class SQLiteMessageStore {
             ))
         }
         return results
+    }
+
+    private func deleteExisting(sessionID: String, messageID: String) {
+        let sql = "DELETE FROM messages WHERE session_id = ? AND message_id = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, at: 1, statement: statement)
+        bind(messageID, at: 2, statement: statement)
+        sqlite3_step(statement)
     }
 
     private func createSchema() {

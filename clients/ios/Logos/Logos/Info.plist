@@ -40,6 +40,8 @@
   </dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Logos uses the microphone only while you press or tap the voice controls to send speech to your local Hermes adapter.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Logos connects to your local Hermes adapter on your Mac for private voice and agent sessions.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>On-device speech recognition turns your speech into Hermes requests without silently using network recognition.</string>
   <key>UIBackgroundModes</key>

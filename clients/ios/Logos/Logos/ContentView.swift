@@ -22,6 +22,8 @@ struct ContentView: View {
 
     @State private var editingAdapterURL = false
     @State private var adapterURLDraft = ""
+    @State private var editingDeviceKey = false
+    @State private var deviceKeyDraft = ""
     @State private var generatedDeviceKey: String?
     @State private var copiedDeviceKey = false
     @State private var expandedSettingsPicker: SettingsPickerKind?
@@ -33,6 +35,7 @@ struct ContentView: View {
     @State private var notifyDone = true
     @State private var notifyApproval = true
     @State private var notifySummary = false
+    @State private var pendingPairingRoute: LogosPairingRoute?
     @State private var suppressNextHoldButtonAction = false
 
     @FocusState private var focusedField: FocusedField?
@@ -95,9 +98,33 @@ struct ContentView: View {
             syncComposerWithVoiceState()
         }
         .onOpenURL { url in
+            if let route = LogosPairingRoute.from(url: url) {
+                pendingPairingRoute = route
+                return
+            }
             if let route = LogosNotificationRoute.from(url: url) {
                 notifications.route(route)
             }
+        }
+        .alert(
+            "Pair Logos?",
+            isPresented: Binding(
+                get: { pendingPairingRoute != nil },
+                set: { isPresented in
+                    if isPresented == false { pendingPairingRoute = nil }
+                }
+            ),
+            presenting: pendingPairingRoute
+        ) { route in
+            Button("Pair") {
+                pendingPairingRoute = nil
+                Task { await client.applyPairingRoute(route) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingPairingRoute = nil
+            }
+        } message: { route in
+            Text("Pair this iPhone with \(route.adapterHostDescription) as \(route.deviceID)?")
         }
     }
 
@@ -443,21 +470,30 @@ struct ContentView: View {
     }
 
     private var projectSwitcherLayer: some View {
-        ZStack(alignment: .top) {
-            Color.black.opacity(0.36)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    closeProjectSwitcher()
-                }
+        GeometryReader { proxy in
+            ZStack(alignment: .top) {
+                Color.black.opacity(0.36)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        closeProjectSwitcher()
+                    }
 
-            switcherDropdown
-                .padding(.top, 66)
-                .padding(.horizontal, 12)
+                switcherDropdown(screenHeight: proxy.size.height)
+                    .padding(.top, 66)
+                    .padding(.horizontal, 12)
+            }
         }
     }
 
-    private var switcherDropdown: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func switcherDropdown(screenHeight: CGFloat) -> some View {
+        let dropdownMaxHeight = ProjectSwitcherLayout.dropdownMaxHeight(for: screenHeight)
+        let projectListMaxHeight = ProjectSwitcherLayout.projectListMaxHeight(
+            for: screenHeight,
+            projectCount: displayedProjects.count,
+            isCreatingProject: isCreatingProject
+        )
+
+        return VStack(alignment: .leading, spacing: 12) {
             if isCreatingProject == false {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
@@ -480,21 +516,27 @@ struct ContentView: View {
                 .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
             }
 
-            VStack(spacing: 6) {
-                ForEach(displayedProjects) { project in
-                    Button {
-                        client.switchProject(project.projectKey)
-                        closeProjectSwitcher()
-                    } label: {
-                        ProjectRowView(
-                            project: project,
-                            isSelected: project.projectKey == client.activeProjectKey
-                        )
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: ProjectSwitcherLayout.projectRowSpacing) {
+                    ForEach(displayedProjects) { project in
+                        Button {
+                            client.switchProject(project.projectKey)
+                            closeProjectSwitcher()
+                        } label: {
+                            ProjectRowView(
+                                project: project,
+                                isSelected: project.projectKey == client.activeProjectKey
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(client.connectionState != .connected && project.projectKey != client.activeProjectKey)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(client.connectionState != .connected && project.projectKey != client.activeProjectKey)
                 }
+                .padding(.vertical, 1)
             }
+            .frame(maxHeight: projectListMaxHeight, alignment: .top)
+            .scrollBounceBehavior(.basedOnSize)
+            .accessibilityIdentifier("projectSwitcherList")
 
             Divider().overlay(Color.logosHairline)
 
@@ -518,6 +560,7 @@ struct ContentView: View {
             }
         }
         .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: dropdownMaxHeight, alignment: .top)
         .background(Color.logosGlass)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -821,12 +864,56 @@ struct ContentView: View {
                             .lineLimit(1)
                     }
                     Spacer()
+                    Button(editingDeviceKey ? "Cancel" : "Edit") {
+                        if editingDeviceKey {
+                            editingDeviceKey = false
+                            deviceKeyDraft = ""
+                            focusedField = nil
+                        } else {
+                            deviceKeyDraft = client.settings.secret
+                            generatedDeviceKey = nil
+                            copiedDeviceKey = false
+                            editingDeviceKey = true
+                            focusedField = .deviceKey
+                        }
+                    }
+                    .buttonStyle(NeutralChipButtonStyle())
                     Button {
                         generateDeviceKey()
                     } label: {
                         Label("Generate", systemImage: "plus")
                     }
                     .buttonStyle(AmberChipButtonStyle())
+                }
+
+                if editingDeviceKey {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Paste the same shared secret configured on the Logos adapter. It is stored in Keychain and only the suffix is shown after saving.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.logosLabel3)
+                        HStack(spacing: 8) {
+                            SecureField("Shared secret", text: $deviceKeyDraft)
+                                .accessibilityIdentifier("deviceKeyField")
+                                .focused($focusedField, equals: .deviceKey)
+                                .font(.system(size: 12.5, weight: .regular, design: .monospaced))
+                                .foregroundStyle(Color.logosLabel)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .textContentType(.password)
+                                .submitLabel(.done)
+                                .onSubmit { saveDeviceKeyDraft() }
+                                .padding(.horizontal, 10)
+                                .frame(height: 38)
+                                .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.logosAmber, lineWidth: 1))
+                            Button("Save") { saveDeviceKeyDraft() }
+                                .buttonStyle(AmberChipButtonStyle())
+                                .disabled(deviceKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.logosBG2.opacity(0.62), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosHairline, lineWidth: 0.8))
                 }
 
                 if let generatedDeviceKey {
@@ -1177,8 +1264,22 @@ struct ContentView: View {
     private func generateDeviceKey() {
         let key = (0..<32).map { _ in String(format: "%x", Int.random(in: 0..<16)) }.joined()
         client.settings.secret = key
+        deviceKeyDraft = ""
+        editingDeviceKey = false
+        focusedField = nil
         generatedDeviceKey = key
         copiedDeviceKey = false
+    }
+
+    private func saveDeviceKeyDraft() {
+        let trimmed = deviceKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        client.settings.secret = trimmed
+        deviceKeyDraft = ""
+        generatedDeviceKey = nil
+        copiedDeviceKey = false
+        editingDeviceKey = false
+        focusedField = nil
     }
 
     private func closeProjectSwitcher() {
@@ -1195,6 +1296,8 @@ struct ContentView: View {
             showSettings = false
             expandedSettingsPicker = nil
             editingAdapterURL = false
+            editingDeviceKey = false
+            deviceKeyDraft = ""
             generatedDeviceKey = nil
             copiedDeviceKey = false
         }
@@ -1418,6 +1521,7 @@ private enum FocusedField: Hashable {
     case switcherSearch
     case newProjectTitle
     case adapterURL
+    case deviceKey
     case clarifyAnswer
 }
 

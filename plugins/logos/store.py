@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
+LOGOS_STORE_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True)
 class LogosProject:
     project_key: str
@@ -103,6 +106,24 @@ class LogosDevice:
             "last_seen_at": self.last_seen_at,
             "revoked": self.revoked_at is not None,
         }
+
+
+@dataclass(frozen=True)
+class LogosPairingToken:
+    token_hash: str
+    device_id: str
+    shared_secret_hash: str
+    expires_at: float
+    created_at: float
+    consumed_at: float | None
+
+    def is_expired(self, now: float | None = None) -> bool:
+        current = time.time() if now is None else float(now)
+        return current > self.expires_at
+
+    @property
+    def is_consumed(self) -> bool:
+        return self.consumed_at is not None
 
 
 @dataclass(frozen=True)
@@ -247,6 +268,21 @@ class LogosStore:
             )
             self._conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS logos_pairing_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    shared_secret_hash TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    consumed_at REAL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logos_pairing_tokens_device ON logos_pairing_tokens(device_id, expires_at DESC)"
+            )
+            self._conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS logos_pending_interactions (
                     request_id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -262,6 +298,7 @@ class LogosStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logos_pending_project ON logos_pending_interactions(project_key, created_at DESC)"
             )
+            self._conn.execute(f"PRAGMA user_version = {LOGOS_STORE_SCHEMA_VERSION}")
 
     def upsert_device(
         self,
@@ -324,6 +361,80 @@ class LogosStore:
         with self._lock:
             rows = self._conn.execute(query).fetchall()
             return [self._row_to_device(row) for row in rows]
+
+    def upsert_pairing_token(
+        self,
+        *,
+        token_hash: str,
+        device_id: str,
+        shared_secret_hash: str,
+        expires_at: float,
+        created_at: float | None = None,
+    ) -> LogosPairingToken:
+        token_hash = str(token_hash or "").strip()
+        device_id = str(device_id or "").strip()
+        shared_secret_hash = str(shared_secret_hash or "").strip()
+        if not token_hash:
+            raise ValueError("token_hash is required")
+        if not device_id:
+            raise ValueError("device_id is required")
+        if not shared_secret_hash:
+            raise ValueError("shared_secret_hash is required")
+        created_at = time.time() if created_at is None else float(created_at)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO logos_pairing_tokens (
+                    token_hash, device_id, shared_secret_hash, expires_at, created_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(token_hash) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    shared_secret_hash = excluded.shared_secret_hash,
+                    expires_at = excluded.expires_at,
+                    created_at = excluded.created_at,
+                    consumed_at = NULL
+                """,
+                (token_hash, device_id, shared_secret_hash, float(expires_at), created_at),
+            )
+        stored = self.get_pairing_token(token_hash)
+        assert stored is not None
+        return stored
+
+    def get_pairing_token(self, token_hash: str) -> LogosPairingToken | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM logos_pairing_tokens WHERE token_hash = ?",
+                (str(token_hash),),
+            ).fetchone()
+        return self._row_to_pairing_token(row) if row else None
+
+    def mark_pairing_token_consumed(
+        self,
+        token_hash: str,
+        *,
+        consumed_at: float | None = None,
+        expires_after: float | None = None,
+    ) -> LogosPairingToken | None:
+        consumed_at = time.time() if consumed_at is None else float(consumed_at)
+        expires_after = consumed_at if expires_after is None else float(expires_after)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE logos_pairing_tokens
+                SET consumed_at = ?
+                WHERE token_hash = ?
+                  AND consumed_at IS NULL
+                  AND expires_at > ?
+                """,
+                (consumed_at, str(token_hash), expires_after),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM logos_pairing_tokens WHERE token_hash = ?",
+                (str(token_hash),),
+            ).fetchone()
+        return self._row_to_pairing_token(row) if row else None
 
     def upsert_pending_interaction(
         self,
@@ -640,6 +751,59 @@ class LogosStore:
         with self._lock:
             return self._get_message_locked(str(session_id), str(message_id))
 
+    def get_message_by_project(self, project_key: str, message_id: str) -> LogosMessage | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM logos_messages
+                WHERE project_key = ? AND message_id = ?
+                ORDER BY server_seq DESC
+                LIMIT 1
+                """,
+                (str(project_key or "default"), str(message_id)),
+            ).fetchone()
+        return self._row_to_message(row) if row else None
+
+    def update_message(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        timestamp: float | None = None,
+    ) -> LogosMessage | None:
+        timestamp = float(timestamp if timestamp is not None else time.time())
+        with self._lock:
+            existing = self._get_message_locked(str(session_id), str(message_id))
+            if existing is None:
+                return None
+            final_metadata = existing.metadata
+            if metadata:
+                final_metadata = {**final_metadata, **dict(metadata)}
+            server_seq = self.next_server_seq()
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE logos_messages
+                    SET server_seq = ?, content = ?, timestamp = ?, metadata_json = ?
+                    WHERE session_id = ? AND message_id = ?
+                    """,
+                    (
+                        server_seq,
+                        str(content or ""),
+                        timestamp,
+                        json.dumps(final_metadata, ensure_ascii=False, sort_keys=True),
+                        str(session_id),
+                        str(message_id),
+                    ),
+                )
+                self._conn.execute(
+                    "DELETE FROM logos_summaries WHERE session_id = ? AND message_id = ?",
+                    (str(session_id), str(message_id)),
+                )
+            return self._get_message_locked(str(session_id), str(message_id))
+
     def upsert_summary(
         self,
         *,
@@ -741,6 +905,17 @@ class LogosStore:
             capabilities=[str(item) for item in capabilities],
             last_seen_at=(float(row["last_seen_at"]) if row["last_seen_at"] is not None else None),
             revoked_at=(float(row["revoked_at"]) if row["revoked_at"] is not None else None),
+        )
+
+    @staticmethod
+    def _row_to_pairing_token(row: sqlite3.Row) -> LogosPairingToken:
+        return LogosPairingToken(
+            token_hash=row["token_hash"],
+            device_id=row["device_id"],
+            shared_secret_hash=row["shared_secret_hash"],
+            expires_at=float(row["expires_at"]),
+            created_at=float(row["created_at"]),
+            consumed_at=(float(row["consumed_at"]) if row["consumed_at"] is not None else None),
         )
 
     @staticmethod

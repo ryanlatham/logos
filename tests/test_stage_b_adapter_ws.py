@@ -100,6 +100,44 @@ async def test_send_broadcasts_gateway_response_as_state_update(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_edit_message_updates_existing_logos_message_for_tool_progress(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+
+    sent = await adapter.send("project:archwright", "🔧 terminal...", metadata={"session_id": "sess-1"})
+    original = adapter.store.get_message("sess-1", sent.message_id)
+    assert original is not None
+    original_summary = adapter.store.get_summary(original.session_id, original.message_id)
+    assert original_summary is not None
+    edited = await adapter.edit_message("project:archwright", sent.message_id, "🔧 terminal...\n✅ terminal done", finalize=True)
+
+    assert edited.success is True
+    assert edited.message_id == sent.message_id
+    stored = adapter.store.get_message("sess-1", sent.message_id)
+    assert stored is not None
+    assert stored.content == "🔧 terminal...\n✅ terminal done"
+    assert stored.server_seq > original.server_seq
+    update_frames = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "state_update" and item["frame"]["payload"].get("op") == "message_updated"]
+    assert update_frames
+    update = update_frames[-1]
+    assert update["server_seq"] == stored.server_seq
+    assert update["payload"]["message"]["message_id"] == sent.message_id
+    assert update["payload"]["message"]["server_seq"] == stored.server_seq
+    replay = adapter._handle_messages_get(
+        Envelope(type="messages_get", request_id="get-after-edit", device_id="iphone", project_key="archwright", payload={"after_server_seq": original.server_seq})
+    )
+    assert [message["content"] for message in replay["payload"]["messages"]] == ["🔧 terminal...\n✅ terminal done"]
+    project = adapter.store.get_project("archwright")
+    assert project is not None
+    assert project.last_seen_server_seq == stored.server_seq
+    assert project.last_preview == "🔧 terminal...\n✅ terminal done"
+    summary = adapter.store.get_summary(stored.session_id, stored.message_id)
+    assert summary is not None
+    assert summary.source_hash != original_summary.source_hash
+
+
+@pytest.mark.asyncio
 async def test_websocket_auth_and_text_round_trip_to_fake_gateway_handler(tmp_path):
     adapter = LogosAdapter(
         PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
