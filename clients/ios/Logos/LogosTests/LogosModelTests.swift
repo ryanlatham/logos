@@ -668,6 +668,31 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(ComposerModePolicy.modeAfterVoiceFinished(current: .recording), .paused)
     }
 
+    func testComposerStopKeepsVoiceModePausedForImmediateRerecord() throws {
+        XCTAssertEqual(ComposerModePolicy.modeAfterRecordPillStopped(current: .recording), .paused)
+    }
+
+    func testComposerRightPillIsOnlyModeSwitchBetweenKeyboardAndVoice() throws {
+        XCTAssertEqual(ComposerModePolicy.modeAfterRightPillTapped(current: .text), .paused)
+        XCTAssertEqual(ComposerModePolicy.modeAfterRightPillTapped(current: .paused), .text)
+        XCTAssertEqual(ComposerModePolicy.modeAfterRightPillTapped(current: .recording), .text)
+    }
+
+    func testComposerPausedRecordPillWaitsForVoiceFinalizationBeforeRestarting() throws {
+        XCTAssertFalse(ComposerModePolicy.canStartRecordingFromPausedPill(
+            voiceControlsDisabled: false,
+            isFinalizingTranscript: true
+        ))
+        XCTAssertFalse(ComposerModePolicy.canStartRecordingFromPausedPill(
+            voiceControlsDisabled: true,
+            isFinalizingTranscript: false
+        ))
+        XCTAssertTrue(ComposerModePolicy.canStartRecordingFromPausedPill(
+            voiceControlsDisabled: false,
+            isFinalizingTranscript: false
+        ))
+    }
+
     func testFinalizingSpeechErrorWithoutInterimTranscriptKeepsWaitingForBufferedFinal() throws {
         XCTAssertEqual(
             VoiceFinalizationPolicy.actionForRecognitionError(isFinalizing: true, hasBufferedTranscript: false),
