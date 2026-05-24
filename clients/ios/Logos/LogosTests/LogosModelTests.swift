@@ -1084,8 +1084,12 @@ final class LogosModelTests: XCTestCase {
         let progressRange = try XCTUnwrap(contentViewSource.range(of: "ProgressActivityCard("))
 
         XCTAssertGreaterThan(progressRange.lowerBound, messagesRange.lowerBound)
-        XCTAssertTrue(contentViewSource.contains(".onChange(of: client.progressActivity?.events.count) { _, _ in scrollToBottom(proxy) }"))
-        XCTAssertTrue(contentViewSource.contains("proxy.scrollTo(\"progress-activity\", anchor: .bottom)"))
+        XCTAssertTrue(contentViewSource.contains(".onChange(of: client.progressActivity?.events.count) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertTrue(contentViewSource.contains(".onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertTrue(contentViewSource.contains("threadScrollPosition.scrollTo(id: \"thread-bottom\", anchor: .bottom)"))
+        XCTAssertTrue(contentViewSource.contains(".defaultScrollAnchor(.bottom, for: .alignment)"))
+        XCTAssertTrue(contentViewSource.contains("handleThreadBottomProximityChangedAfterLayout(newValue)"))
+        XCTAssertFalse(contentViewSource.contains("action: { _, newValue in\n                handleThreadBottomProximityChanged(newValue)"))
     }
 
     func testConnectionLifecycleRejectsStaleCallbacksAfterDisconnectOrReconnect() throws {

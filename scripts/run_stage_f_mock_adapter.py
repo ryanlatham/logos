@@ -195,10 +195,89 @@ class StageFMockLogosAdapter(LogosAdapter):
                 session_key="stage-f-session",
             )
             return
+        if content == "/mock_delayed_thread_updates":
+            request_id = "stage-f-delayed-thread-updates"
+            await asyncio.sleep(0.8)
+            await self._broadcast_progress_text(
+                chat_id=chat_id,
+                content="Delayed progress update: preparing thread auto-follow fixture.",
+                metadata={"request_id": request_id, "session_id": "stage-f-delayed-session"},
+                request_id=request_id,
+                kind="tool_progress",
+            )
+            await asyncio.sleep(0.4)
+            await self.send(
+                chat_id=chat_id,
+                content="Delayed final update: thread auto-follow fixture complete.",
+                metadata={
+                    "request_id": request_id,
+                    "source": "stage_f_mock",
+                    "session_id": "stage-f-delayed-session",
+                },
+            )
+            return
+        if content == "/mock_slow_thread_updates":
+            asyncio.create_task(self._send_slow_thread_updates(chat_id))
+            return
+        if content == "/mock_tall_thread_update":
+            request_id = "stage-f-tall-thread-update"
+            await asyncio.sleep(0.8)
+            await self.send(
+                chat_id=chat_id,
+                content=(
+                    "Tall delayed final update: auto-follow should survive a large response.\n\n"
+                    "This fixture intentionally spans multiple lines so the incoming assistant bubble "
+                    "moves the scroll geometry away from the previous bottom before the scheduled follow runs.\n\n"
+                    "Line 1: the user stayed at the bottom.\n"
+                    "Line 2: no manual detach happened.\n"
+                    "Line 3: the follow task should use its captured eligibility.\n"
+                    "Line 4: a transient bottom-distance change should not show New updates.\n"
+                    "Line 5: the final line should still be reachable without manual scrolling."
+                ),
+                metadata={
+                    "request_id": request_id,
+                    "source": "stage_f_mock",
+                    "session_id": "stage-f-tall-thread-session",
+                },
+            )
+            return
+        if content == "/mock_run_control_shrink":
+            request_id = "stage-f-run-control-shrink"
+            await self._broadcast_progress_text(
+                chat_id=chat_id,
+                content="Run control shrink progress is visible before final response.",
+                metadata={"request_id": request_id, "session_id": "stage-f-run-control-shrink-session"},
+                request_id=request_id,
+                kind="tool_progress",
+            )
+            await asyncio.sleep(4.0)
+            await self.send(
+                chat_id=chat_id,
+                content="Run control shrink final update complete.",
+                metadata={
+                    "request_id": request_id,
+                    "source": "stage_f_mock",
+                    "session_id": "stage-f-run-control-shrink-session",
+                },
+            )
+            return
         await self.send(
             chat_id=chat_id,
             content=f"Mock Hermes received: {content}",
             metadata={"source": "stage_f_mock"},
+        )
+
+    async def _send_slow_thread_updates(self, chat_id: str) -> None:
+        request_id = "stage-f-slow-thread-updates"
+        await asyncio.sleep(14.0)
+        await self.send(
+            chat_id=chat_id,
+            content="Slow delayed final update: detached reading fixture complete.",
+            metadata={
+                "request_id": request_id,
+                "source": "stage_f_mock",
+                "session_id": "stage-f-slow-thread-session",
+            },
         )
 
 

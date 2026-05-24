@@ -1,6 +1,28 @@
 import SwiftUI
 import UIKit
 
+@MainActor
+private final class ThreadScrollProximityScheduler {
+    private var pendingTask: Task<Void, Never>?
+    private var epoch = 0
+
+    func schedule(_ isNearBottom: Bool, apply: @MainActor @escaping (Bool) -> Void) {
+        pendingTask?.cancel()
+        let scheduledEpoch = epoch
+        pendingTask = Task { @MainActor in
+            await Task.yield()
+            guard Task.isCancelled == false, scheduledEpoch == epoch else { return }
+            apply(isNearBottom)
+        }
+    }
+
+    func cancel() {
+        epoch += 1
+        pendingTask?.cancel()
+        pendingTask = nil
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var client: LogosClient
@@ -37,6 +59,20 @@ struct ContentView: View {
     @State private var notifySummary = false
     @State private var pendingPairingRoute: LogosPairingRoute?
     @State private var suppressNextHoldButtonAction = false
+    @State private var threadScrollPosition = ScrollPosition(edge: .bottom)
+    @State private var shouldFollowThread = true
+    @State private var isThreadNearBottom = true
+    @State private var hasUnseenThreadUpdates = false
+    @State private var threadScrollPhase: ScrollPhase = .idle
+    @State private var isThreadUserDetached = false
+    @State private var userInitiatedThreadScrollObserved = false
+    @State private var detachedThreadContentFingerprint: String?
+    @State private var lastFollowedThreadContentFingerprint = ""
+    @State private var lastForceFollowedThreadContentFingerprint: String?
+    @State private var hasInitializedThreadScroll = false
+    @State private var threadScrollProximityScheduler = ThreadScrollProximityScheduler()
+    @State private var threadFollowTask: Task<Void, Never>?
+    @State private var threadFollowEpoch = 0
 
     @FocusState private var focusedField: FocusedField?
 
@@ -226,7 +262,7 @@ struct ContentView: View {
     }
 
     private var thread: some View {
-        ScrollViewReader { proxy in
+        ZStack(alignment: .bottom) {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     timePill
@@ -273,28 +309,132 @@ struct ContentView: View {
                         ErrorStrip(text: error)
                             .id("error")
                     }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("thread-bottom")
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
                 .padding(.bottom, composerMode == .text ? 16 : 28)
                 .animation(.timingCurve(0.2, 0.7, 0.2, 1, duration: 0.26), value: composerMode)
             }
+            .scrollPosition($threadScrollPosition)
+            .defaultScrollAnchor(.bottom, for: .alignment)
             .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("conversationThreadScrollView")
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 4)
+                    .onChanged { _ in
+                        userInitiatedThreadScrollObserved = true
+                        if isThreadNearBottom == false {
+                            detachThreadFromAutoFollow()
+                        }
+                    }
+            )
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentSize.height - geometry.visibleRect.maxY <= 96
+            } action: { _, newValue in
+                handleThreadBottomProximityChangedAfterLayout(newValue)
+            }
+            .onScrollPhaseChange { _, newPhase in
+                threadScrollPhase = newPhase
+                handleThreadScrollPhaseChanged(newPhase)
+            }
+            .onChange(of: threadScrollPosition) { _, newValue in
+                handleThreadScrollPositionChanged(newValue)
+            }
             .onAppear {
-                scrollToBottomAfterLayout(proxy, animated: false)
+                initializeThreadScrollIfNeeded()
+            }
+            .onDisappear {
+                threadScrollProximityScheduler.cancel()
+                cancelPendingThreadFollow()
             }
             .onChange(of: client.activeProjectKey) { _, _ in
-                scrollToBottomAfterLayout(proxy, animated: false)
+                resetThreadScrollForProjectChange()
             }
-            .onChange(of: client.messages.count) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.progressActivity?.events.count) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: voiceInput.partialTranscript) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.approvalCard?.id) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.clarifyCard?.id) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.playbackStatus) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.ackText) { _, _ in scrollToBottom(proxy) }
-            .onChange(of: client.lastError) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: client.messages) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.progressActivity?.id) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.progressActivity?.events.count) { _, _ in handleThreadContentChanged() }
+            .onChange(of: voiceInput.partialTranscript) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.approvalCard?.id) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.clarifyCard?.id) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.ackText) { _, _ in handleThreadContentChanged() }
+            .onChange(of: client.lastError) { _, _ in handleThreadContentChanged() }
+
+            if shouldShowThreadNewUpdatesButton {
+                threadNewUpdatesButton
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+    }
+
+    private var shouldShowThreadNewUpdatesButton: Bool {
+        guard isThreadNearBottom == false else { return false }
+        guard isThreadUserDetached || shouldFollowThread == false || isThreadNearBottom == false || threadScrollPosition.isPositionedByUser else {
+            return false
+        }
+        if hasUnseenThreadUpdates { return true }
+        if let detachedThreadContentFingerprint {
+            return detachedThreadContentFingerprint != threadContentFingerprint
+        }
+        if lastFollowedThreadContentFingerprint.isEmpty == false {
+            return lastFollowedThreadContentFingerprint != threadContentFingerprint
+        }
+        if let lastForceFollowedThreadContentFingerprint {
+            return lastForceFollowedThreadContentFingerprint != threadMessageFingerprint
+        }
+        return false
+    }
+
+    private var threadMessageFingerprint: String {
+        let lastMessage = client.messages.last
+        return [
+            client.activeProjectKey,
+            "\(client.messages.count)",
+            lastMessage?.id ?? "no-message"
+        ].joined(separator: "|")
+    }
+
+    private var threadContentFingerprint: String {
+        let lastMessage = client.messages.last
+        let progress = client.progressActivity
+        return [
+            client.activeProjectKey,
+            "\(client.messages.count)",
+            lastMessage?.id ?? "no-message",
+            lastMessage?.status ?? "no-status",
+            "\(lastMessage?.isFinal ?? true)",
+            progress?.id ?? "no-progress",
+            "\(progress?.events.count ?? 0)",
+            "\(shouldShowRunControl)",
+            client.runStatus.rawValue,
+            client.approvalCard?.id ?? "no-approval",
+            client.clarifyCard?.id ?? "no-clarify",
+            client.ackText ?? "no-ack",
+            client.lastError ?? "no-error",
+            voiceInput.partialTranscript
+        ].joined(separator: "|")
+    }
+
+    private var threadNewUpdatesButton: some View {
+        Button {
+            scrollThreadToBottom(animated: true)
+        } label: {
+            Label("New updates", systemImage: "arrow.down.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.logosAmberOn)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+                .background(Color.logosAmber, in: Capsule())
+                .shadow(color: Color.black.opacity(0.28), radius: 12, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("threadNewUpdatesButton")
     }
 
     private var timePill: some View {
@@ -313,8 +453,14 @@ struct ContentView: View {
                 approval: approval,
                 isPending: client.pendingInteractionResponseID == approval.id,
                 isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
-                onApprove: { client.approveCurrentRequest() },
-                onDeny: { client.denyCurrentRequest() }
+                onApprove: {
+                    client.approveCurrentRequest()
+                    handleThreadContentChanged(forceFollow: true)
+                },
+                onDeny: {
+                    client.denyCurrentRequest()
+                    handleThreadContentChanged(forceFollow: true)
+                }
             )
             .id(approval.id)
         }
@@ -326,7 +472,11 @@ struct ContentView: View {
                 isPending: client.pendingInteractionResponseID == clarify.id,
                 isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
                 focused: $focusedField,
-                onChoice: { client.answerClarification($0) },
+                onChoice: {
+                    if client.answerClarification($0) {
+                        handleThreadContentChanged(forceFollow: true)
+                    }
+                },
                 onFreeText: submitClarificationAnswer
             )
             .id(clarify.id)
@@ -1122,6 +1272,8 @@ struct ContentView: View {
             withAnimation(.easeOut(duration: 0.18)) {
                 composerMode = .text
             }
+        } else {
+            handleThreadContentChanged(forceFollow: true)
         }
         return sent
     }
@@ -1151,24 +1303,127 @@ struct ContentView: View {
         client.clearUndeliveredSpeechDraft(id: failedDraft.id)
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+    private func handleThreadContentChanged(forceFollow: Bool = false) {
+        if forceFollow {
+            let followedFingerprint = threadContentFingerprint
+            lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
+            scrollThreadToBottomAfterLayout(
+                animated: true,
+                recordFollowedSnapshot: true,
+                followedFingerprint: followedFingerprint,
+                force: true
+            )
+        } else if shouldFollowThread && isThreadUserDetached == false {
+            let followedFingerprint = threadContentFingerprint
+            scrollThreadToBottomAfterLayout(
+                animated: true,
+                recordFollowedSnapshot: true,
+                followedFingerprint: followedFingerprint
+            )
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                hasUnseenThreadUpdates = true
+            }
+        }
+    }
+
+    private func detachThreadFromAutoFollow() {
+        if isThreadNearBottom == false || userInitiatedThreadScrollObserved {
+            cancelPendingThreadFollow()
+            shouldFollowThread = false
+            isThreadUserDetached = true
+            recordDetachedThreadContentIfNeeded()
+        }
+    }
+
+    private func recordDetachedThreadContentIfNeeded() {
+        if detachedThreadContentFingerprint == nil {
+            detachedThreadContentFingerprint = threadContentFingerprint
+        }
+    }
+
+    private func handleThreadBottomProximityChangedAfterLayout(_ isNearBottom: Bool) {
+        threadScrollProximityScheduler.schedule(isNearBottom) { coalescedValue in
+            handleThreadBottomProximityChanged(coalescedValue)
+        }
+    }
+
+    private func handleThreadBottomProximityChanged(_ isNearBottom: Bool) {
+        if isThreadNearBottom == isNearBottom {
+            if isNearBottom {
+                markThreadContentSeenAtBottom(resetUserScrollObservation: isUserDrivenThreadScrollPhase(threadScrollPhase) == false)
+            }
+            return
+        }
+        isThreadNearBottom = isNearBottom
+        if isNearBottom {
+            markThreadContentSeenAtBottom(resetUserScrollObservation: isUserDrivenThreadScrollPhase(threadScrollPhase) == false)
+        } else {
+            recordDetachedThreadContentIfNeeded()
+            if isUserDrivenThreadScrollPhase(threadScrollPhase) || userInitiatedThreadScrollObserved {
+                detachThreadFromAutoFollow()
+            }
+        }
+    }
+
+    private func handleThreadScrollPhaseChanged(_ phase: ScrollPhase) {
+        if isUserDrivenThreadScrollPhase(phase) {
+            userInitiatedThreadScrollObserved = true
+            if isThreadNearBottom == false {
+                detachThreadFromAutoFollow()
+            }
+            return
+        }
+
+        if phase == .idle, isThreadNearBottom {
+            markThreadContentSeenAtBottom(resetUserScrollObservation: true)
+        } else if phase == .idle, userInitiatedThreadScrollObserved {
+            detachThreadFromAutoFollow()
+        }
+    }
+
+    private func handleThreadScrollPositionChanged(_ position: ScrollPosition) {
+        guard position.isPositionedByUser else { return }
+        userInitiatedThreadScrollObserved = true
+        if isThreadNearBottom == false {
+            detachThreadFromAutoFollow()
+        }
+    }
+
+    private func markThreadContentSeenAtBottom(resetUserScrollObservation: Bool) {
+        shouldFollowThread = true
+        hasUnseenThreadUpdates = false
+        isThreadUserDetached = false
+        detachedThreadContentFingerprint = nil
+        lastFollowedThreadContentFingerprint = threadContentFingerprint
+        if resetUserScrollObservation {
+            userInitiatedThreadScrollObserved = false
+        }
+    }
+
+    private func isUserDrivenThreadScrollPhase(_ phase: ScrollPhase) -> Bool {
+        switch phase {
+        case .tracking, .interacting, .decelerating:
+            return true
+        case .idle, .animating:
+            return false
+        }
+    }
+
+    private func scrollThreadToBottom(
+        animated: Bool,
+        recordFollowedSnapshot: Bool = true,
+        followedFingerprint: String? = nil
+    ) {
         let action = {
-            if client.playbackStatus != nil {
-                proxy.scrollTo("playback", anchor: .bottom)
-            } else if client.ackText != nil {
-                proxy.scrollTo("ack", anchor: .bottom)
-            } else if let error = client.lastError, error.isEmpty == false {
-                proxy.scrollTo("error", anchor: .bottom)
-            } else if voiceInput.isRecording || voiceInput.isFinalizingTranscript {
-                proxy.scrollTo("voice-draft", anchor: .bottom)
-            } else if let approvalID = client.approvalCard?.id {
-                proxy.scrollTo(approvalID, anchor: .bottom)
-            } else if let clarifyID = client.clarifyCard?.id {
-                proxy.scrollTo(clarifyID, anchor: .bottom)
-            } else if client.progressActivity != nil {
-                proxy.scrollTo("progress-activity", anchor: .bottom)
-            } else if let last = client.messages.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
+            threadScrollPosition.scrollTo(id: "thread-bottom", anchor: .bottom)
+            shouldFollowThread = true
+            hasUnseenThreadUpdates = false
+            isThreadUserDetached = false
+            userInitiatedThreadScrollObserved = false
+            detachedThreadContentFingerprint = nil
+            if recordFollowedSnapshot {
+                lastFollowedThreadContentFingerprint = followedFingerprint ?? threadContentFingerprint
             }
         }
         if animated {
@@ -1178,11 +1433,85 @@ struct ContentView: View {
         }
     }
 
-    private func scrollToBottomAfterLayout(_ proxy: ScrollViewProxy, animated: Bool) {
-        Task { @MainActor in
+    private func scrollThreadToBottomAfterLayout(
+        animated: Bool,
+        recordFollowedSnapshot: Bool = true,
+        followedFingerprint: String? = nil,
+        force: Bool = false
+    ) {
+        cancelPendingThreadFollow()
+        threadFollowEpoch += 1
+        let scheduledEpoch = threadFollowEpoch
+        let scheduledProjectKey = client.activeProjectKey
+        let scheduledCanFollow = force || (shouldFollowThread && isThreadUserDetached == false)
+        threadFollowTask = Task { @MainActor in
+            defer {
+                if scheduledEpoch == threadFollowEpoch {
+                    threadFollowTask = nil
+                }
+            }
             await Task.yield()
-            scrollToBottom(proxy, animated: animated)
+            guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
+            scrollThreadToBottom(
+                animated: animated,
+                recordFollowedSnapshot: recordFollowedSnapshot,
+                followedFingerprint: followedFingerprint
+            )
+            if recordFollowedSnapshot == false {
+                await Task.yield()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
+                confirmPassiveThreadFollowIfStillAtBottom()
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
+                refreshForceFollowedThreadSnapshotIfStillAtBottom()
+            }
         }
+    }
+
+    private func shouldApplyScheduledThreadFollow(epoch: Int, projectKey: String?, force: Bool, scheduledCanFollow: Bool) -> Bool {
+        guard Task.isCancelled == false, epoch == threadFollowEpoch, client.activeProjectKey == projectKey else { return false }
+        if force { return true }
+        return scheduledCanFollow && shouldFollowThread && isThreadUserDetached == false
+    }
+
+    private func cancelPendingThreadFollow() {
+        threadFollowEpoch += 1
+        threadFollowTask?.cancel()
+        threadFollowTask = nil
+    }
+
+    private func confirmPassiveThreadFollowIfStillAtBottom() {
+        guard isThreadNearBottom, isThreadUserDetached == false, threadScrollPosition.isPositionedByUser == false else { return }
+        shouldFollowThread = true
+        hasUnseenThreadUpdates = false
+        detachedThreadContentFingerprint = nil
+        lastFollowedThreadContentFingerprint = threadContentFingerprint
+    }
+
+    private func refreshForceFollowedThreadSnapshotIfStillAtBottom() {
+        guard isThreadNearBottom, isThreadUserDetached == false, threadScrollPosition.isPositionedByUser == false else { return }
+        lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
+    }
+
+    private func initializeThreadScrollIfNeeded() {
+        guard hasInitializedThreadScroll == false else { return }
+        hasInitializedThreadScroll = true
+        scrollThreadToBottomAfterLayout(animated: false)
+    }
+
+    private func resetThreadScrollForProjectChange() {
+        threadScrollProximityScheduler.cancel()
+        cancelPendingThreadFollow()
+        threadScrollPhase = .idle
+        shouldFollowThread = true
+        hasUnseenThreadUpdates = false
+        isThreadUserDetached = false
+        userInitiatedThreadScrollObserved = false
+        detachedThreadContentFingerprint = nil
+        lastFollowedThreadContentFingerprint = threadContentFingerprint
+        lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
+        scrollThreadToBottomAfterLayout(animated: false, force: true)
     }
 
     private func startHoldIfNeeded() {
@@ -1251,6 +1580,7 @@ struct ContentView: View {
         if client.sendText(draft) {
             draft = ""
             focusedField = nil
+            handleThreadContentChanged(forceFollow: true)
         }
     }
 
@@ -1258,6 +1588,7 @@ struct ContentView: View {
         if client.answerClarification(clarifyAnswer) {
             clarifyAnswer = ""
             focusedField = nil
+            handleThreadContentChanged(forceFollow: true)
         }
     }
 
