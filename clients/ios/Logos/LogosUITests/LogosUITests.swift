@@ -82,6 +82,209 @@ final class LogosUITests: XCTestCase {
         XCTAssertFalse(app.textFields["composerTextField"].exists)
     }
 
+    func testThreadAutoFollowsDelayedUpdatesWhenNearBottom() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_delayed_thread_updates", in: app)
+
+        let finalUpdate = app.staticTexts["Delayed final update: thread auto-follow fixture complete."].firstMatch
+        XCTAssertTrue(finalUpdate.waitForExistence(timeout: 12))
+        XCTAssertTrue(waitForVisible(finalUpdate, in: app, timeout: 8), "Latest delayed update should be visible when the thread is near the bottom")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testThreadStillAutoFollowsAfterSmallBottomDrag() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_delayed_thread_updates", in: app)
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        nudgeThreadNearBottom(thread)
+
+        let finalUpdate = app.staticTexts["Delayed final update: thread auto-follow fixture complete."].firstMatch
+        XCTAssertTrue(finalUpdate.waitForExistence(timeout: 12))
+        XCTAssertTrue(waitForVisible(finalUpdate, in: app, timeout: 8), "A small drag at the bottom should not detach auto-follow")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testThreadAutoFollowsTallUpdateWhenNearBottom() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_tall_thread_update", in: app)
+
+        let finalUpdate = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tall delayed final update")).firstMatch
+        XCTAssertTrue(finalUpdate.waitForExistence(timeout: 12))
+        XCTAssertTrue(waitForVisible(finalUpdate, in: app, timeout: 8), "A tall incoming bubble should still auto-follow when the user was at the bottom")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testShortThreadBottomAlignsLatestMessageNearComposer() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+
+        send("short bottom alignment target", in: app)
+
+        let responseMessage = app.staticTexts["Mock Hermes received: short bottom alignment target"].firstMatch
+        XCTAssertTrue(responseMessage.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForVisible(responseMessage, in: app, timeout: 8))
+
+        assertElementSitsNearComposer(responseMessage, in: app, message: "A short thread should keep the latest message visually anchored near the composer")
+    }
+
+    func testThreadReanchorsAfterRunControlDisappears() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_run_control_shrink", in: app)
+
+        let runningStatus = app.staticTexts["Running"].firstMatch
+        XCTAssertTrue(runningStatus.waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForVisible(runningStatus, in: app, timeout: 8))
+
+        let responseMessage = app.staticTexts["Run control shrink final update complete."].firstMatch
+        XCTAssertTrue(responseMessage.waitForExistence(timeout: 12))
+        XCTAssertTrue(waitForVisible(responseMessage, in: app, timeout: 8))
+        XCTAssertFalse(runningStatus.exists)
+        assertElementSitsNearComposer(responseMessage, in: app, message: "The thread should stay pinned after the running strip is replaced by the final response")
+    }
+
+    func testThreadDoesNotShowNewUpdatesPillJustForScrollingUp() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        scrollThreadToOlderContent(thread)
+
+        let oldMessage = app.staticTexts["history marker 1"].firstMatch
+        XCTAssertTrue(waitForVisible(oldMessage, in: app, timeout: 8), "The test should begin from a detached reading position")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testThreadPreservesScrolledUpReadingPositionForDelayedUpdates() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_slow_thread_updates", in: app)
+        waitForUIToSettle()
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        scrollThreadToOlderContent(thread)
+
+        let oldMessage = app.staticTexts["history marker 1"].firstMatch
+        XCTAssertTrue(waitForVisible(oldMessage, in: app, timeout: 8), "Older content should remain readable after intentionally scrolling up")
+
+        let finalUpdate = app.staticTexts["Slow delayed final update: detached reading fixture complete."].firstMatch
+        XCTAssertTrue(finalUpdate.waitForExistence(timeout: 12))
+        XCTAssertFalse(isVisible(finalUpdate, in: app), "Passive delayed updates should not force the thread away from older content")
+
+        let newUpdatesButton = app.buttons["threadNewUpdatesButton"].firstMatch
+        XCTAssertTrue(newUpdatesButton.waitForExistence(timeout: 8))
+        newUpdatesButton.tap()
+
+        XCTAssertTrue(waitForVisible(finalUpdate, in: app, timeout: 8))
+    }
+
+    func testThreadClearsNewUpdatesWhenManuallyScrolledBackToBottom() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        send("/mock_slow_thread_updates", in: app)
+        waitForUIToSettle()
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        scrollThreadToOlderContent(thread)
+
+        let oldMessage = app.staticTexts["history marker 1"].firstMatch
+        XCTAssertTrue(waitForVisible(oldMessage, in: app, timeout: 8), "The test should begin from a detached reading position")
+
+        let finalUpdate = app.staticTexts["Slow delayed final update: detached reading fixture complete."].firstMatch
+        XCTAssertTrue(finalUpdate.waitForExistence(timeout: 12))
+        XCTAssertFalse(isVisible(finalUpdate, in: app), "The delayed update should remain offscreen while reading older content")
+
+        let newUpdatesButton = app.buttons["threadNewUpdatesButton"].firstMatch
+        XCTAssertTrue(newUpdatesButton.waitForExistence(timeout: 8))
+
+        thread.swipeUp()
+        thread.swipeUp()
+
+        XCTAssertTrue(waitForVisible(finalUpdate, in: app, timeout: 8), "Manual scrolling to the bottom should reveal the latest update")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testTypedMessageForceFollowsWhenThreadIsScrolledUp() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        scrollThreadToOlderContent(thread)
+
+        let oldMessage = app.staticTexts["history marker 1"].firstMatch
+        XCTAssertTrue(waitForVisible(oldMessage, in: app, timeout: 8), "The test should begin from a detached reading position")
+
+        send("typed force follow target", in: app)
+
+        let sentMessage = app.staticTexts["typed force follow target"].firstMatch
+        XCTAssertTrue(sentMessage.waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForVisible(sentMessage, in: app, timeout: 8), "Sending typed text should force-scroll to the new outgoing bubble")
+
+        let responseMessage = app.staticTexts["Mock Hermes received: typed force follow target"].firstMatch
+        XCTAssertTrue(responseMessage.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForVisible(responseMessage, in: app, timeout: 8), "The response to a typed send should also remain visible after force-following")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testSendButtonMessageForceFollowsWhenThreadIsScrolledUp() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+        fillOverflowingThread(in: app)
+
+        let thread = app.scrollViews["conversationThreadScrollView"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 8))
+        scrollThreadToOlderContent(thread)
+
+        let oldMessage = app.staticTexts["history marker 1"].firstMatch
+        XCTAssertTrue(waitForVisible(oldMessage, in: app, timeout: 8), "The test should begin from a detached reading position")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+
+        openTextComposer(in: app)
+        let composer = app.textFields["composerTextField"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        composer.tap()
+        composer.typeText("keyboard force follow target")
+        submitComposer(in: app)
+
+        let sentMessage = app.staticTexts["keyboard force follow target"].firstMatch
+        XCTAssertTrue(sentMessage.waitForExistence(timeout: 8))
+        XCTAssertTrue(waitForVisible(sentMessage, in: app, timeout: 8), "Keyboard-submitted text should force-scroll to the new outgoing bubble")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
     private func launchConfiguredApp() -> XCUIApplication {
         let app = XCUIApplication()
         let environment = ProcessInfo.processInfo.environment
@@ -166,5 +369,73 @@ final class LogosUITests: XCTestCase {
         } else {
             send.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         }
+    }
+
+    private func createUniqueProject(in app: XCUIApplication) {
+        let title = "ui-test-\(UUID().uuidString.prefix(8))"
+        let projectPicker = app.buttons["projectPicker"]
+        XCTAssertTrue(projectPicker.waitForExistence(timeout: 8))
+        projectPicker.tap()
+
+        let newProject = app.buttons["New project"]
+        XCTAssertTrue(newProject.waitForExistence(timeout: 8))
+        newProject.tap()
+
+        let titleField = app.textFields["newProjectTitleField"]
+        XCTAssertTrue(titleField.waitForExistence(timeout: 8))
+        titleField.tap()
+        titleField.typeText(title)
+
+        let create = app.buttons["createProjectButton"]
+        XCTAssertTrue(create.waitForExistence(timeout: 8))
+        create.tap()
+        XCTAssertTrue(titleField.waitForNonExistence(timeout: 8))
+    }
+
+    private func fillOverflowingThread(in app: XCUIApplication) {
+        for index in 1...6 {
+            send("history marker \(index)", in: app)
+            XCTAssertTrue(app.staticTexts["Mock Hermes received: history marker \(index)"].waitForExistence(timeout: 10))
+        }
+    }
+
+    private func nudgeThreadNearBottom(_ thread: XCUIElement) {
+        let start = thread.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+        let end = thread.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
+    private func scrollThreadToOlderContent(_ thread: XCUIElement) {
+        let start = thread.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+        let end = thread.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.88))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
+    private func waitForUIToSettle() {
+        RunLoop.current.run(until: Date().addingTimeInterval(6.0))
+    }
+
+    private func waitForVisible(_ element: XCUIElement, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isVisible(element, in: app) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
+    }
+
+    private func isVisible(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard element.exists, element.frame.isEmpty == false else { return false }
+        return app.windows.firstMatch.frame.intersects(element.frame)
+    }
+
+    private func assertElementSitsNearComposer(_ element: XCUIElement, in app: XCUIApplication, message: String) {
+        let composerButton = app.buttons["tapToTalkButton"].firstMatch
+        XCTAssertTrue(composerButton.waitForExistence(timeout: 8))
+        let gapToComposer = composerButton.frame.minY - element.frame.maxY
+        XCTAssertGreaterThanOrEqual(gapToComposer, 8, message)
+        XCTAssertLessThan(gapToComposer, 140, message)
     }
 }
