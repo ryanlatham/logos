@@ -58,7 +58,6 @@ struct ContentView: View {
     @State private var notifyApproval = true
     @State private var notifySummary = false
     @State private var pendingPairingRoute: LogosPairingRoute?
-    @State private var suppressNextHoldButtonAction = false
     @State private var threadScrollPosition = ScrollPosition(edge: .bottom)
     @State private var shouldFollowThread = true
     @State private var isThreadNearBottom = true
@@ -73,6 +72,17 @@ struct ContentView: View {
     @State private var threadScrollProximityScheduler = ThreadScrollProximityScheduler()
     @State private var threadFollowTask: Task<Void, Never>?
     @State private var threadFollowEpoch = 0
+
+    @ScaledMetric(relativeTo: .body) private var composerPillHeight: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var composerIconSize: CGFloat = 22
+    @ScaledMetric(relativeTo: .body) private var composerInputFontSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .body) private var composerLabelFontSize: CGFloat = 15
+    @ScaledMetric(relativeTo: .body) private var sendTapSize: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var sendVisualSize: CGFloat = 32
+    @ScaledMetric(relativeTo: .body) private var sendIconSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .body) private var recordDotSize: CGFloat = 10
+    @ScaledMetric(relativeTo: .body) private var recordDotHaloSize: CGFloat = 16
+    private let composerBottomSpacing: CGFloat = 8
 
     @FocusState private var focusedField: FocusedField?
 
@@ -530,115 +540,175 @@ struct ContentView: View {
     }
 
     private var composerBar: some View {
-        HStack(spacing: 10) {
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer(spacing: 8) {
+                    composerPillRow
+                }
+            } else {
+                composerPillRow
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 14)
+        .padding(.bottom, composerBottomSpacing)
+    }
+
+    private var composerPillRow: some View {
+        HStack(spacing: 8) {
             Button {
                 closeTransientOverlays(exceptAttachSheet: true)
-                withAnimation(.timingCurve(0.2, 0.8, 0.2, 1, duration: 0.22)) {
+                withAnimation(.smooth(duration: 0.2)) {
                     showAttachSheet.toggle()
                 }
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: composerIconSize, weight: .semibold))
                     .foregroundStyle(Color.logosLabel)
-                    .frame(width: 36, height: 36)
-                    .background(Color(red: 120 / 255, green: 120 / 255, blue: 128 / 255, opacity: 0.22), in: Circle())
+                    .frame(width: composerPillHeight, height: composerPillHeight)
+                    .liquidGlassPill(isInteractive: true)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(LiquidGlassScaleButtonStyle())
+            .accessibilityIdentifier("attachButton")
             .accessibilityLabel("Attach")
+            .accessibilityHint("Opens attachment options")
 
-            Group {
-                switch composerMode {
-                case .text:
-                    TextField("Message Hermes", text: $draft, axis: .vertical)
-                        .accessibilityIdentifier("composerTextField")
-                        .focused($focusedField, equals: .composer)
-                        .font(.system(size: 16))
-                        .foregroundStyle(Color.logosLabel)
-                        .lineLimit(1...4)
-                        .submitLabel(.send)
-                        .textInputAutocapitalization(.sentences)
-                        .onSubmit { submitDraft() }
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 44)
-                        .background(Color.logosBG2, in: Capsule())
-                        .overlay(Capsule().stroke(Color.logosHairline, lineWidth: 0.5))
-                case .paused:
-                    recordPill(isRecording: false)
-                case .recording:
-                    recordPill(isRecording: true)
-                }
-            }
-            .frame(maxWidth: .infinity)
+            composerCenterPill
+                .frame(maxWidth: .infinity)
 
             Button {
-                handleComposerModeButton()
+                handleComposerRightPillButton()
             } label: {
-                Image(systemName: composerActionSystemImage)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(Color.logosAmberOn)
-                    .frame(width: 44, height: 44)
-                    .background(Color.logosAmber, in: Circle())
-                    .shadow(color: Color.logosAmberGlow.opacity(composerMode == .text ? 0.25 : 0), radius: 14, x: 0, y: 0)
+                Image(systemName: composerRightPillSystemImage)
+                    .font(.system(size: composerIconSize, weight: .semibold))
+                    .foregroundStyle(composerMode == .text ? Color.logosAmberBright : Color.logosLabel)
+                    .frame(width: composerPillHeight, height: composerPillHeight)
+                    .liquidGlassPill(
+                        tint: composerMode == .text ? Color.logosAmber.opacity(0.25) : Color.white.opacity(0.07),
+                        isInteractive: true
+                    )
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier(composerActionAccessibilityID)
-            .accessibilityLabel(composerActionAccessibilityLabel)
-            .disabled(composerActionDisabled)
-            .opacity(composerActionDisabled ? 0.45 : 1)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in startHoldIfNeeded() }
-                    .onEnded { _ in endHoldIfNeeded() }
-            )
+            .buttonStyle(LiquidGlassScaleButtonStyle())
+            .accessibilityIdentifier(composerRightPillAccessibilityID)
+            .accessibilityLabel(composerRightPillAccessibilityLabel)
+            .accessibilityHint(composerRightPillAccessibilityHint)
+            .disabled(composerRightPillDisabled)
+            .opacity(composerRightPillDisabled ? 0.45 : 1)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 34)
-        .background(Color.logosGlass)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.logosHairline)
-                .frame(height: 0.5)
+        .animation(.smooth(duration: 0.2), value: composerMode)
+        .animation(.snappy(duration: 0.22), value: hasComposerDraft)
+        .animation(.smooth(duration: 0.2), value: voiceInput.isFinalizingTranscript)
+    }
+
+    @ViewBuilder
+    private var composerCenterPill: some View {
+        switch composerMode {
+        case .text:
+            composerInputPill
+        case .paused:
+            recordPill(isRecording: false)
+        case .recording:
+            recordPill(isRecording: true)
+        }
+    }
+
+    private var composerInputPill: some View {
+        HStack(spacing: 8) {
+            TextField("Message Hermes", text: $draft, axis: .vertical)
+                .accessibilityIdentifier("composerTextField")
+                .focused($focusedField, equals: .composer)
+                .font(.system(size: composerInputFontSize, weight: .regular))
+                .foregroundStyle(Color.logosLabel)
+                .lineLimit(1...4)
+                .submitLabel(.send)
+                .textInputAutocapitalization(.sentences)
+                .onSubmit { submitDraft() }
+                .accessibilityLabel("Message Hermes")
+
+            if hasComposerDraft {
+                Button {
+                    submitDraft()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.logosAmber)
+                            .frame(width: sendVisualSize, height: sendVisualSize)
+                            .shadow(color: Color.logosAmberGlow.opacity(0.4), radius: 10, x: 0, y: 4)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: sendIconSize, weight: .bold))
+                            .foregroundStyle(Color.logosAmberOn)
+                    }
+                    .frame(width: sendTapSize, height: sendTapSize)
+                }
+                .buttonStyle(LiquidGlassScaleButtonStyle())
+                .accessibilityIdentifier("sendButton")
+                .accessibilityLabel("Send message")
+                .accessibilityHint("Sends the current draft to Hermes")
+                .transition(.scale(scale: 0.72).combined(with: .opacity))
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, hasComposerDraft ? 0 : 16)
+        .frame(minHeight: composerPillHeight)
+        .liquidGlassPill(isFocused: focusedField == .composer, isInteractive: true)
+        .contentShape(Capsule())
+        .onTapGesture {
+            focusedField = .composer
         }
     }
 
     private func recordPill(isRecording: Bool) -> some View {
-        Button {
-            if isRecording {
-                if voiceInput.mode == .hold || voiceInput.pendingMode == .hold {
-                    voiceInput.endHold()
-                } else {
-                    voiceInput.toggleTap()
-                }
-                syncComposerWithVoiceState()
-            } else {
-                voiceInput.toggleTap()
-                if voiceInput.pendingMode != nil || voiceInput.isRecording {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        composerMode = .recording
-                    }
-                }
-            }
+        let isFinishing = voiceInput.isFinalizingTranscript && isRecording == false
+        return Button {
+            handleRecordPillTapped()
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: isRecording ? "stop.fill" : "circle.fill")
-                    .font(.system(size: isRecording ? 10 : 9, weight: .bold))
-                Text(isRecording ? "Stop" : "Record")
-                    .font(.system(size: 16, weight: .semibold))
+            HStack(spacing: isRecording ? 9 : 8) {
+                if isRecording {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: composerLabelFontSize, weight: .bold))
+                        .frame(width: composerLabelFontSize, height: composerLabelFontSize)
+                    Text("Stop")
+                        .font(.system(size: composerLabelFontSize, weight: .semibold))
+                        .tracking(0.2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                } else if isFinishing {
+                    Image(systemName: "hourglass")
+                        .font(.system(size: composerLabelFontSize, weight: .semibold))
+                    Text("Finishing…")
+                        .font(.system(size: composerLabelFontSize, weight: .medium))
+                        .tracking(-0.2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                } else {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: recordDotSize, weight: .bold))
+                        .foregroundStyle(Color.logosRed)
+                        .frame(width: recordDotHaloSize, height: recordDotHaloSize)
+                        .background(Color.logosRed.opacity(0.22), in: Circle())
+                    Text("Tap to record")
+                        .font(.system(size: composerLabelFontSize, weight: .medium))
+                        .tracking(-0.2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
             }
-            .foregroundStyle(isRecording ? Color.white : Color.logosRed)
+            .foregroundStyle(isRecording ? Color.white : isFinishing ? Color.logosLabel2 : Color.logosLabel)
             .frame(maxWidth: .infinity)
-            .frame(height: 44)
-            .background(isRecording ? Color.logosRed : Color.logosRed.opacity(0.14), in: Capsule())
-            .overlay(Capsule().stroke(Color.logosRed.opacity(isRecording ? 0 : 1), lineWidth: 1))
-            .shadow(color: Color.logosRed.opacity(isRecording ? 0.34 : 0), radius: 18, x: 0, y: 0)
+            .frame(minHeight: composerPillHeight)
+            .liquidGlassPill(
+                tint: isRecording ? Color.logosRed : Color.white.opacity(0.07),
+                isRecording: isRecording,
+                isInteractive: !isFinishing
+            )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(LiquidGlassScaleButtonStyle())
         .accessibilityIdentifier(isRecording ? "stopTapToTalkButton" : "recordButton")
-        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
-        .disabled(voiceControlsDisabled && !voiceInput.isVoiceInteractionActive)
-        .opacity((voiceControlsDisabled && !voiceInput.isVoiceInteractionActive) ? 0.55 : 1)
+        .accessibilityLabel(recordPillAccessibilityLabel(isRecording: isRecording))
+        .accessibilityValue(recordPillAccessibilityValue(isRecording: isRecording))
+        .accessibilityHint(recordPillAccessibilityHint(isRecording: isRecording))
+        .disabled(recordPillDisabled(isRecording: isRecording))
+        .opacity(recordPillDisabled(isRecording: isRecording) ? 0.55 : 1)
     }
 
     private var projectSwitcherLayer: some View {
@@ -1514,26 +1584,6 @@ struct ContentView: View {
         scrollThreadToBottomAfterLayout(animated: false, force: true)
     }
 
-    private func startHoldIfNeeded() {
-        guard defaultInput == "hold", composerMode == .text, hasComposerDraft == false else { return }
-        guard voiceControlsDisabled == false || voiceInput.isVoiceInteractionActive else { return }
-        if voiceInput.isRecording == false, voiceInput.pendingMode == nil {
-            voiceInput.startHold()
-            if voiceInput.pendingMode != nil || voiceInput.isRecording {
-                withAnimation(.easeOut(duration: 0.18)) { composerMode = .recording }
-            }
-        }
-    }
-
-    private func endHoldIfNeeded() {
-        guard defaultInput == "hold" else { return }
-        if voiceInput.isRecording || voiceInput.pendingMode == .hold {
-            suppressNextHoldButtonAction = true
-            voiceInput.endHold()
-        }
-        syncComposerWithVoiceState()
-    }
-
     private func syncComposerWithVoiceState() {
         guard composerMode == .recording else { return }
         if voiceInput.mode == .idle, voiceInput.pendingMode == nil, voiceInput.isFinalizingTranscript == false {
@@ -1543,37 +1593,81 @@ struct ContentView: View {
         }
     }
 
-    private func handleComposerModeButton() {
-        if suppressNextHoldButtonAction {
-            suppressNextHoldButtonAction = false
-            return
+    private func handleRecordPillTapped() {
+        switch composerMode {
+        case .paused:
+            guard ComposerModePolicy.canStartRecordingFromPausedPill(
+                voiceControlsDisabled: voiceControlsDisabled,
+                isFinalizingTranscript: voiceInput.isFinalizingTranscript
+            ) else { return }
+            voiceInput.toggleTap()
+            if voiceInput.pendingMode != nil || voiceInput.isRecording {
+                withAnimation(.smooth(duration: 0.18)) {
+                    composerMode = .recording
+                }
+            }
+        case .recording:
+            if voiceInput.mode == .hold || voiceInput.pendingMode == .hold {
+                voiceInput.endHold()
+            } else if voiceInput.isRecording || voiceInput.pendingMode != nil {
+                voiceInput.toggleTap()
+            }
+            withAnimation(.smooth(duration: 0.18)) {
+                composerMode = ComposerModePolicy.modeAfterRecordPillStopped(current: composerMode)
+            }
+        case .text:
+            break
         }
+    }
+
+    private func handleComposerRightPillButton() {
         switch composerMode {
         case .text:
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                submitDraft()
-                return
-            }
             focusedField = nil
-            if defaultInput == "hold" {
-                if voiceInput.isRecording || voiceInput.pendingMode == .hold {
-                    voiceInput.endHold()
-                    syncComposerWithVoiceState()
-                } else {
-                    voiceInput.startHold()
-                    if voiceInput.pendingMode != nil || voiceInput.isRecording {
-                        withAnimation(.easeOut(duration: 0.18)) { composerMode = .recording }
-                    }
-                }
-                return
+            withAnimation(.smooth(duration: 0.18)) {
+                composerMode = ComposerModePolicy.modeAfterRightPillTapped(current: composerMode)
             }
-            withAnimation(.easeOut(duration: 0.18)) { composerMode = .paused }
-        case .paused:
-            withAnimation(.easeOut(duration: 0.18)) { composerMode = .text }
+            closeTransientOverlays()
         case .recording:
             voiceInput.cancel()
-            withAnimation(.easeOut(duration: 0.18)) { composerMode = .text }
+            withAnimation(.smooth(duration: 0.18)) {
+                composerMode = ComposerModePolicy.modeAfterRightPillTapped(current: composerMode)
+            }
+            focusedField = .composer
+        case .paused:
+            withAnimation(.smooth(duration: 0.18)) {
+                composerMode = ComposerModePolicy.modeAfterRightPillTapped(current: composerMode)
+            }
+            focusedField = .composer
         }
+    }
+
+    private func recordPillDisabled(isRecording: Bool) -> Bool {
+        if isRecording {
+            return voiceControlsDisabled && !voiceInput.isVoiceInteractionActive
+        }
+        return !ComposerModePolicy.canStartRecordingFromPausedPill(
+            voiceControlsDisabled: voiceControlsDisabled,
+            isFinalizingTranscript: voiceInput.isFinalizingTranscript
+        )
+    }
+
+    private func recordPillAccessibilityLabel(isRecording: Bool) -> String {
+        if isRecording { return "Stop recording" }
+        if voiceInput.isFinalizingTranscript { return "Finishing voice input" }
+        return "Start recording"
+    }
+
+    private func recordPillAccessibilityValue(isRecording: Bool) -> String {
+        if isRecording { return "Recording" }
+        if voiceInput.isFinalizingTranscript { return "Finalizing transcript" }
+        return "Voice mode paused"
+    }
+
+    private func recordPillAccessibilityHint(isRecording: Bool) -> String {
+        if isRecording { return "Stops recording and stays ready to record again" }
+        if voiceInput.isFinalizingTranscript { return "Wait until the transcript finishes sending" }
+        return "Starts tap to record"
     }
 
     private func submitDraft() {
@@ -1681,29 +1775,28 @@ struct ContentView: View {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
-    private var composerActionSystemImage: String {
+    private var composerRightPillSystemImage: String {
         switch composerMode {
         case .text:
-            return hasComposerDraft ? "arrow.up" : "mic"
+            return "mic"
         case .paused, .recording:
             return "keyboard"
         }
     }
 
-    private var composerActionAccessibilityID: String {
+    private var composerRightPillAccessibilityID: String {
         switch composerMode {
         case .text:
-            return hasComposerDraft ? "sendButton" : "tapToTalkButton"
+            return "tapToTalkButton"
         case .paused, .recording:
             return "keyboardModeButton"
         }
     }
 
-    private var composerActionAccessibilityLabel: String {
+    private var composerRightPillAccessibilityLabel: String {
         switch composerMode {
         case .text:
-            if hasComposerDraft { return "Send message" }
-            return defaultInput == "hold" ? "Hold to talk" : "Start voice mode"
+            return "Switch to voice mode"
         case .paused:
             return "Switch to keyboard"
         case .recording:
@@ -1711,11 +1804,22 @@ struct ContentView: View {
         }
     }
 
-    private var composerActionDisabled: Bool {
+    private var composerRightPillAccessibilityHint: String {
+        switch composerMode {
+        case .text:
+            return "Shows tap to record controls"
+        case .paused:
+            return "Returns to text input"
+        case .recording:
+            return "Cancels voice input and returns to text input"
+        }
+    }
+
+    private var composerRightPillDisabled: Bool {
         if client.runStatus == .cancelling, composerMode == .text {
             return true
         }
-        return composerMode == .text && hasComposerDraft == false && defaultInput == "text"
+        return composerMode == .text && defaultInput == "text"
     }
 
     private var voiceControlsDisabled: Bool {
@@ -1892,6 +1996,26 @@ enum ComposerMode: Equatable {
 enum ComposerModePolicy {
     static func modeAfterVoiceFinished(current: ComposerMode) -> ComposerMode {
         .paused
+    }
+
+    static func modeAfterRecordPillStopped(current: ComposerMode) -> ComposerMode {
+        .paused
+    }
+
+    static func modeAfterRightPillTapped(current: ComposerMode) -> ComposerMode {
+        switch current {
+        case .text:
+            return .paused
+        case .paused, .recording:
+            return .text
+        }
+    }
+
+    static func canStartRecordingFromPausedPill(
+        voiceControlsDisabled: Bool,
+        isFinalizingTranscript: Bool
+    ) -> Bool {
+        voiceControlsDisabled == false && isFinalizingTranscript == false
     }
 }
 
@@ -2689,6 +2813,88 @@ private struct ChatBubbleShape: Shape {
         path.addQuadCurve(to: CGPoint(x: rect.minX + topLeft, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
         path.closeSubpath()
         return path
+    }
+}
+
+private struct LiquidGlassScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .animation(.smooth(duration: 0.18), value: configuration.isPressed)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func liquidGlassPill(
+        tint: Color = Color.white.opacity(0.07),
+        isRecording: Bool = false,
+        isFocused: Bool = false,
+        isInteractive: Bool = false
+    ) -> some View {
+        if isRecording {
+            self
+                .background(Color.logosRed, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(Color.white.opacity(0.3), lineWidth: 0.5)
+                }
+                .shadow(color: Color.logosRed.opacity(0.45), radius: 24, x: 0, y: 0)
+                .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 8)
+        } else if #available(iOS 26.0, *) {
+            self
+                .background(tint, in: Capsule())
+                .glassEffect(.regular.tint(tint).interactive(isInteractive), in: Capsule())
+                .liquidGlassPillChrome(isFocused: isFocused)
+        } else {
+            self
+                .background(tint, in: Capsule())
+                .background(.ultraThinMaterial, in: Capsule())
+                .liquidGlassPillChrome(isFocused: isFocused)
+        }
+    }
+
+    func liquidGlassPillChrome(isFocused: Bool) -> some View {
+        self
+            .overlay {
+                LinearGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.14), location: 0),
+                        .init(color: Color.white.opacity(0), location: 0.38),
+                        .init(color: Color.white.opacity(0), location: 0.68),
+                        .init(color: Color.white.opacity(0.08), location: 1)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .clipShape(Capsule())
+                .blendMode(.screen)
+                .allowsHitTesting(false)
+            }
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.52),
+                                Color.white.opacity(0.24),
+                                Color.black.opacity(0.17)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.6
+                    )
+            }
+            .overlay {
+                Capsule()
+                    .strokeBorder(
+                        isFocused ? Color.logosAmber.opacity(0.55) : Color.white.opacity(0.24),
+                        lineWidth: isFocused ? 1.5 : 0.5
+                    )
+            }
+            .shadow(color: Color.black.opacity(0.67), radius: 28, x: 0, y: 8)
+            .shadow(color: Color.black.opacity(0.45), radius: 6, x: 0, y: 2)
     }
 }
 
