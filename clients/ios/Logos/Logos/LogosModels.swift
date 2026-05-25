@@ -548,7 +548,10 @@ struct LogosMessage: Identifiable, Hashable {
         if lower.range(of: #"^no response from provider for\s+.*\baborting call\.?$"#, options: .regularExpression) != nil {
             return "gateway_status"
         }
-        if lower.range(of: #"(?:preflight\s+compression|context\s+(?:compaction|compression)|(?:compact|compacting|compressing)\s+context)"#, options: .regularExpression) != nil {
+        if lower.range(
+            of: #"^(?:(?:preflight\s+compression|context\s+(?:compaction|compression))\b(?:\s*[:.\-–—]|\s+(?:started|starting|running|complete|completed|before|for|to)\b)|(?:compact|compacting|compressing)\s+context\b(?:\s*[:.\-–—]|\s+(?:before|for|to|now|started|starting|running|complete|completed)\b|$))"#,
+            options: .regularExpression
+        ) != nil {
             return "gateway_status"
         }
         if lower.hasPrefix("gateway restarting") || lower.hasPrefix("gateway shutting down") {

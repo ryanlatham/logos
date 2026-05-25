@@ -62,7 +62,7 @@ GATEWAY_PROVIDER_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 GATEWAY_CONTEXT_STATUS_RE = re.compile(
-    r"(?:preflight\s+compression|context\s+(?:compaction|compression)|(?:compact|compacting|compressing)\s+context)",
+    r"^\s*(?:⏳\s*)?(?:(?:preflight\s+compression|context\s+(?:compaction|compression))\b(?:\s*[:.\-–—]|\s+(?:started|starting|running|complete|completed|before|for|to)\b)|(?:compact|compacting|compressing)\s+context\b(?:\s*[:.\-–—]|\s+(?:before|for|to|now|started|starting|running|complete|completed)\b|$))",
     re.IGNORECASE,
 )
 GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
@@ -913,6 +913,7 @@ class LogosAdapter(BasePlatformAdapter):
             content=response_text,
             metadata={
                 "source": "fast_response",
+                "finalized": True,
                 "fast_response_kind": response_kind,
                 "fast_model": result.to_protocol(),
                 "request_id": envelope.request_id,

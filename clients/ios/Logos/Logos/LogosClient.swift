@@ -1083,7 +1083,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             guard requestID == pendingOutboundResponseRequestID else { return }
             clearOutstandingOutboundRequestID(requestID)
         } else if let activity = progressActivity {
-            guard activity.requestID == requestID || activity.isComplete else { return }
+            guard activity.requestID == requestID else { return }
         }
         let now = Date().timeIntervalSince1970
         var activity = progressActivity ?? ProgressActivityState(
@@ -1605,6 +1605,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         var persistedMessages: [LogosMessage] = []
         for message in decodedMessages {
             let progressRequestID = message.metadataRequestID ?? root["request_id"] as? String ?? message.messageID
+            if message.role != "user", isSuppressedRunRequestID(progressRequestID) {
+                continue
+            }
             if shouldRouteMessageToProgress(message, requestID: progressRequestID) {
                 if shouldApplyBatchProgressToLiveRun(requestID: progressRequestID, projectKey: message.projectKey) {
                     appendProgressEvent(
@@ -1636,12 +1639,12 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         let batchRequestID = root["request_id"] as? String
         let completingFinalMessage = persistedMessages.first { message in
             guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
-            let finalRequestID = batchRequestID ?? message.metadataRequestID
+            let finalRequestID = message.metadataRequestID ?? batchRequestID
             guard progressActivity != nil else { return isActiveRunRequestID(finalRequestID) }
             return shouldClearProgressActivity(for: message, requestID: finalRequestID)
         }
         if let completingFinalMessage, runStatus != .cancelling {
-            completeProgressActivity(requestID: batchRequestID ?? completingFinalMessage.metadataRequestID, finalMessage: completingFinalMessage)
+            completeProgressActivity(requestID: completingFinalMessage.metadataRequestID ?? batchRequestID, finalMessage: completingFinalMessage)
             runStatus = .idle
         }
         refreshMessages()
@@ -1765,7 +1768,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
 
     private func activeRunErrorMatches(_ requestID: String?) -> Bool {
         guard let activity = progressActivity, activity.isComplete == false else { return false }
-        guard let requestID, requestID.isEmpty == false else { return true }
+        guard let requestID, requestID.isEmpty == false else { return false }
         return activity.requestID == requestID
             || pendingOutboundResponseRequestID == requestID
             || outstandingOutboundResponseRequestIDs.contains(requestID)
@@ -1784,7 +1787,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
         }
         if activeRunErrorMatches(requestID) {
-            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message)
+            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message, suppressLateFrames: true)
             return
         }
         if code == "approval_not_pending" {
@@ -1793,6 +1796,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         } else if code == "clarify_not_pending" {
             if clarifyCard?.id == requestID { clarifyCard = nil }
             if runStatus == .awaitingClarification { runStatus = .idle }
+        }
+        if progressActivity?.isComplete == false {
+            clearAck()
+            lastError = message
+            return
         }
         recordError(message)
     }
@@ -1942,6 +1950,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         if let messageDict = payload["message"] as? [String: Any], let message = LogosMessage.from(dictionary: messageDict) {
             let messageRequestID = root["request_id"] as? String ?? message.metadataRequestID
+            if message.role != "user", isSuppressedRunRequestID(messageRequestID) {
+                return
+            }
             if shouldRouteMessageToProgress(message, requestID: messageRequestID ?? message.messageID) {
                 appendProgressEvent(
                     requestID: messageRequestID ?? message.messageID,
@@ -2078,7 +2089,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             let message = payload["message"] as? String
                 ?? payload["error"] as? String
                 ?? "Hermes run failed."
-            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message)
+            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message, suppressLateFrames: true)
             return
         }
         if next == .idle, let activity = progressActivity, activity.timedOut == false, activity.isComplete == false {
