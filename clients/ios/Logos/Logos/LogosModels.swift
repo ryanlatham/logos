@@ -432,6 +432,7 @@ struct ProgressActivityEvent: Identifiable, Hashable {
     let kind: String
     let text: String
     let timestamp: TimeInterval
+    let count: Int
 }
 
 struct ProgressActivityState: Identifiable, Hashable {
@@ -442,6 +443,9 @@ struct ProgressActivityState: Identifiable, Hashable {
     var events: [ProgressActivityEvent]
     var isExpanded: Bool
     var timedOut: Bool
+    var isComplete: Bool
+    var completedFinalMessageID: String?
+    var updateCount: Int
     var lastUpdateAt: TimeInterval
 }
 
@@ -459,6 +463,10 @@ struct LogosMessage: Identifiable, Hashable {
     var hasFinalizedMetadata: Bool = false
     var metadataSource: String? = nil
     var progressKind: String? = nil
+    var metadataRequestID: String? = nil
+    var metadataTransient: Bool? = nil
+    var metadataKind: String? = nil
+    var metadataJSON: String = "{}"
 
     var gatewayProgressKind: String? {
         Self.gatewayProgressKind(for: content)
@@ -466,6 +474,10 @@ struct LogosMessage: Identifiable, Hashable {
 
     var progressEventKind: String {
         progressKind ?? metadataSource ?? gatewayProgressKind ?? "progress"
+    }
+
+    var isGatewayStatusUpdate: Bool {
+        progressEventKind == "gateway_status" || gatewayProgressKind != nil
     }
 
     var isProgressUpdate: Bool {
@@ -510,6 +522,9 @@ struct LogosMessage: Identifiable, Hashable {
         let finalized = metadata?["finalized"] as? Bool
         let source = metadata?["source"] as? String
         let progressKind = metadata?["progress_kind"] as? String ?? metadata?["kind"] as? String
+        let requestID = metadata?["request_id"] as? String
+        let transient = Self.boolValue(metadata?["transient"])
+        let kind = metadata?["kind"] as? String
         return LogosMessage(
             projectKey: projectKey,
             sessionID: sessionID,
@@ -522,8 +537,66 @@ struct LogosMessage: Identifiable, Hashable {
             isFinal: finalized ?? true,
             hasFinalizedMetadata: finalized != nil,
             metadataSource: source,
-            progressKind: progressKind
+            progressKind: progressKind,
+            metadataRequestID: requestID,
+            metadataTransient: transient,
+            metadataKind: kind,
+            metadataJSON: metadata.map(Self.metadataJSONString(from:)) ?? "{}"
         )
+    }
+
+    var metadataDictionary: [String: Any] {
+        var metadata = Self.metadataDictionary(fromJSON: metadataJSON)
+        if hasFinalizedMetadata {
+            metadata["finalized"] = isFinal
+        }
+        if let metadataSource {
+            metadata["source"] = metadataSource
+        }
+        if let progressKind {
+            metadata["progress_kind"] = progressKind
+        }
+        if let metadataRequestID {
+            metadata["request_id"] = metadataRequestID
+        }
+        if let metadataTransient {
+            metadata["transient"] = metadataTransient
+        }
+        if let metadataKind {
+            metadata["kind"] = metadataKind
+        }
+        return metadata
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let boolValue = value as? Bool { return boolValue }
+        if let intValue = value as? Int { return intValue != 0 }
+        if let stringValue = value as? String {
+            switch stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes", "on":
+                return true
+            case "0", "false", "no", "off":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private static func metadataDictionary(fromJSON json: String) -> [String: Any] {
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return decoded
+    }
+
+    private static func metadataJSONString(from metadata: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(metadata),
+              let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return json
     }
 
     static func pending(projectKey: String, messageID: String = UUID().uuidString, content: String) -> LogosMessage {
@@ -536,6 +609,25 @@ struct LogosMessage: Identifiable, Hashable {
             content: content,
             timestamp: Date().timeIntervalSince1970,
             status: "pending"
+        )
+    }
+
+    static func localNotice(projectKey: String, requestID: String, sequence: Int, content: String, timestamp: TimeInterval = Date().timeIntervalSince1970) -> LogosMessage {
+        LogosMessage(
+            projectKey: projectKey,
+            sessionID: "local:\(projectKey)",
+            messageID: "local-stale-\(requestID)-\(sequence)",
+            serverSeq: 0,
+            role: "assistant",
+            content: content,
+            timestamp: timestamp,
+            status: "local_notice",
+            isFinal: true,
+            hasFinalizedMetadata: true,
+            metadataSource: "local_notice",
+            progressKind: nil,
+            metadataRequestID: requestID,
+            metadataTransient: false
         )
     }
 }

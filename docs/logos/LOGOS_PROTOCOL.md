@@ -86,6 +86,25 @@ Python source of truth:
 - `error`
 - `heartbeat_ack`
 
+## Handshake client config
+
+Authenticated `hello` responses and `registered` responses include app-facing configuration:
+
+```json
+{
+  "type": "hello",
+  "payload": {
+    "authenticated": true,
+    "server": "logos",
+    "client_config": {
+      "stale_timeout_seconds": 900
+    }
+  }
+}
+```
+
+`client_config.stale_timeout_seconds` is the app's silence threshold for adding a local "haven't heard from Hermes" notice. It defaults to `900`, can be configured with `platforms.logos.extra.timeout_seconds`, and is overridden by `LOGOS_TIMEOUT_SECONDS`. It does not change Hermes' own agent inactivity timeout.
+
 ## Message model
 
 Swift shape:
@@ -122,6 +141,46 @@ Deduplication key:
 ```
 
 `server_seq` is a monotonic adapter event sequence. It is used for replay and delta sync, not as a replacement for Hermes message ids.
+
+## Durable progress
+
+Non-`gateway_status` `tool_progress` frames are mirrored as normal Logos messages so the app can keep a visible history of tool activity after the final assistant response arrives:
+
+```json
+{
+  "type": "tool_progress",
+  "request_id": "req-1",
+  "project_key": "default",
+  "session_id": "project:default",
+  "server_seq": 44,
+  "payload": {
+    "kind": "tool_progress",
+    "progress_kind": "tool_progress",
+    "message_id": "progress-abc",
+    "text": "🔧 terminal: \"pytest\"",
+    "transient": false,
+    "finalized": false,
+    "message": {
+      "project_key": "default",
+      "session_id": "project:default",
+      "message_id": "progress-abc",
+      "server_seq": 44,
+      "role": "assistant",
+      "content": "🔧 terminal: \"pytest\"",
+      "timestamp": 1710000000.0,
+      "metadata": {
+        "source": "tool_progress",
+        "progress_kind": "tool_progress",
+        "finalized": false,
+        "request_id": "req-1",
+        "transient": false
+      }
+    }
+  }
+}
+```
+
+Routine gateway keepalives such as "Still working..." continue to use `kind: "gateway_status"` and `transient: true`; clients should treat them as activity signals, not durable conversation history.
 
 ## Reconnect / replay
 
@@ -170,6 +229,8 @@ The adapter responds:
   }
 }
 ```
+
+Clients should compute `after_server_seq` from durable messages they have stored. Transient frames such as `run_status` keepalives and gateway-status `tool_progress` frames may carry event sequence values for ordering live activity, but they are not replayed as messages.
 
 ## Older history pagination
 

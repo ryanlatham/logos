@@ -35,6 +35,52 @@ class CapturingLogosAdapter(LogosAdapter):
 
 
 @pytest.mark.asyncio
+async def test_logos_timeout_config_defaults_overrides_and_handshake_payloads(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOGOS_TIMEOUT_SECONDS", raising=False)
+    adapter = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "default.db")})
+    )
+
+    assert adapter.stale_timeout_seconds == 900
+    hello = await adapter.handle_ws_envelope(
+        Envelope(type="hello", request_id="hello-default", device_id="iphone", project_key="archwright", payload={})
+    )
+    assert hello["payload"]["client_config"]["stale_timeout_seconds"] == 900
+    registered = adapter._handle_register_device(
+        Envelope(type="register_device", request_id="reg-default", device_id="iphone", project_key="archwright", payload={})
+    )
+    assert registered["payload"]["client_config"]["stale_timeout_seconds"] == 900
+
+    configured = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "timeout_seconds": 120, "store_path": str(tmp_path / "configured.db")})
+    )
+    assert configured.stale_timeout_seconds == 120
+
+    monkeypatch.setenv("LOGOS_TIMEOUT_SECONDS", "45")
+    env_override = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "timeout_seconds": 120, "store_path": str(tmp_path / "env.db")})
+    )
+    assert env_override.stale_timeout_seconds == 45
+
+    monkeypatch.setenv("LOGOS_TIMEOUT_SECONDS", "not-a-number")
+    invalid_env_falls_back_to_config = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "timeout_seconds": 75, "store_path": str(tmp_path / "invalid-env.db")})
+    )
+    assert invalid_env_falls_back_to_config.stale_timeout_seconds == 75
+
+    invalid_config = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "timeout_seconds": -1, "store_path": str(tmp_path / "invalid-config.db")})
+    )
+    assert invalid_config.stale_timeout_seconds == 900
+
+    monkeypatch.setenv("LOGOS_TIMEOUT_SECONDS", str(999999999))
+    clamped = LogosAdapter(
+        PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "clamped.db")})
+    )
+    assert clamped.stale_timeout_seconds == 86400
+
+
+@pytest.mark.asyncio
 async def test_final_text_input_uses_gateway_handle_message_path_without_rewriting_slashes(tmp_path):
     adapter = CapturingLogosAdapter(
         PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
@@ -218,7 +264,7 @@ async def test_requestless_queued_followup_does_not_inherit_active_request_conte
 
 
 @pytest.mark.asyncio
-async def test_context_request_id_is_not_applied_to_different_session_send(tmp_path):
+async def test_context_request_id_and_session_are_applied_when_metadata_omits_session(tmp_path):
     adapter = LogosAdapter(
         PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "host": "127.0.0.1", "port": 0, "store_path": str(tmp_path / "logos.db")})
     )
@@ -263,7 +309,8 @@ async def test_context_request_id_is_not_applied_to_different_session_send(tmp_p
         if item["frame"]["type"] == "tool_progress" and item["frame"]["payload"]["text"] == "🔧 terminal: \"wrong-session\""
     ]
     assert progress_frames
-    assert progress_frames[-1]["request_id"] != "req-custom-session"
+    assert progress_frames[-1]["request_id"] == "req-custom-session"
+    assert progress_frames[-1]["session_id"] == "custom-session"
 
 
 @pytest.mark.asyncio
@@ -345,7 +392,7 @@ async def test_edit_message_updates_existing_logos_message_for_final_content(tmp
 
 
 @pytest.mark.asyncio
-async def test_tool_progress_send_and_edit_broadcast_transient_progress_frames(tmp_path):
+async def test_tool_progress_send_and_edit_persist_durable_progress_frames(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
@@ -354,27 +401,38 @@ async def test_tool_progress_send_and_edit_broadcast_transient_progress_frames(t
 
     assert sent.success is True
     assert str(sent.message_id).startswith("progress-")
-    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    stored_messages = adapter.store.messages_after_server_seq("archwright", 0)
+    assert [message.content for message in stored_messages] == ["🔧 terminal: \"pytest\""]
+    assert stored_messages[0].metadata["source"] == "tool_progress"
+    assert stored_messages[0].metadata["progress_kind"] == "tool_progress"
+    assert stored_messages[0].metadata["finalized"] is False
+    assert stored_messages[0].metadata["transient"] is False
     first_frame = fake_server.frames[-1]["frame"]
     assert first_frame["type"] == "tool_progress"
     assert first_frame["project_key"] == "archwright"
     assert first_frame["session_id"] == "sess-progress"
     assert first_frame["payload"]["text"] == "🔧 terminal: \"pytest\""
-    assert first_frame["payload"]["transient"] is True
+    assert first_frame["payload"]["transient"] is False
+    assert first_frame["payload"]["message"]["message_id"] == sent.message_id
+    assert first_frame["payload"]["message"]["metadata"]["source"] == "tool_progress"
 
     edited = await adapter.edit_message("project:archwright", sent.message_id, "🔧 terminal: \"pytest\"\n🔍 web_search: \"docs\"")
 
     assert edited.success is True
     assert edited.message_id == sent.message_id
-    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    stored_messages = adapter.store.messages_after_server_seq("archwright", 0)
+    assert len(stored_messages) == 1
+    assert stored_messages[0].content == "🔧 terminal: \"pytest\"\n🔍 web_search: \"docs\""
+    assert stored_messages[0].metadata["finalized"] is False
     second_frame = fake_server.frames[-1]["frame"]
     assert second_frame["type"] == "tool_progress"
     assert second_frame["request_id"] == sent.message_id
     assert second_frame["payload"]["text"] == "🔧 terminal: \"pytest\"\n🔍 web_search: \"docs\""
+    assert second_frame["payload"]["message"]["server_seq"] == stored_messages[0].server_seq
 
 
 @pytest.mark.asyncio
-async def test_progress_message_id_finalize_persists_final_content_instead_of_progress(tmp_path):
+async def test_progress_message_id_finalize_persists_progress_and_appends_final_content(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
@@ -386,11 +444,17 @@ async def test_progress_message_id_finalize_persists_final_content_instead_of_pr
     edited = await adapter.edit_message("project:archwright", sent.message_id, "Final answer after the tool finished.", finalize=True)
 
     assert edited.success is True
-    assert edited.message_id == sent.message_id
+    assert edited.message_id != sent.message_id
     stored = adapter.store.get_message("sess-progress", str(sent.message_id))
     assert stored is not None
-    assert stored.content == "Final answer after the tool finished."
-    assert stored.metadata["finalized"] is True
+    assert stored.content == "🔧 terminal: \"pytest\""
+    assert stored.metadata["source"] == "tool_progress"
+    assert stored.metadata["finalized"] is False
+    final_stored = adapter.store.get_message("sess-progress", str(edited.message_id))
+    assert final_stored is not None
+    assert final_stored.content == "Final answer after the tool finished."
+    assert final_stored.metadata["finalized"] is True
+    assert final_stored.metadata.get("source") != "tool_progress"
     frames = [item["frame"] for item in fake_server.frames]
     assert frames[0]["type"] == "tool_progress"
     assert frames[-1]["type"] == "run_status"
@@ -402,7 +466,45 @@ async def test_progress_message_id_finalize_persists_final_content_instead_of_pr
     replay = adapter._handle_messages_get(
         Envelope(type="messages_get", request_id="get-finalized-progress", device_id="iphone", project_key="archwright", payload={"after_server_seq": 0})
     )
-    assert [message["content"] for message in replay["payload"]["messages"]] == ["Final answer after the tool finished."]
+    assert [message["content"] for message in replay["payload"]["messages"]] == ["🔧 terminal: \"pytest\"", "Final answer after the tool finished."]
+
+
+@pytest.mark.asyncio
+async def test_send_final_with_progress_message_id_appends_separate_final_instead_of_reusing_progress(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+
+    progress = await adapter.send(
+        "project:archwright",
+        "🔧 terminal: \"pytest\"",
+        metadata={"session_id": "sess-progress", "message_id": "hermes-progress-1", "request_id": "req-progress-1"},
+    )
+    final = await adapter.send(
+        "project:archwright",
+        "Final answer after progress id collision.",
+        metadata={"session_id": "sess-progress", "message_id": "hermes-progress-1", "request_id": "req-progress-1", "source": "hermes"},
+    )
+
+    assert progress.success is True
+    assert final.success is True
+    assert final.message_id != progress.message_id
+    stored_progress = adapter.store.get_message("sess-progress", "hermes-progress-1")
+    stored_final = adapter.store.get_message("sess-progress", str(final.message_id))
+    assert stored_progress is not None
+    assert stored_progress.content == "🔧 terminal: \"pytest\""
+    assert stored_progress.metadata["source"] == "tool_progress"
+    assert stored_final is not None
+    assert stored_final.content == "Final answer after progress id collision."
+    assert stored_final.metadata["request_id"] == "req-progress-1"
+    assert stored_final.metadata.get("source") == "hermes"
+    replay = adapter._handle_messages_get(
+        Envelope(type="messages_get", request_id="get-collision", device_id="iphone", project_key="archwright", payload={"after_server_seq": 0})
+    )
+    assert [message["content"] for message in replay["payload"]["messages"]] == [
+        "🔧 terminal: \"pytest\"",
+        "Final answer after progress id collision.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -428,7 +530,7 @@ async def test_progress_finalize_preserves_root_request_id_when_present(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_custom_progress_message_id_finalize_uses_original_session_and_persists(tmp_path):
+async def test_custom_progress_message_id_finalize_uses_original_session_and_persists_both_messages(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
@@ -445,7 +547,9 @@ async def test_custom_progress_message_id_finalize_uses_original_session_and_per
     )
     assert sent.success is True
     assert sent.message_id == "hermes-msg-42"
-    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    stored_messages = adapter.store.messages_after_server_seq("archwright", 0)
+    assert [message.content for message in stored_messages] == ["🔧 terminal: \"pytest\""]
+    assert stored_messages[0].metadata["source"] == "tool_progress"
 
     progressed = await adapter.edit_message("project:archwright", "hermes-msg-42", "🔍 web_search: \"docs\"", finalize=False)
     assert progressed.success is True
@@ -457,19 +561,55 @@ async def test_custom_progress_message_id_finalize_uses_original_session_and_per
     assert edited.success is True
     stored = adapter.store.get_message("sess-progress", "hermes-msg-42")
     assert stored is not None
-    assert stored.content == "Final answer for the caller-supplied message id."
-    assert stored.metadata["finalized"] is True
-    assert stored.metadata.get("source") != "tool_progress"
-    assert "progress_kind" not in stored.metadata
-    assert "kind" not in stored.metadata
+    assert stored.content == "🔍 web_search: \"docs\""
+    assert stored.metadata["source"] == "tool_progress"
+    assert stored.metadata["progress_kind"] == "terminal"
+    assert stored.metadata["finalized"] is False
+    final_stored = adapter.store.get_message("sess-progress", str(edited.message_id))
+    assert final_stored is not None
+    assert final_stored.message_id != "hermes-msg-42"
+    assert final_stored.content == "Final answer for the caller-supplied message id."
+    assert final_stored.metadata["finalized"] is True
+    assert final_stored.metadata.get("source") != "tool_progress"
+    assert "progress_kind" not in final_stored.metadata
+    assert "kind" not in final_stored.metadata
     assert adapter.store.get_message("project:archwright", "hermes-msg-42") is None
     frames = [item["frame"] for item in fake_server.frames]
     assert [frame["type"] for frame in frames] == ["tool_progress", "tool_progress", "state_update", "state_update", "run_status"]
     assert frames[2]["request_id"] == "hermes-msg-42"
     assert frames[2]["payload"]["op"] == "message_appended"
-    assert frames[2]["payload"]["message"]["message_id"] == "hermes-msg-42"
+    assert frames[2]["payload"]["message"]["message_id"] == final_stored.message_id
     assert frames[2]["payload"]["message"]["metadata"].get("source") != "tool_progress"
     assert "progress_kind" not in frames[2]["payload"]["message"]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_send_typing_emits_throttled_scoped_keepalive_run_status(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+
+    await adapter.send_typing(
+        "project:archwright",
+        metadata={"session_id": "sess-typing", "request_id": "req-typing", "device_id": "iphone"},
+    )
+    await adapter.send_typing(
+        "project:archwright",
+        metadata={"session_id": "sess-typing", "request_id": "req-typing", "device_id": "iphone"},
+    )
+
+    frames = [item["frame"] for item in fake_server.frames]
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame["type"] == "run_status"
+    assert frame["request_id"] == "req-typing"
+    assert frame["project_key"] == "archwright"
+    assert frame["session_id"] == "sess-typing"
+    assert frame["device_id"] == "iphone"
+    assert frame["payload"]["status"] == "running"
+    assert frame["payload"]["keepalive"] is True
+    assert frame["payload"]["source"] == "typing"
+    assert frame["payload"]["stale_timeout_seconds"] == 900
 
 
 @pytest.mark.asyncio
@@ -565,6 +705,7 @@ async def test_websocket_auth_and_text_round_trip_to_fake_gateway_handler(tmp_pa
             hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
             assert hello["type"] == "hello"
             assert hello["payload"]["authenticated"] is True
+            assert hello["payload"]["client_config"]["stale_timeout_seconds"] == 900
 
             await ws.send(json.dumps({"type": "text_input", "request_id": "text-1", "device_id": "iphone", "project_key": "default", "payload": {"text": "ping", "client_msg_id": "client-3", "is_final": True}}))
             frames = [json.loads(await asyncio.wait_for(ws.recv(), timeout=3)) for _ in range(4)]

@@ -23,6 +23,131 @@ private final class ThreadScrollProximityScheduler {
     }
 }
 
+struct ThreadAutoFollowPolicy {
+    static let minimumDetachDistance: CGFloat = 160
+    static let viewportDetachFraction: CGFloat = 0.25
+
+    static func detachThreshold(visibleHeight: CGFloat) -> CGFloat {
+        max(minimumDetachDistance, max(0, visibleHeight) * viewportDetachFraction)
+    }
+
+    static func isNearBottom(distanceFromBottom: CGFloat, visibleHeight: CGFloat) -> Bool {
+        max(0, distanceFromBottom) <= detachThreshold(visibleHeight: visibleHeight)
+    }
+
+    static func shouldDetachForUserScroll(distanceFromBottom: CGFloat, visibleHeight: CGFloat) -> Bool {
+        isNearBottom(distanceFromBottom: distanceFromBottom, visibleHeight: visibleHeight) == false
+    }
+
+    static func shouldDetachForProgrammaticScroll(distanceFromBottom _: CGFloat, visibleHeight _: CGFloat) -> Bool {
+        false
+    }
+
+    static func shouldApplyFollow(force: Bool, shouldFollowThread: Bool, isThreadUserDetached: Bool) -> Bool {
+        force || (shouldFollowThread && isThreadUserDetached == false)
+    }
+}
+
+struct ThreadTimelineSnapshot: Equatable {
+    struct Message: Equatable {
+        let id: String
+        let role: String
+        let status: String
+        let isFinal: Bool
+        let isProgressUpdate: Bool
+        let content: String
+
+        init(
+            id: String,
+            status: String,
+            isFinal: Bool,
+            content: String,
+            role: String = "assistant",
+            isProgressUpdate: Bool = false
+        ) {
+            self.id = id
+            self.role = role
+            self.status = status
+            self.isFinal = isFinal
+            self.isProgressUpdate = isProgressUpdate
+            self.content = content
+        }
+    }
+
+    struct Progress: Equatable {
+        let id: String
+        let updateCount: Int
+        let isExpanded: Bool
+        let isComplete: Bool
+        let timedOut: Bool
+        let completedFinalMessageID: String?
+    }
+
+    let activeProjectKey: String
+    let messages: [Message]
+    let progress: Progress?
+    let isRunControlVisible: Bool
+    let approvalCardID: String?
+    let clarifyCardID: String?
+    let pendingInteractionResponseID: String?
+    let ackText: String?
+    let errorText: String?
+    let voiceDraftText: String?
+    let composerMode: String
+    let composerBottomPadding: CGFloat
+    let connectionState: String
+    let runStatus: String
+
+    var messageFingerprint: String {
+        [
+            activeProjectKey,
+            "\(messages.count)",
+            messages.last?.id ?? "no-message",
+            messages.last?.role ?? "no-role",
+            messages.last?.status ?? "no-status",
+            "\(messages.last?.isFinal ?? true)",
+            "\(messages.last?.isProgressUpdate ?? false)"
+        ].joined(separator: "|")
+    }
+
+    var contentFingerprint: String {
+        let parts = [
+            activeProjectKey,
+            "\(messages.count)",
+            messages.map { "\($0.id)\u{1f}\($0.role)\u{1f}\($0.status)\u{1f}\($0.isFinal)\u{1f}\($0.isProgressUpdate)\u{1f}\($0.content)" }.joined(separator: "\u{1e}"),
+            progress.map {
+                [
+                    $0.id,
+                    "\($0.updateCount)",
+                    "\($0.isExpanded)",
+                    "\($0.isComplete)",
+                    "\($0.timedOut)",
+                    $0.completedFinalMessageID ?? "no-final"
+                ].joined(separator: "\u{1f}")
+            } ?? "no-progress",
+            "\(isRunControlVisible)",
+            approvalCardID ?? "no-approval",
+            clarifyCardID ?? "no-clarify",
+            pendingInteractionResponseID ?? "no-pending-interaction",
+            ackText ?? "no-ack",
+            errorText ?? "no-error",
+            voiceDraftText ?? "no-voice-draft",
+            composerMode,
+            "\(composerBottomPadding)",
+            connectionState,
+            runStatus
+        ]
+        return parts.joined(separator: "|")
+    }
+}
+
+struct ThreadProgressPlacement {
+    static func insertionIndex(messages: [LogosMessage], completedFinalMessageID: String?) -> Int? {
+        guard let completedFinalMessageID else { return nil }
+        return messages.firstIndex { $0.id == completedFinalMessageID }
+    }
+}
+
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var client: LogosClient
@@ -281,7 +406,7 @@ struct ContentView: View {
                         EmptyThreadGreeting(connectionState: client.connectionState)
                     }
 
-                    ForEach(client.messages) { message in
+                    ForEach(threadMessagesBeforeProgress) { message in
                         messageBubble(message)
                             .id(message.id)
                     }
@@ -294,8 +419,13 @@ struct ContentView: View {
                         .id("progress-activity")
                     }
 
-                    if voiceInput.isRecording || voiceInput.isFinalizingTranscript {
-                        DraftUserBubble(text: voiceInput.partialTranscript.isEmpty ? "Listening…" : voiceInput.partialTranscript)
+                    ForEach(threadMessagesAfterProgress) { message in
+                        messageBubble(message)
+                            .id(message.id)
+                    }
+
+                    if let voiceDraftText {
+                        DraftUserBubble(text: voiceDraftText)
                             .id("voice-draft")
                     }
 
@@ -344,7 +474,10 @@ struct ContentView: View {
                     }
             )
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentSize.height - geometry.visibleRect.maxY <= 96
+                ThreadAutoFollowPolicy.isNearBottom(
+                    distanceFromBottom: geometry.contentSize.height - geometry.visibleRect.maxY,
+                    visibleHeight: geometry.visibleRect.height
+                )
             } action: { _, newValue in
                 handleThreadBottomProximityChangedAfterLayout(newValue)
             }
@@ -365,15 +498,7 @@ struct ContentView: View {
             .onChange(of: client.activeProjectKey) { _, _ in
                 resetThreadScrollForProjectChange()
             }
-            .onChange(of: client.messages) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.progressActivity?.id) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.progressActivity?.events.count) { _, _ in handleThreadContentChanged() }
-            .onChange(of: voiceInput.partialTranscript) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.approvalCard?.id) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.clarifyCard?.id) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.ackText) { _, _ in handleThreadContentChanged() }
-            .onChange(of: client.lastError) { _, _ in handleThreadContentChanged() }
+            .onChange(of: threadTimelineSnapshot) { _, _ in handleThreadContentChanged() }
 
             if shouldShowThreadNewUpdatesButton {
                 threadNewUpdatesButton
@@ -381,6 +506,23 @@ struct ContentView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+    }
+
+    private var progressInsertionIndex: Int? {
+        ThreadProgressPlacement.insertionIndex(
+            messages: client.messages,
+            completedFinalMessageID: client.progressActivity?.completedFinalMessageID
+        )
+    }
+
+    private var threadMessagesBeforeProgress: [LogosMessage] {
+        guard let progressInsertionIndex else { return client.messages }
+        return Array(client.messages[..<progressInsertionIndex])
+    }
+
+    private var threadMessagesAfterProgress: [LogosMessage] {
+        guard let progressInsertionIndex else { return [] }
+        return Array(client.messages[progressInsertionIndex...])
     }
 
     private var shouldShowThreadNewUpdatesButton: Bool {
@@ -402,33 +544,53 @@ struct ContentView: View {
     }
 
     private var threadMessageFingerprint: String {
-        let lastMessage = client.messages.last
-        return [
-            client.activeProjectKey,
-            "\(client.messages.count)",
-            lastMessage?.id ?? "no-message"
-        ].joined(separator: "|")
+        threadTimelineSnapshot.messageFingerprint
     }
 
     private var threadContentFingerprint: String {
-        let lastMessage = client.messages.last
-        let progress = client.progressActivity
-        return [
-            client.activeProjectKey,
-            "\(client.messages.count)",
-            lastMessage?.id ?? "no-message",
-            lastMessage?.status ?? "no-status",
-            "\(lastMessage?.isFinal ?? true)",
-            progress?.id ?? "no-progress",
-            "\(progress?.events.count ?? 0)",
-            "\(shouldShowRunControl)",
-            client.runStatus.rawValue,
-            client.approvalCard?.id ?? "no-approval",
-            client.clarifyCard?.id ?? "no-clarify",
-            client.ackText ?? "no-ack",
-            client.lastError ?? "no-error",
-            voiceInput.partialTranscript
-        ].joined(separator: "|")
+        threadTimelineSnapshot.contentFingerprint
+    }
+
+    private var voiceDraftText: String? {
+        guard voiceInput.isRecording || voiceInput.isFinalizingTranscript else { return nil }
+        return voiceInput.partialTranscript.isEmpty ? "Listening…" : voiceInput.partialTranscript
+    }
+
+    private var threadTimelineSnapshot: ThreadTimelineSnapshot {
+        ThreadTimelineSnapshot(
+            activeProjectKey: client.activeProjectKey,
+            messages: client.messages.map {
+                ThreadTimelineSnapshot.Message(
+                    id: $0.id,
+                    status: $0.status,
+                    isFinal: $0.isFinal,
+                    content: $0.content,
+                    role: $0.role,
+                    isProgressUpdate: $0.isProgressUpdate
+                )
+            },
+            progress: client.progressActivity.map {
+                ThreadTimelineSnapshot.Progress(
+                    id: $0.id,
+                    updateCount: $0.updateCount,
+                    isExpanded: $0.isExpanded,
+                    isComplete: $0.isComplete,
+                    timedOut: $0.timedOut,
+                    completedFinalMessageID: $0.completedFinalMessageID
+                )
+            },
+            isRunControlVisible: shouldShowRunControl,
+            approvalCardID: client.approvalCard?.id,
+            clarifyCardID: client.clarifyCard?.id,
+            pendingInteractionResponseID: client.pendingInteractionResponseID,
+            ackText: client.ackText,
+            errorText: client.lastError,
+            voiceDraftText: voiceDraftText,
+            composerMode: String(describing: composerMode),
+            composerBottomPadding: composerMode == .text ? 16 : 28,
+            connectionState: client.connectionState.rawValue,
+            runStatus: client.runStatus.rawValue
+        )
     }
 
     private var threadNewUpdatesButton: some View {
@@ -1374,6 +1536,8 @@ struct ContentView: View {
     }
 
     private func handleThreadContentChanged(forceFollow: Bool = false) {
+        // ThreadTimelineSnapshot is the single visible-thread trigger; ThreadAutoFollowPolicy defines when to stay attached.
+        // Only detach after an intentional user scroll far enough from bottom.
         if forceFollow {
             let followedFingerprint = threadContentFingerprint
             lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
@@ -1513,7 +1677,11 @@ struct ContentView: View {
         threadFollowEpoch += 1
         let scheduledEpoch = threadFollowEpoch
         let scheduledProjectKey = client.activeProjectKey
-        let scheduledCanFollow = force || (shouldFollowThread && isThreadUserDetached == false)
+        let scheduledCanFollow = ThreadAutoFollowPolicy.shouldApplyFollow(
+            force: force,
+            shouldFollowThread: shouldFollowThread,
+            isThreadUserDetached: isThreadUserDetached
+        )
         threadFollowTask = Task { @MainActor in
             defer {
                 if scheduledEpoch == threadFollowEpoch {
@@ -1527,11 +1695,15 @@ struct ContentView: View {
                 recordFollowedSnapshot: recordFollowedSnapshot,
                 followedFingerprint: followedFingerprint
             )
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
+            scrollThreadToBottom(
+                animated: false,
+                recordFollowedSnapshot: recordFollowedSnapshot,
+                followedFingerprint: followedFingerprint
+            )
+            confirmPassiveThreadFollowIfStillAtBottom()
             if recordFollowedSnapshot == false {
-                await Task.yield()
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
-                confirmPassiveThreadFollowIfStillAtBottom()
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
                 refreshForceFollowedThreadSnapshotIfStillAtBottom()
@@ -1541,8 +1713,11 @@ struct ContentView: View {
 
     private func shouldApplyScheduledThreadFollow(epoch: Int, projectKey: String?, force: Bool, scheduledCanFollow: Bool) -> Bool {
         guard Task.isCancelled == false, epoch == threadFollowEpoch, client.activeProjectKey == projectKey else { return false }
-        if force { return true }
-        return scheduledCanFollow && shouldFollowThread && isThreadUserDetached == false
+        return ThreadAutoFollowPolicy.shouldApplyFollow(
+            force: force,
+            shouldFollowThread: scheduledCanFollow && shouldFollowThread,
+            isThreadUserDetached: isThreadUserDetached
+        )
     }
 
     private func cancelPendingThreadFollow() {
@@ -2110,7 +2285,9 @@ private struct ProgressActivityCard: View {
     let activity: ProgressActivityState
     let onToggleExpanded: () -> Void
 
-    private var latestEvent: ProgressActivityEvent? { activity.events.last }
+    private var totalEventCount: Int {
+        activity.updateCount
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -2119,10 +2296,10 @@ private struct ProgressActivityCard: View {
                     Image(systemName: activity.isExpanded ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
                         .foregroundStyle(activity.timedOut ? Color.logosRed : Color.logosAmber)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(activity.timedOut ? "Gateway timed out" : "Hermes is working")
+                        Text(activity.timedOut ? "Gateway timed out" : (activity.isComplete ? "Hermes progress" : "Hermes is working"))
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Color.logosLabel)
-                        Text("\(activity.events.count) update\(activity.events.count == 1 ? "" : "s")" + (latestEvent.map { " · \($0.kind)" } ?? ""))
+                        Text("\(totalEventCount) update\(totalEventCount == 1 ? "" : "s")")
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(Color.logosLabel3)
                     }
@@ -2136,24 +2313,25 @@ private struct ProgressActivityCard: View {
             if activity.isExpanded {
                 VStack(alignment: .leading, spacing: 7) {
                     ForEach(activity.events) { event in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(event.kind)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(Color.logosAmber)
-                                .frame(width: 72, alignment: .leading)
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
                             Text(event.text)
                                 .font(.system(size: 12, weight: .regular, design: .monospaced))
                                 .foregroundStyle(Color.logosLabel2)
-                                .lineLimit(4)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if event.count > 1 {
+                                Text("x\(event.count)")
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Color.logosAmber)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.logosAmber.opacity(0.15), in: Capsule())
+                            }
                         }
                     }
                 }
                 .padding(.top, 2)
-            } else if let latestEvent {
-                Text(latestEvent.text)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .foregroundStyle(Color.logosLabel3)
-                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 12)

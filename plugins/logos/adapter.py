@@ -46,6 +46,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS = 600
 DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS = 100
+DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS = 15 * 60
+MAX_LOGOS_STALE_TIMEOUT_SECONDS = 24 * 60 * 60
+DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS = 10.0
+LOGOS_TIMEOUT_SECONDS_ENV = "LOGOS_TIMEOUT_SECONDS"
 LOGOS_HOME_CHANNEL_ENV = "LOGOS_HOME_CHANNEL"
 LOGOS_HOME_CHANNEL_NAME_ENV = "LOGOS_HOME_CHANNEL_NAME"
 DEFAULT_LOGOS_HOME_CHANNEL = "project:default"
@@ -154,6 +158,25 @@ def _nonnegative_int(value: Any, default: int) -> int:
     if parsed < 0:
         return int(default)
     return parsed
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _configured_positive_int(*values: Any, default: int, max_value: int | None = None) -> int:
+    for value in values:
+        parsed = _positive_int_or_none(value)
+        if parsed is not None:
+            return min(parsed, int(max_value)) if max_value is not None else parsed
+    fallback = int(default)
+    return min(fallback, int(max_value)) if max_value is not None else fallback
 
 
 def _validate_config(config: PlatformConfig) -> bool:
@@ -266,9 +289,20 @@ class LogosAdapter(BasePlatformAdapter):
             final_audio_full_max_words if final_audio_full_max_words is not None else extra.get("final_audio_full_max_words"),
             DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
         )
+        self.stale_timeout_seconds = _configured_positive_int(
+            os.getenv(LOGOS_TIMEOUT_SECONDS_ENV),
+            extra.get("timeout_seconds"),
+            default=DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS,
+            max_value=MAX_LOGOS_STALE_TIMEOUT_SECONDS,
+        )
+        self._keepalive_throttle_seconds = min(
+            DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS,
+            max(1.0, float(self.stale_timeout_seconds) / 3.0),
+        )
         self.apns = APNSClient.from_env()
         self.latest_pairing_invite: PairingInvite | None = None
         self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
+        self._last_keepalive_sent_at: dict[tuple[str, str], float] = {}
 
     @staticmethod
     def envelope_from_dict(data: dict[str, Any]) -> Envelope:
@@ -283,6 +317,9 @@ class LogosAdapter(BasePlatformAdapter):
         if not self.ws_server:
             return f"ws://{self.host}:{self.port}"
         return self.ws_server.url
+
+    def client_config_payload(self) -> dict[str, Any]:
+        return {"stale_timeout_seconds": self.stale_timeout_seconds}
 
     @staticmethod
     def _is_safe_bind_host(host: str) -> bool:
@@ -602,7 +639,7 @@ class LogosAdapter(BasePlatformAdapter):
                 "request_id": envelope.request_id,
                 "device_id": envelope.device_id,
                 "project_key": envelope.project_key,
-                "payload": {"authenticated": True, "server": "logos"},
+                "payload": {"authenticated": True, "server": "logos", "client_config": self.client_config_payload()},
             }
         if envelope.type == "register_device":
             return self._handle_register_device(envelope)
@@ -660,6 +697,7 @@ class LogosAdapter(BasePlatformAdapter):
                 ],
                 "apns_configured": self.apns.config.configured,
                 "private_payloads": True,
+                "client_config": self.client_config_payload(),
             },
         }
 
@@ -772,15 +810,68 @@ class LogosAdapter(BasePlatformAdapter):
         if not context or context.get("project_key") != project_key:
             return metadata
         context_session = context.get("session_id")
-        if not context_session or str(session_id or "").strip() != context_session:
+        if not context_session:
             return metadata
         explicit_session = str(metadata.get("session_id") or metadata.get("session") or "").strip()
         if explicit_session and explicit_session != context_session:
+            return metadata
+        if not explicit_session:
+            metadata["session_id"] = context_session
+            session_id = context_session
+        if str(session_id or "").strip() != context_session:
             return metadata
         request_id = context.get("request_id")
         if request_id:
             metadata["request_id"] = request_id
         return metadata
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:  # type: ignore[override]
+        """Surface Hermes' typing loop as a Logos run keepalive."""
+
+        if self.ws_server is None:
+            return
+        metadata = dict(metadata or {})
+        project_key = self._project_key_from_chat_id(chat_id)
+        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        context_matches_project = bool(context and context.get("project_key") == project_key)
+        session_id = str(
+            metadata.get("session_id")
+            or metadata.get("session")
+            or (context.get("session_id") if context_matches_project else None)
+            or chat_id
+        )
+        request_id = _optional_nonempty_str(
+            metadata.get("request_id") or (context.get("request_id") if context_matches_project else None)
+        )
+        device_id = _optional_nonempty_str(metadata.get("device_id"))
+        throttle_key = (project_key, request_id or session_id)
+        now = time.monotonic()
+        last_sent = self._last_keepalive_sent_at.get(throttle_key)
+        if last_sent is not None and now - last_sent < self._keepalive_throttle_seconds:
+            return
+        self._last_keepalive_sent_at[throttle_key] = now
+        await self._broadcast_run_status(
+            project_key=project_key,
+            session_id=session_id,
+            status="running",
+            request_id=request_id,
+            device_id=device_id,
+            payload={
+                "keepalive": True,
+                "source": "typing",
+                "transient": True,
+                "stale_timeout_seconds": self.stale_timeout_seconds,
+            },
+        )
+
+    def _clear_request_bookkeeping(self, *, project_key: str, session_id: str | None, request_id: str | None) -> None:
+        if request_id:
+            self._last_keepalive_sent_at.pop((project_key, request_id), None)
+        if session_id:
+            self._last_keepalive_sent_at.pop((project_key, session_id), None)
+        if len(self._last_keepalive_sent_at) > 1000:
+            for key in list(self._last_keepalive_sent_at)[:500]:
+                self._last_keepalive_sent_at.pop(key, None)
 
     async def _handle_fast_direct_response(self, envelope: Envelope, result: FastModelResult) -> bool:
         response_text = result.direct_response_text
@@ -1076,25 +1167,76 @@ class LogosAdapter(BasePlatformAdapter):
         progress_id = str(provided_progress_id or f"{PROGRESS_MESSAGE_ID_PREFIX}{uuid.uuid4()}")
         progress_metadata = {**previous_metadata, **metadata}
         root_request_id = str(progress_metadata.get("request_id") or progress_id)
+        durable = kind != "gateway_status"
+        progress_kind = str(progress_metadata.get("progress_kind") or kind)
+        if durable:
+            progress_metadata.update(
+                {
+                    "source": "tool_progress",
+                    "kind": kind,
+                    "progress_kind": progress_kind,
+                    "finalized": False,
+                    "request_id": root_request_id,
+                    "transient": False,
+                }
+            )
         self._transient_progress_context[(project_key, progress_id)] = {
             "session_id": session_id,
             "metadata": progress_metadata,
             "kind": kind,
         }
+        if len(self._transient_progress_context) > 1000:
+            for stale_key in list(self._transient_progress_context)[:500]:
+                self._transient_progress_context.pop(stale_key, None)
+        stored_progress: LogosMessage | None = None
+        server_seq: int
+        if durable:
+            existing = self.store.get_message(session_id, progress_id)
+            if existing is None:
+                stored_progress = self.store.append_message(
+                    project_key=project_key,
+                    session_id=session_id,
+                    message_id=progress_id,
+                    role="assistant",
+                    content=content,
+                    metadata=progress_metadata,
+                )
+            else:
+                stored_progress = self.store.update_message(
+                    session_id=session_id,
+                    message_id=progress_id,
+                    content=content,
+                    metadata=progress_metadata,
+                )
+            if stored_progress is None:
+                return SendResult(success=False, message_id=progress_id, error="progress message not found")
+            existing_project = self.store.get_project(project_key)
+            self.store.upsert_project(
+                project_key=project_key,
+                title=existing_project.title if existing_project else project_key,
+                current_session_id=session_id,
+                lineage_root_session_id=str(progress_metadata.get("lineage_root_session_id") or progress_metadata.get("root_session_id") or session_id),
+            )
+            server_seq = stored_progress.server_seq
+        else:
+            server_seq = self.store.next_server_seq()
         frame = {
             "type": "tool_progress",
             "request_id": root_request_id,
             "project_key": project_key,
             "session_id": session_id,
-            "server_seq": self.store.next_server_seq(),
+            "server_seq": server_seq,
             "payload": {
                 "kind": kind,
-                "progress_kind": kind,
+                "progress_kind": progress_kind,
                 "message_id": progress_id,
                 "text": content,
-                "transient": True,
+                "transient": not durable,
             },
         }
+        if stored_progress is not None:
+            frame["payload"]["message"] = stored_progress.to_protocol()
+            frame["payload"]["finalized"] = False
         if self.ws_server is not None:
             await self.ws_server.broadcast(frame, project_key=project_key)
         return SendResult(success=True, message_id=progress_id, raw_response=frame)
@@ -1110,10 +1252,23 @@ class LogosAdapter(BasePlatformAdapter):
         project_key = self._project_key_from_chat_id(chat_id)
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
         metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
+        session_id = str(metadata.get("session_id") or metadata.get("session") or session_id)
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
             return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
         hermes_message_id = metadata.get("message_id") or metadata.get("hermes_message_id")
+        if hermes_message_id is not None:
+            existing = self.store.get_message(session_id, str(hermes_message_id))
+            if existing is not None and self._is_progress_message(existing):
+                final_metadata = {**metadata, "reply_to": reply_to} if reply_to else dict(metadata)
+                return await self._append_final_message_for_transient_edit(
+                    chat_id=chat_id,
+                    project_key=project_key,
+                    message_id=str(hermes_message_id),
+                    content=content,
+                    progress_message=existing,
+                    final_metadata=final_metadata,
+                )
         stored = self.store.append_message(
             project_key=project_key,
             session_id=session_id,
@@ -1151,6 +1306,11 @@ class LogosAdapter(BasePlatformAdapter):
             server_seq=stored.server_seq,
             sensitive_context={"content": content, "summary": summary.summary_text},
         )
+        self._clear_request_bookkeeping(
+            project_key=project_key,
+            session_id=session_id,
+            request_id=str(metadata.get("request_id") or "") or None,
+        )
         return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
 
     async def edit_message(
@@ -1164,14 +1324,19 @@ class LogosAdapter(BasePlatformAdapter):
         project_key = self._project_key_from_chat_id(chat_id)
         message_id_str = str(message_id)
         progress_kind = self._progress_kind_for_text(content)
+        existing = self.store.get_message_by_project(project_key, message_id_str)
         if not finalize and (progress_kind is not None or message_id_str.startswith(PROGRESS_MESSAGE_ID_PREFIX)):
+            progress_metadata: dict[str, Any] = {}
+            if existing is not None:
+                progress_metadata.update(existing.metadata)
+                progress_metadata["session_id"] = existing.session_id
             return await self._broadcast_progress_text(
                 chat_id=chat_id,
                 content=content,
+                metadata=progress_metadata,
                 request_id=message_id_str,
                 kind=progress_kind or "tool_progress",
             )
-        existing = self.store.get_message_by_project(project_key, message_id_str)
         if existing is None:
             if not finalize:
                 return SendResult(success=False, message_id=None, error="message not found")
@@ -1180,6 +1345,14 @@ class LogosAdapter(BasePlatformAdapter):
                 project_key=project_key,
                 message_id=message_id_str,
                 content=content,
+            )
+        if finalize and self._is_progress_message(existing):
+            return await self._append_final_message_for_transient_edit(
+                chat_id=chat_id,
+                project_key=project_key,
+                message_id=message_id_str,
+                content=content,
+                progress_message=existing,
             )
         updated = self.store.update_message(
             session_id=existing.session_id,
@@ -1219,6 +1392,14 @@ class LogosAdapter(BasePlatformAdapter):
                 await self.ws_server.broadcast(summary_frame, project_key=project_key)
         return SendResult(success=True, message_id=updated.message_id, raw_response=frame)
 
+    @staticmethod
+    def _is_progress_message(message: LogosMessage) -> bool:
+        metadata = dict(message.metadata or {})
+        source = str(metadata.get("source") or "")
+        if source in {"tool_progress", "progress"}:
+            return True
+        return bool(metadata.get("progress_kind") and metadata.get("finalized") is False)
+
     async def _append_final_message_for_transient_edit(
         self,
         *,
@@ -1226,19 +1407,25 @@ class LogosAdapter(BasePlatformAdapter):
         project_key: str,
         message_id: str,
         content: str,
+        progress_message: LogosMessage | None = None,
+        final_metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         context = self._transient_progress_context.pop((project_key, message_id), {})
-        session_id = str(context.get("session_id") or chat_id)
-        metadata = dict(context.get("metadata") or {})
-        for progress_key in ("progress_kind", "kind"):
+        session_id = str((progress_message.session_id if progress_message is not None else None) or context.get("session_id") or chat_id)
+        metadata = dict((progress_message.metadata if progress_message is not None else None) or context.get("metadata") or {})
+        if final_metadata:
+            metadata.update(dict(final_metadata))
+        root_request_id = str(metadata.get("request_id") or message_id)
+        for progress_key in ("progress_kind", "kind", "transient", "message_id", "hermes_message_id"):
             metadata.pop(progress_key, None)
         if metadata.get("source") in {"tool_progress", "progress"}:
             metadata.pop("source", None)
-        metadata.update({"edited_at": time.time(), "finalized": True})
+        metadata.update({"edited_at": time.time(), "finalized": True, "request_id": root_request_id})
+        final_message_id = str(metadata.pop("final_message_id", "") or f"{message_id}-final")
         stored = self.store.append_message(
             project_key=project_key,
             session_id=session_id,
-            message_id=message_id,
+            message_id=final_message_id,
             role="assistant",
             content=content,
             metadata=metadata,
@@ -1271,6 +1458,11 @@ class LogosAdapter(BasePlatformAdapter):
             message_id=stored.message_id,
             server_seq=stored.server_seq,
             sensitive_context={"content": content, "summary": summary.summary_text},
+        )
+        self._clear_request_bookkeeping(
+            project_key=project_key,
+            session_id=session_id,
+            request_id=root_request_id,
         )
         return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
 
