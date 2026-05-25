@@ -62,7 +62,11 @@ GATEWAY_PROVIDER_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 GATEWAY_CONTEXT_STATUS_RE = re.compile(
-    r"^\s*(?:⏳\s*)?(?:(?:preflight\s+compression|context\s+(?:compaction|compression))\b(?:\s*[:.\-–—]|\s+(?:started|starting|running|complete|completed|before|for|to)\b)|(?:compact|compacting|compressing)\s+context\b(?:\s*[:.\-–—]|\s+(?:before|for|to|now|started|starting|running|complete|completed)\b|$))",
+    r"^\s*(?:⏳\s*)?(?:"
+    r"preflight\s+compression\s*[:\-–—]\s*(?:compact(?:ing)?|compress(?:ing)?|context|started|starting|running|complete|completed|in progress|before continuing)\b"
+    r"|context\s+(?:compaction|compression)\s*[:\-–—]\s*(?:started|starting|running|complete|completed|in progress|compact(?:ing)?|compress(?:ing)?|before continuing)\b"
+    r"|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)\b|$)"
+    r")",
     re.IGNORECASE,
 )
 GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)

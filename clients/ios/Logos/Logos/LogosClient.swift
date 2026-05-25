@@ -1603,8 +1603,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         let rawMessages = payload["messages"] as? [[String: Any]] ?? []
         let decodedMessages = rawMessages.compactMap(LogosMessage.from(dictionary:))
         var persistedMessages: [LogosMessage] = []
+        let batchRequestID = root["request_id"] as? String
         for message in decodedMessages {
-            let progressRequestID = message.metadataRequestID ?? root["request_id"] as? String ?? message.messageID
+            let progressRequestID = progressRoutingRequestID(for: message, frameRequestID: batchRequestID)
             if message.role != "user", isSuppressedRunRequestID(progressRequestID) {
                 continue
             }
@@ -1636,7 +1637,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if payload.keys.contains("pending_interactions") {
             reconcilePendingInteractionCards(pending, projectKey: root["project_key"] as? String ?? activeProjectKey)
         }
-        let batchRequestID = root["request_id"] as? String
         let completingFinalMessage = persistedMessages.first { message in
             guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
             let finalRequestID = message.metadataRequestID ?? batchRequestID
@@ -1885,6 +1885,22 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         return isExplicitTerminalAssistantMessage(message) == false
     }
 
+    private func progressRoutingRequestID(for message: LogosMessage, frameRequestID: String?) -> String {
+        if let requestID = message.metadataRequestID, requestID.isEmpty == false {
+            return requestID
+        }
+        if let requestID = frameRequestID, requestID.isEmpty == false {
+            return requestID
+        }
+        if message.isGatewayStatusUpdate,
+           let activity = progressActivity,
+           activity.isComplete == false,
+           activity.projectKey == message.projectKey {
+            return activity.requestID
+        }
+        return message.messageID
+    }
+
     private func progressEventKind(for message: LogosMessage) -> String {
         message.isProgressUpdate ? message.progressEventKind : "gateway_status"
     }
@@ -1949,13 +1965,15 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             handleProjectStateUpdate(project: project, op: op, requestID: root["request_id"] as? String)
         }
         if let messageDict = payload["message"] as? [String: Any], let message = LogosMessage.from(dictionary: messageDict) {
-            let messageRequestID = root["request_id"] as? String ?? message.metadataRequestID
-            if message.role != "user", isSuppressedRunRequestID(messageRequestID) {
+            let frameRequestID = root["request_id"] as? String
+            let messageRequestID = message.metadataRequestID ?? frameRequestID
+            let progressRequestID = progressRoutingRequestID(for: message, frameRequestID: frameRequestID)
+            if message.role != "user", isSuppressedRunRequestID(messageRequestID) || isSuppressedRunRequestID(progressRequestID) {
                 return
             }
-            if shouldRouteMessageToProgress(message, requestID: messageRequestID ?? message.messageID) {
+            if shouldRouteMessageToProgress(message, requestID: progressRequestID) {
                 appendProgressEvent(
-                    requestID: messageRequestID ?? message.messageID,
+                    requestID: progressRequestID,
                     projectKey: message.projectKey,
                     sessionID: message.sessionID,
                     kind: progressEventKind(for: message),

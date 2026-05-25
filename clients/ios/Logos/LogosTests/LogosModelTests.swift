@@ -1651,18 +1651,28 @@ final class LogosModelTests: XCTestCase {
     }
 
     func testFinalAnswerAboutContextCompressionIsNotClassifiedAsGatewayProgress() throws {
-        let answer = try XCTUnwrap(LogosMessage.from(dictionary: [
-            "project_key": "default",
-            "session_id": "session-context-answer",
-            "message_id": "assistant-context-answer",
-            "server_seq": 78,
-            "role": "assistant",
-            "content": "Context compression is useful when a conversation grows long.",
-            "timestamp": 126.0
-        ]))
+        let finalAnswers = [
+            "Context compression is useful when a conversation grows long.",
+            "Context compression: a practical technique for long conversations.",
+            "Preflight compression: a practical technique for long conversations.",
+            "Context compression for long conversations reduces token usage.",
+            "Compacting context for long tasks can help."
+        ]
 
-        XCTAssertNil(answer.gatewayProgressKind)
-        XCTAssertFalse(answer.isProgressUpdate)
+        for (index, content) in finalAnswers.enumerated() {
+            let answer = try XCTUnwrap(LogosMessage.from(dictionary: [
+                "project_key": "default",
+                "session_id": "session-context-answer",
+                "message_id": "assistant-context-answer-\(index)",
+                "server_seq": 78 + index,
+                "role": "assistant",
+                "content": content,
+                "timestamp": 126.0
+            ]))
+
+            XCTAssertNil(answer.gatewayProgressKind, content)
+            XCTAssertFalse(answer.isProgressUpdate, content)
+        }
     }
 
     @MainActor
@@ -1680,6 +1690,28 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.events.count, 1)
         XCTAssertEqual(client.progressActivity?.events.first?.kind, "gateway_status")
         XCTAssertEqual(client.progressActivity?.events.first?.text, "⏳ Retrying in 2.6s (attempt 1/3)...")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testUnscopedLegacyGatewayStatusStateUpdateAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy unscoped status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":77,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (1 min elapsed)","timestamp":125.0}}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-unscoped-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (1 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
     }
@@ -1742,6 +1774,28 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.requestID, requestID)
         XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
         XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Retrying in 2.6s (attempt 1/3)...")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testUnscopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy unscoped status batch"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-unscoped-batch-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (2 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
     }

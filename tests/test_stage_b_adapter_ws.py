@@ -358,24 +358,33 @@ async def test_send_broadcasts_gateway_response_as_state_update(tmp_path):
 
 @pytest.mark.asyncio
 async def test_final_answer_about_context_compression_is_not_classified_as_progress(tmp_path):
-    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
-    fake_server = FakeServer()
-    adapter.ws_server = fake_server  # type: ignore[assignment]
-
-    result = await adapter.send(
-        "project:archwright",
+    final_answers = [
         "Context compression is useful when a conversation grows long.",
-        metadata={"session_id": "sess-context-answer", "request_id": "req-context-answer"},
-    )
+        "Context compression: a practical technique for long conversations.",
+        "Preflight compression: a practical technique for long conversations.",
+        "Context compression for long conversations reduces token usage.",
+        "Compacting context for long tasks can help.",
+    ]
 
-    assert result.success is True
-    assert not [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "tool_progress"]
-    state_updates = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "state_update" and item["frame"]["payload"].get("op") == "message_appended"]
-    assert state_updates
-    message = state_updates[-1]["payload"]["message"]
-    assert message["content"] == "Context compression is useful when a conversation grows long."
-    assert message["metadata"]["finalized"] is True
-    assert message["metadata"]["source"] == "hermes"
+    for index, content in enumerate(final_answers):
+        adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / f"logos-{index}.db")}))
+        fake_server = FakeServer()
+        adapter.ws_server = fake_server  # type: ignore[assignment]
+
+        result = await adapter.send(
+            "project:archwright",
+            content,
+            metadata={"session_id": "sess-context-answer", "request_id": f"req-context-answer-{index}"},
+        )
+
+        assert result.success is True
+        assert not [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "tool_progress"], content
+        state_updates = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "state_update" and item["frame"]["payload"].get("op") == "message_appended"]
+        assert state_updates
+        message = state_updates[-1]["payload"]["message"]
+        assert message["content"] == content
+        assert message["metadata"]["finalized"] is True
+        assert message["metadata"]["source"] == "hermes"
 
 
 @pytest.mark.asyncio
