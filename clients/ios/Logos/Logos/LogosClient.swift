@@ -1605,7 +1605,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         var persistedMessages: [LogosMessage] = []
         let batchRequestID = root["request_id"] as? String
         for message in decodedMessages {
-            let progressRequestID = progressRoutingRequestID(for: message, frameRequestID: batchRequestID)
+            let progressRequestID = progressRoutingRequestID(for: message, frameRequestID: batchRequestID, allowGatewayStatusActiveFallback: true)
             if message.role != "user", isSuppressedRunRequestID(progressRequestID) {
                 continue
             }
@@ -1885,18 +1885,23 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         return isExplicitTerminalAssistantMessage(message) == false
     }
 
-    private func progressRoutingRequestID(for message: LogosMessage, frameRequestID: String?) -> String {
+    private func progressRoutingRequestID(for message: LogosMessage, frameRequestID: String?, allowGatewayStatusActiveFallback: Bool = false) -> String {
         if let requestID = message.metadataRequestID, requestID.isEmpty == false {
-            return requestID
-        }
-        if let requestID = frameRequestID, requestID.isEmpty == false {
             return requestID
         }
         if message.isGatewayStatusUpdate,
            let activity = progressActivity,
            activity.isComplete == false,
            activity.projectKey == message.projectKey {
-            return activity.requestID
+            if let requestID = frameRequestID, isActiveRunRequestID(requestID) {
+                return requestID
+            }
+            if frameRequestID == nil || allowGatewayStatusActiveFallback {
+                return activity.requestID
+            }
+        }
+        if let requestID = frameRequestID, requestID.isEmpty == false {
+            return requestID
         }
         return message.messageID
     }

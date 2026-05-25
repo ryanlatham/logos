@@ -63,9 +63,12 @@ GATEWAY_PROVIDER_STATUS_RE = re.compile(
 )
 GATEWAY_CONTEXT_STATUS_RE = re.compile(
     r"^\s*(?:⏳\s*)?(?:"
-    r"preflight\s+compression\s*[:\-–—]\s*(?:compact(?:ing)?|compress(?:ing)?|context|started|starting|running|complete|completed|in progress|before continuing)\b"
-    r"|context\s+(?:compaction|compression)\s*[:\-–—]\s*(?:started|starting|running|complete|completed|in progress|compact(?:ing)?|compress(?:ing)?|before continuing)\b"
-    r"|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)\b|$)"
+    r"(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:"
+    r"(?:started|starting|running|complete|completed|in progress)(?:\.\.\.|[.!…])?\s*$"
+    r"|(?:compact(?:ing)?|compress(?:ing)?)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?)\s*$"
+    r"|context(?:\.\.\.|[.!…])?\s*$"
+    r")"
+    r"|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?|\s*)$"
     r")",
     re.IGNORECASE,
 )

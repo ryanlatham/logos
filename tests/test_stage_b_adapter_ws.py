@@ -364,6 +364,11 @@ async def test_final_answer_about_context_compression_is_not_classified_as_progr
         "Preflight compression: a practical technique for long conversations.",
         "Context compression for long conversations reduces token usage.",
         "Compacting context for long tasks can help.",
+        "Preflight compression: compacting context can reduce token usage.",
+        "Context compression: compressing older turns is useful.",
+        "Context compression: complete guide to long conversations.",
+        "Preflight compression: context management for long prompts.",
+        "Context compression: starting with a short summary can help.",
     ]
 
     for index, content in enumerate(final_answers):

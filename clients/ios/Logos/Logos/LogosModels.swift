@@ -549,7 +549,7 @@ struct LogosMessage: Identifiable, Hashable {
             return "gateway_status"
         }
         if lower.range(
-            of: #"^(?:preflight\s+compression\s*[:\-–—]\s*(?:compact(?:ing)?|compress(?:ing)?|context|started|starting|running|complete|completed|in progress|before continuing)\b|context\s+(?:compaction|compression)\s*[:\-–—]\s*(?:started|starting|running|complete|completed|in progress|compact(?:ing)?|compress(?:ing)?|before continuing)\b|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)\b|$))"#,
+            of: #"^(?:(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:(?:started|starting|running|complete|completed|in progress)(?:\.\.\.|[.!…])?\s*$|(?:compact(?:ing)?|compress(?:ing)?)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?)\s*$|context(?:\.\.\.|[.!…])?\s*$)|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?|\s*)$)"#,
             options: .regularExpression
         ) != nil {
             return "gateway_status"

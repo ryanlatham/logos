@@ -1656,7 +1656,12 @@ final class LogosModelTests: XCTestCase {
             "Context compression: a practical technique for long conversations.",
             "Preflight compression: a practical technique for long conversations.",
             "Context compression for long conversations reduces token usage.",
-            "Compacting context for long tasks can help."
+            "Compacting context for long tasks can help.",
+            "Preflight compression: compacting context can reduce token usage.",
+            "Context compression: compressing older turns is useful.",
+            "Context compression: complete guide to long conversations.",
+            "Preflight compression: context management for long prompts.",
+            "Context compression: starting with a short summary can help."
         ]
 
         for (index, content) in finalAnswers.enumerated() {
@@ -1792,6 +1797,28 @@ final class LogosModelTests: XCTestCase {
         """)
 
         XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-unscoped-batch-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (2 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testFetchScopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy fetch status batch"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"messages-get-replay","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-fetch-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-fetch-batch-still-working" })
         XCTAssertEqual(client.progressActivity?.requestID, requestID)
         XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
         XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (2 min elapsed)")
