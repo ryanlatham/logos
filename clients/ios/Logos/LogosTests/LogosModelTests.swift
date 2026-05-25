@@ -20,16 +20,19 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m2", status: "persisted", isFinal: true, content: "New")]))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello", role: "user")]))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: false, content: "Hello", isProgressUpdate: true)]))
-        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 2, isExpanded: false, isComplete: false, timedOut: false, completedFinalMessageID: nil)))
-        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: true, isComplete: false, timedOut: false, completedFinalMessageID: nil)))
-        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: true, timedOut: false, completedFinalMessageID: "session:final")))
-        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: false, timedOut: true, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 2, adapterUpdateCount: 1, isExpanded: false, isComplete: false, timedOut: false, finalStatus: nil, canRetry: false, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, adapterUpdateCount: 2, isExpanded: false, isComplete: false, timedOut: false, finalStatus: nil, canRetry: false, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, adapterUpdateCount: 1, isExpanded: true, isComplete: false, timedOut: false, finalStatus: nil, canRetry: false, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, adapterUpdateCount: 1, isExpanded: false, isComplete: true, timedOut: false, finalStatus: "complete", canRetry: false, completedFinalMessageID: "session:final")))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, adapterUpdateCount: 1, isExpanded: false, isComplete: true, timedOut: false, finalStatus: "failed", canRetry: true, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, adapterUpdateCount: 1, isExpanded: false, isComplete: false, timedOut: true, finalStatus: nil, canRetry: false, completedFinalMessageID: nil)))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(isRunControlVisible: true))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(approvalCardID: "approval-1"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(clarifyCardID: "clarify-1"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(pendingInteractionResponseID: "approval-1"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(ackText: "Thinking"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(errorText: "Error"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(connectionRetry: .init(id: "retry", attemptCount: 1, eventCount: 1, nextRetryAt: 100)))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(voiceDraftText: "Listening"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(composerMode: "text"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(composerBottomPadding: 16))
@@ -40,13 +43,14 @@ final class LogosModelTests: XCTestCase {
     private func makeThreadTimelineSnapshot(
         activeProjectKey: String = "default",
         messages: [ThreadTimelineSnapshot.Message] = [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello")],
-        progress: ThreadTimelineSnapshot.Progress? = .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: false, timedOut: false, completedFinalMessageID: nil),
+        progress: ThreadTimelineSnapshot.Progress? = .init(id: "progress", updateCount: 1, adapterUpdateCount: 1, isExpanded: false, isComplete: false, timedOut: false, finalStatus: nil, canRetry: false, completedFinalMessageID: nil),
         isRunControlVisible: Bool = false,
         approvalCardID: String? = nil,
         clarifyCardID: String? = nil,
         pendingInteractionResponseID: String? = nil,
         ackText: String? = nil,
         errorText: String? = nil,
+        connectionRetry: ThreadTimelineSnapshot.ConnectionRetry? = nil,
         voiceDraftText: String? = nil,
         composerMode: String = "paused",
         composerBottomPadding: CGFloat = 28,
@@ -57,6 +61,7 @@ final class LogosModelTests: XCTestCase {
             activeProjectKey: activeProjectKey,
             messages: messages,
             progress: progress,
+            connectionRetry: connectionRetry,
             isRunControlVisible: isRunControlVisible,
             approvalCardID: approvalCardID,
             clarifyCardID: clarifyCardID,
@@ -268,6 +273,7 @@ final class LogosModelTests: XCTestCase {
         )
         client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
+        client.settings.autoConnect = true
 
         client.connect()
 
@@ -299,6 +305,7 @@ final class LogosModelTests: XCTestCase {
         )
         client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
+        client.settings.autoConnect = true
 
         client.connect()
         client.registerDevice(apnsToken: "apns-token")
@@ -370,6 +377,7 @@ final class LogosModelTests: XCTestCase {
         )
         client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
+        client.settings.autoConnect = true
 
         client.connect()
         socket.fail(message: "Socket is not connected")
@@ -377,10 +385,15 @@ final class LogosModelTests: XCTestCase {
 
         XCTAssertEqual(client.connectionState, .error)
         XCTAssertEqual(client.lastError, "Socket is not connected")
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.connectionRetryState?.attemptCount, 1)
+        XCTAssertEqual(client.connectionRetryState?.latestError, "Socket is not connected")
+        XCTAssertEqual(client.connectionRetryState?.events.last?.text, "Connection attempt 1 failed: Socket is not connected")
+        XCTAssertNotNil(client.connectionRetryState?.nextRetryAt)
         XCTAssertTrue(socket.sentMessages.isEmpty)
     }
 
-    func testAutoConnectDefaultsOnButWaitsForFirstSuccessfulConnection() throws {
+    func testAutoConnectDefaultsOnAndAttemptsBeforeFirstSuccessfulConnection() throws {
         let suiteName = "LogosSettingsAutoConnectDefault-\(UUID().uuidString)"
         let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { userDefaults.removePersistentDomain(forName: suiteName) }
@@ -389,14 +402,82 @@ final class LogosModelTests: XCTestCase {
 
         XCTAssertTrue(settings.autoConnect)
         XCTAssertFalse(settings.hasCompletedFirstConnection)
-        XCTAssertFalse(LogosAutoConnectPolicy.shouldAttempt(
+        XCTAssertTrue(LogosAutoConnectPolicy.shouldAttempt(
             autoConnect: settings.autoConnect,
             hasCompletedFirstConnection: settings.hasCompletedFirstConnection,
             connectionState: .disconnected
         ))
     }
 
-    func testAutoConnectPolicyAttemptsOnlyAfterFirstConnectionWhenDisconnected() throws {
+    func testReconnectBackoffUsesDeterministicSchedule() {
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 1), 1)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 2), 2)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 3), 4)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 4), 8)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 5), 15)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 6), 30)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 7), 60)
+        XCTAssertEqual(LogosReconnectBackoff.delay(afterFailedAttempt: 12), 60)
+    }
+
+    @MainActor
+    func testManualReconnectClearsRetryStateAndDoesNotLeaveRunError() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
+        client.settings.secret = "test-secret"
+        client.settings.autoConnect = true
+
+        client.connect()
+        socket.fail(message: "Gateway unreachable")
+        await Task.yield()
+
+        XCTAssertNotNil(client.connectionRetryState)
+        XCTAssertEqual(client.runStatus, .idle)
+
+        client.connect()
+
+        XCTAssertNil(client.connectionRetryState)
+        XCTAssertNil(client.lastError)
+        XCTAssertEqual(client.connectionState, .connecting)
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testSuccessfulReconnectClearsRetryState() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
+        client.settings.secret = "test-secret"
+        client.settings.autoConnect = true
+
+        client.connect()
+        socket.fail(message: "Gateway unreachable")
+        await Task.yield()
+        XCTAssertNotNil(client.connectionRetryState)
+
+        client.connect()
+        socket.open()
+        await Task.yield()
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+
+        XCTAssertNil(client.connectionRetryState)
+        XCTAssertEqual(client.connectionState, .connected)
+        XCTAssertNil(client.lastError)
+    }
+
+    func testAutoConnectPolicyAttemptsWheneverEnabledAndDisconnected() throws {
+        XCTAssertTrue(LogosAutoConnectPolicy.shouldAttempt(
+            autoConnect: true,
+            hasCompletedFirstConnection: false,
+            connectionState: .disconnected
+        ))
         XCTAssertTrue(LogosAutoConnectPolicy.shouldAttempt(
             autoConnect: true,
             hasCompletedFirstConnection: true,
@@ -1280,6 +1361,25 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(contentViewSource.contains("runStatus: client.runStatus.rawValue"))
         XCTAssertTrue(contentViewSource.contains("threadMessagesBeforeProgress"))
         XCTAssertTrue(contentViewSource.contains("threadMessagesAfterProgress"))
+        XCTAssertFalse(contentViewSource.contains("RunControlStrip("))
+        XCTAssertFalse(contentViewSource.contains("private struct RunControlStrip"))
+        XCTAssertTrue(contentViewSource.contains("SpinningHourglassIcon("))
+        XCTAssertTrue(contentViewSource.contains("ConnectionRetryCard("))
+        XCTAssertTrue(contentViewSource.contains("TimelineView(.periodic"))
+        XCTAssertTrue(contentViewSource.contains("elapsedTimeText"))
+        XCTAssertFalse(contentViewSource.contains("Starts after first connection"))
+        XCTAssertTrue(contentViewSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        XCTAssertTrue(contentViewSource.contains("Text(progressTitleText)"))
+        XCTAssertTrue(contentViewSource.contains("case .complete: return \"Complete\""))
+        XCTAssertTrue(contentViewSource.contains("case .failed: return \"Failed\""))
+        XCTAssertTrue(contentViewSource.contains("case .stopped: return \"Stopped\""))
+        XCTAssertTrue(contentViewSource.contains("Text(\"Duration\")"))
+        XCTAssertTrue(contentViewSource.contains("retryProgressActivity"))
+        XCTAssertTrue(contentViewSource.contains("hasAdapterUpdates"))
+        XCTAssertTrue(contentViewSource.contains("adapterUpdateCount > 0"))
+        XCTAssertTrue(contentViewSource.contains("accessibilityReduceMotion ? AnyTransition.opacity"))
+        XCTAssertTrue(contentViewSource.contains("stopRunButton"))
+        XCTAssertTrue(contentViewSource.contains("retryRunButton"))
         XCTAssertFalse(contentViewSource.contains("action: { _, newValue in\n                handleThreadBottomProximityChanged(newValue)"))
         XCTAssertFalse(contentViewSource.contains("Text(event.kind)"))
         XCTAssertFalse(contentViewSource.contains(".lineLimit(4)"))
@@ -1518,6 +1618,483 @@ final class LogosModelTests: XCTestCase {
         XCTAssertFalse(message.isProgressUpdate)
     }
 
+    func testRetryStatusMessageIsClassifiedAsGatewayProgress() throws {
+        let retry = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "default",
+            "session_id": "session-retry-status",
+            "message_id": "assistant-retry-status",
+            "server_seq": 74,
+            "role": "assistant",
+            "content": "⏳ Retrying in 2.6s (attempt 1/3)...",
+            "timestamp": 123.0
+        ]))
+
+        XCTAssertTrue(retry.isProgressUpdate)
+        XCTAssertTrue(retry.isGatewayStatusUpdate)
+        XCTAssertEqual(retry.progressEventKind, "gateway_status")
+    }
+
+    func testProviderAbortStatusMessageIsClassifiedAsGatewayProgress() throws {
+        let providerStatus = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "default",
+            "session_id": "session-provider-status",
+            "message_id": "assistant-provider-status",
+            "server_seq": 77,
+            "role": "assistant",
+            "content": "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call.",
+            "timestamp": 125.0
+        ]))
+
+        XCTAssertTrue(providerStatus.isProgressUpdate)
+        XCTAssertTrue(providerStatus.isGatewayStatusUpdate)
+        XCTAssertEqual(providerStatus.progressEventKind, "gateway_status")
+    }
+
+    func testFinalAnswerAboutContextCompressionIsNotClassifiedAsGatewayProgress() throws {
+        let finalAnswers = [
+            "Context compression is useful when a conversation grows long.",
+            "Context compression: a practical technique for long conversations.",
+            "Preflight compression: a practical technique for long conversations.",
+            "Context compression for long conversations reduces token usage.",
+            "Compacting context for long tasks can help.",
+            "Preflight compression: compacting context can reduce token usage.",
+            "Context compression: compressing older turns is useful.",
+            "Context compression: complete guide to long conversations.",
+            "Preflight compression: context management for long prompts.",
+            "Context compression: starting with a short summary can help."
+        ]
+
+        for (index, content) in finalAnswers.enumerated() {
+            let answer = try XCTUnwrap(LogosMessage.from(dictionary: [
+                "project_key": "default",
+                "session_id": "session-context-answer",
+                "message_id": "assistant-context-answer-\(index)",
+                "server_seq": 78 + index,
+                "role": "assistant",
+                "content": content,
+                "timestamp": 126.0
+            ]))
+
+            XCTAssertNil(answer.gatewayProgressKind, content)
+            XCTAssertFalse(answer.isProgressUpdate, content)
+        }
+    }
+
+    @MainActor
+    func testRetryStatusStateUpdateAggregatesOutsideMessagesAndNeverAutoplays() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"state_update","request_id":"req-retry-status","project_key":"default","session_id":"session-retry-status","server_seq":75,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-retry-status","message_id":"assistant-retry-status","server_seq":75,"role":"assistant","content":"⏳ Retrying in 2.6s (attempt 1/3)...","timestamp":123.0}}}
+        """#)
+
+        XCTAssertTrue(client.messages.isEmpty)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-retry-status")
+        XCTAssertEqual(client.progressActivity?.events.count, 1)
+        XCTAssertEqual(client.progressActivity?.events.first?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.first?.text, "⏳ Retrying in 2.6s (attempt 1/3)...")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testUnscopedLegacyGatewayStatusStateUpdateAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy unscoped status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":77,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (1 min elapsed)","timestamp":125.0}}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-unscoped-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (1 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testProviderAbortStateUpdateStaysInProgressAndAllowsLaterFinal() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger provider abort status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let providerStatusText = "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call."
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":78,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-status","server_seq":78,"role":"assistant","content":"\(providerStatusText)","timestamp":126.0}}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-provider-status" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, providerStatusText)
+        XCTAssertEqual(client.runStatus, .running)
+        let providerFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(providerFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+
+        let finalBaselineCount = socket.sentMessages.count
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":79,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-final","server_seq":79,"role":"assistant","content":"Final answer after provider retry.","timestamp":127.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-provider-final")
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertTrue(client.messages.contains { $0.messageID == "assistant-provider-final" })
+        let finalFrames = try socket.sentMessages.dropFirst(finalBaselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = finalFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        if playbackFrames.count == 1 {
+            XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-provider-final")
+        }
+    }
+
+    @MainActor
+    func testRetryStatusMessagesBatchAggregatesForActivePromptAndNeverAutoplays() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger retry status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-retry-batch","server_seq":76,"role":"assistant","content":"⏳ Retrying in 2.6s (attempt 1/3)...","timestamp":124.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-retry-batch" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Retrying in 2.6s (attempt 1/3)...")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testUnscopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy unscoped status batch"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-unscoped-batch-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (2 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testFetchScopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("legacy fetch status batch"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"messages-get-replay","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-fetch-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-fetch-batch-still-working" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, "⏳ Still working... (2 min elapsed)")
+        XCTAssertEqual(client.runStatus, .running)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testProviderAbortMessagesBatchAggregatesForActivePromptAndNeverAutoplays() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger provider abort batch status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let providerStatusText = "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call."
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-batch","server_seq":80,"role":"assistant","content":"\(providerStatusText)","timestamp":128.0}]}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-provider-batch" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertEqual(client.progressActivity?.events.last?.kind, "gateway_status")
+        XCTAssertEqual(client.progressActivity?.events.last?.text, providerStatusText)
+        XCTAssertEqual(client.runStatus, .running)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testActiveRunAssistantStatusWithoutFinalMetadataStaysInProgressUntilExplicitFinal() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger nonterminal status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let statusText = "Preflight compression: compacting context before continuing."
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":89,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-preflight-status","server_seq":89,"role":"assistant","content":"\(statusText)","timestamp":129.0}}}
+        """)
+
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-preflight-status" })
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertEqual(client.progressActivity?.events.last?.text, statusText)
+        XCTAssertEqual(client.runStatus, .running)
+        let statusFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(statusFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+
+        let finalBaselineCount = socket.sentMessages.count
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":90,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-explicit-final","server_seq":90,"role":"assistant","content":"Explicit final after status.","timestamp":130.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-explicit-final")
+        XCTAssertTrue(client.messages.contains { $0.messageID == "assistant-explicit-final" })
+        XCTAssertEqual(client.runStatus, .idle)
+        let finalFrames = try socket.sentMessages.dropFirst(finalBaselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(finalFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+    }
+
+    @MainActor
+    func testTextSendCreatesProgressActivityBeforeFirstAdapterUpdate() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("start progress immediately"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.projectKey, "default")
+        XCTAssertEqual(client.progressActivity?.events.count, 0)
+        XCTAssertEqual(client.progressActivity?.updateCount, 0)
+        XCTAssertEqual(client.progressActivity?.adapterUpdateCount, 0)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertNil(client.progressActivity?.finalStatus)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .text("start progress immediately"))
+        XCTAssertNotNil(client.progressActivity?.startedAt)
+        XCTAssertNil(client.progressActivity?.completedAt)
+
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Adapter update arrived"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.updateCount, 1)
+        XCTAssertEqual(client.progressActivity?.adapterUpdateCount, 1)
+    }
+
+    @MainActor
+    func testProgressActivityCompletionFreezesElapsedTime() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("measure elapsed progress"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let startedAt = try XCTUnwrap(client.progressActivity?.startedAt)
+        XCTAssertNil(client.progressActivity?.completedAt)
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":91,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-elapsed-final","server_seq":91,"role":"assistant","content":"Done measuring.","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        let completedAt = try XCTUnwrap(client.progressActivity?.completedAt)
+        XCTAssertGreaterThanOrEqual(completedAt, startedAt)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+        XCTAssertNil(client.progressActivity?.retryRequest)
+    }
+
+    @MainActor
+    func testLateDifferentRequestProgressAfterCompletionDoesNotReplaceCompletedCard() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("finish before stale progress"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":92,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-completed-before-late-progress","server_seq":92,"role":"assistant","content":"Done before stale progress.","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-stale-progress-after-complete","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Stale progress after completion"}}
+        """#)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+        XCTAssertFalse(client.progressActivity?.events.contains { $0.text == "Stale progress after completion" } ?? true)
+    }
+
+    @MainActor
+    func testRunStatusErrorMarksProgressFailedAndTextRetryResendsOriginalPrompt() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("retry this exact text"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Hermes failed the request"}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        XCTAssertEqual(client.progressActivity?.failureMessage, "Hermes failed the request")
+        XCTAssertEqual(client.progressActivity?.retryRequest, .text("retry this exact text"))
+
+        let baselineCount = socket.sentMessages.count
+        XCTAssertTrue(client.retryProgressActivity())
+
+        let retryFrame = try XCTUnwrap(try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let retryPayload = try XCTUnwrap(retryFrame["payload"] as? [String: Any])
+        XCTAssertEqual(retryPayload["text"] as? String, "retry this exact text")
+        XCTAssertNotEqual(retryFrame["request_id"] as? String, requestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, nil)
+    }
+
+    @MainActor
+    func testUnscopedAdapterErrorDoesNotFailActiveProgressRun() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("keep working after unrelated adapter error"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString(#"""
+        {"type":"error","project_key":"default","payload":{"code":"server_error","message":"Unscoped adapter notice"}}
+        """#)
+
+        XCTAssertEqual(client.runStatus, .running)
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertNil(client.progressActivity?.finalStatus)
+        XCTAssertEqual(client.lastError, "Unscoped adapter notice")
+    }
+
+    @MainActor
+    func testLateFinalAfterRunErrorDoesNotCompleteFailedProgressOrAutoplay() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("fail then late final"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Hermes failed before final"}}
+        """)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":93,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-late-after-failed-run","server_seq":93,"role":"assistant","content":"Late final after failed run.","timestamp":133.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .text("fail then late final"))
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-late-after-failed-run" })
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testVoiceRetryResendsOriginalTranscriptAsFreshFinalSpeech() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendSpeech(
+            text: "retry this voice transcript",
+            isFinal: true,
+            inputID: "voice-original-failed",
+            partialSeq: 4,
+            startedAtMilliseconds: 123
+        ))
+        let speechFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
+        let requestID = try XCTUnwrap(speechFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Voice request failed"}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .speech(text: "retry this voice transcript"))
+
+        let baselineCount = socket.sentMessages.count
+        XCTAssertTrue(client.retryProgressActivity())
+
+        let retryFrame = try XCTUnwrap(try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
+        let retryPayload = try XCTUnwrap(retryFrame["payload"] as? [String: Any])
+        XCTAssertEqual(retryPayload["text"] as? String, "retry this voice transcript")
+        XCTAssertEqual(retryPayload["is_final"] as? Bool, true)
+        XCTAssertEqual(retryPayload["partial_seq"] as? Int, 0)
+        XCTAssertNotEqual(retryPayload["client_msg_id"] as? String, "voice-original-failed")
+    }
+
+    @MainActor
+    func testFinalSpeechSendCreatesProgressActivityBeforeFirstAdapterUpdate() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendSpeech(
+            text: "voice request starts progress",
+            isFinal: true,
+            inputID: "voice-progress-start",
+            partialSeq: 1,
+            startedAtMilliseconds: 123
+        ))
+        let speechFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
+        let requestID = try XCTUnwrap(speechFrame["request_id"] as? String)
+
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.events.count, 0)
+        XCTAssertEqual(client.progressActivity?.updateCount, 0)
+        XCTAssertEqual(client.progressActivity?.adapterUpdateCount, 0)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertNil(client.progressActivity?.finalStatus)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .speech(text: "voice request starts progress"))
+        XCTAssertNotNil(client.progressActivity?.startedAt)
+        XCTAssertNil(client.progressActivity?.completedAt)
+    }
+
     @MainActor
     func testStoredLegacyGatewayProgressMessagesAreFilteredAndPlaybackGuarded() throws {
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
@@ -1665,13 +2242,19 @@ final class LogosModelTests: XCTestCase {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
         XCTAssertTrue(client.sendText("new request before unscoped batch final"))
+        let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
         {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-batch-final","server_seq":86,"role":"assistant","content":"Old unscoped batch final replay.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
         """#)
 
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
         XCTAssertEqual(client.runStatus, .running)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
         XCTAssertTrue(client.messages.contains { $0.content == "new request before unscoped batch final" && $0.status == "pending" })
     }
 
@@ -1691,6 +2274,25 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.isComplete, true)
         XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-batch-metadata-final:assistant-batch-metadata-final")
         XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testMessagesBatchFinalPrefersMessageMetadataRequestIDOverBatchFetchRequestID() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("complete from replay metadata"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let runRequestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"messages-get-replay","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-replay-final-metadata-request","server_seq":88,"role":"assistant","content":"Replay final with metadata request id.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(runRequestID)"}}]}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.requestID, runRequestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-replay-final-metadata-request")
     }
 
     @MainActor
@@ -2017,7 +2619,9 @@ final class LogosModelTests: XCTestCase {
         """)
 
         XCTAssertEqual(client.runStatus, .idle)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
+        XCTAssertNil(client.progressActivity?.retryRequest)
     }
 
     @MainActor
@@ -2231,7 +2835,9 @@ final class LogosModelTests: XCTestCase {
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","payload":{"status":"idle","cancelled":true}}
         """)
         XCTAssertEqual(client.runStatus, .idle)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
+        XCTAssertNil(client.progressActivity?.retryRequest)
     }
 
     @MainActor
@@ -2268,12 +2874,20 @@ final class LogosModelTests: XCTestCase {
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"session-shared-rerun","payload":{"status":"idle","cancelled":true}}
         """)
         XCTAssertEqual(client.runStatus, .idle)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
+        XCTAssertNil(client.progressActivity?.retryRequest)
 
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-new-after-cancel","project_key":"default","session_id":"session-shared-rerun","payload":{"kind":"terminal","text":"New request is running"}}
         """#)
-        XCTAssertEqual(client.progressActivity?.requestID, "req-new-after-cancel")
+        XCTAssertEqual(client.progressActivity?.requestID, "req-old-before-cancel")
+        XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
+
+        XCTAssertTrue(client.sendText("new run after cancel"))
+        let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -2281,8 +2895,7 @@ final class LogosModelTests: XCTestCase {
         """#)
 
         XCTAssertEqual(client.runStatus, .running)
-        XCTAssertEqual(client.progressActivity?.requestID, "req-new-after-cancel")
-        XCTAssertEqual(client.progressActivity?.sessionID, "session-shared-rerun")
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
     }
@@ -2356,7 +2969,9 @@ final class LogosModelTests: XCTestCase {
         let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertEqual(playbackFrames.count, 1)
         XCTAssertEqual((playbackFrames[0]["payload"] as? [String: Any])?["message_id"] as? String, "assistant-second-final-before-progress")
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.requestID, secondRequestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-second-final-before-progress")
         XCTAssertEqual(client.runStatus, .idle)
     }
 
@@ -2374,6 +2989,8 @@ final class LogosModelTests: XCTestCase {
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
         XCTAssertTrue(client.sendText("new request before stale progress"))
+        let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -2385,7 +3002,9 @@ final class LogosModelTests: XCTestCase {
 
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertEqual(client.progressActivity?.updateCount, 0)
     }
 
     @MainActor
@@ -2532,7 +3151,9 @@ final class LogosModelTests: XCTestCase {
         {"type":"run_status","request_id":"server-cancel-status","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """#)
         XCTAssertEqual(client.runStatus, .idle)
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
+        XCTAssertNil(client.progressActivity?.retryRequest)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -2579,7 +3200,8 @@ final class LogosModelTests: XCTestCase {
         await Task.yield()
 
         XCTAssertEqual(client.connectionState, .error)
-        XCTAssertEqual(client.runStatus, .error)
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertNotNil(client.connectionRetryState)
         XCTAssertNil(client.approvalCard)
         XCTAssertNil(client.clarifyCard)
         XCTAssertNil(client.pendingInteractionResponseID)
@@ -3301,6 +3923,27 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNil(client.ackText)
         XCTAssertEqual(client.messages.last?.messageID, "fast-req-hi")
         XCTAssertEqual(client.messages.last?.content, "I'm here.")
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+    }
+
+    @MainActor
+    func testActiveFastDirectResponseWithFinalMetadataCompletesProgressAndAutoplays() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.sendText("hi"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":61,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"fast-\(requestID)","server_seq":61,"role":"assistant","content":"I'm here.","timestamp":124.0,"metadata":{"finalized":true,"source":"fast_response","request_id":"\(requestID)"}}}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+        XCTAssertTrue(client.messages.contains { $0.messageID == "fast-\(requestID)" && $0.content == "I'm here." })
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
     }

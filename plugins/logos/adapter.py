@@ -56,6 +56,22 @@ DEFAULT_LOGOS_HOME_CHANNEL = "project:default"
 DEFAULT_LOGOS_HOME_CHANNEL_NAME = "Logos"
 PROGRESS_MESSAGE_ID_PREFIX = "progress-"
 GATEWAY_STILL_WORKING_RE = re.compile(r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE)
+GATEWAY_RETRY_STATUS_RE = re.compile(r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE)
+GATEWAY_PROVIDER_STATUS_RE = re.compile(
+    r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*No response from provider for\s+.*?\bAborting call\.?\s*$",
+    re.IGNORECASE,
+)
+GATEWAY_CONTEXT_STATUS_RE = re.compile(
+    r"^\s*(?:⏳\s*)?(?:"
+    r"(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:"
+    r"(?:started|starting|running|complete|completed|in progress)(?:\.\.\.|[.!…])?\s*$"
+    r"|(?:compact(?:ing)?|compress(?:ing)?)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?)\s*$"
+    r"|context(?:\.\.\.|[.!…])?\s*$"
+    r")"
+    r"|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?|\s*)$"
+    r")",
+    re.IGNORECASE,
+)
 GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
 PROGRESS_TOOL_NAMES = {
     "airtable",
@@ -904,6 +920,7 @@ class LogosAdapter(BasePlatformAdapter):
             content=response_text,
             metadata={
                 "source": "fast_response",
+                "finalized": True,
                 "fast_response_kind": response_kind,
                 "fast_model": result.to_protocol(),
                 "request_id": envelope.request_id,
@@ -1137,7 +1154,13 @@ class LogosAdapter(BasePlatformAdapter):
         text = str(content or "").strip()
         if not text:
             return False
-        return bool(GATEWAY_STILL_WORKING_RE.match(text) or GATEWAY_LIFECYCLE_STATUS_RE.match(text))
+        return bool(
+            GATEWAY_STILL_WORKING_RE.match(text)
+            or GATEWAY_RETRY_STATUS_RE.match(text)
+            or GATEWAY_PROVIDER_STATUS_RE.match(text)
+            or GATEWAY_CONTEXT_STATUS_RE.search(text)
+            or GATEWAY_LIFECYCLE_STATUS_RE.match(text)
+        )
 
     def _progress_kind_for_text(self, content: str) -> str | None:
         if self._looks_like_tool_progress_text(content):
@@ -1256,11 +1279,15 @@ class LogosAdapter(BasePlatformAdapter):
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
             return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
+        final_metadata = dict(metadata)
+        final_metadata["finalized"] = True
+        final_metadata.setdefault("source", "hermes")
+        if reply_to:
+            final_metadata["reply_to"] = reply_to
         hermes_message_id = metadata.get("message_id") or metadata.get("hermes_message_id")
         if hermes_message_id is not None:
             existing = self.store.get_message(session_id, str(hermes_message_id))
             if existing is not None and self._is_progress_message(existing):
-                final_metadata = {**metadata, "reply_to": reply_to} if reply_to else dict(metadata)
                 return await self._append_final_message_for_transient_edit(
                     chat_id=chat_id,
                     project_key=project_key,
@@ -1275,7 +1302,7 @@ class LogosAdapter(BasePlatformAdapter):
             message_id=hermes_message_id,
             role="assistant",
             content=content,
-            metadata={**metadata, "reply_to": reply_to} if reply_to else metadata,
+            metadata=final_metadata,
         )
         frame = self._message_state_update(stored)
         summary, _summary_status = self._summary_for_message(stored)
@@ -1285,7 +1312,7 @@ class LogosAdapter(BasePlatformAdapter):
             project_key=project_key,
             title=existing_project.title if existing_project else project_key,
             current_session_id=session_id,
-            lineage_root_session_id=str(metadata.get("lineage_root_session_id") or metadata.get("root_session_id") or session_id),
+            lineage_root_session_id=str(final_metadata.get("lineage_root_session_id") or final_metadata.get("root_session_id") or session_id),
             last_seen_message_id=stored.message_id,
             last_seen_server_seq=stored.server_seq,
             last_preview=content[:240],
@@ -1309,7 +1336,7 @@ class LogosAdapter(BasePlatformAdapter):
         self._clear_request_bookkeeping(
             project_key=project_key,
             session_id=session_id,
-            request_id=str(metadata.get("request_id") or "") or None,
+            request_id=str(final_metadata.get("request_id") or "") or None,
         )
         return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
 
@@ -1354,11 +1381,15 @@ class LogosAdapter(BasePlatformAdapter):
                 content=content,
                 progress_message=existing,
             )
+        updated_metadata = dict(existing.metadata or {})
+        updated_metadata.update({"edited_at": time.time(), "finalized": bool(finalize)})
+        if finalize:
+            updated_metadata.setdefault("source", "hermes")
         updated = self.store.update_message(
             session_id=existing.session_id,
             message_id=existing.message_id,
             content=content,
-            metadata={"edited_at": time.time(), "finalized": bool(finalize)},
+            metadata=updated_metadata,
         )
         if updated is None:
             return SendResult(success=False, message_id=message_id, error="message not found")
@@ -1421,6 +1452,7 @@ class LogosAdapter(BasePlatformAdapter):
         if metadata.get("source") in {"tool_progress", "progress"}:
             metadata.pop("source", None)
         metadata.update({"edited_at": time.time(), "finalized": True, "request_id": root_request_id})
+        metadata.setdefault("source", "hermes")
         final_message_id = str(metadata.pop("final_message_id", "") or f"{message_id}-final")
         stored = self.store.append_message(
             project_key=project_key,

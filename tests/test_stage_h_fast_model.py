@@ -377,6 +377,7 @@ async def test_adapter_direct_fast_response_bypasses_gateway_and_ack(tmp_path):
     assert message_frames[-1]["request_id"] == "req-hi"
     assert assistant["content"]
     assert assistant["metadata"]["source"] == "fast_response"
+    assert assistant["metadata"]["finalized"] is True
     assert assistant["metadata"]["fast_response_kind"] == "social"
     assert assistant["metadata"]["request_id"] == "req-hi"
 

@@ -77,15 +77,26 @@ struct ThreadTimelineSnapshot: Equatable {
     struct Progress: Equatable {
         let id: String
         let updateCount: Int
+        let adapterUpdateCount: Int
         let isExpanded: Bool
         let isComplete: Bool
         let timedOut: Bool
+        let finalStatus: String?
+        let canRetry: Bool
         let completedFinalMessageID: String?
+    }
+
+    struct ConnectionRetry: Equatable {
+        let id: String
+        let attemptCount: Int
+        let eventCount: Int
+        let nextRetryAt: TimeInterval?
     }
 
     let activeProjectKey: String
     let messages: [Message]
     let progress: Progress?
+    let connectionRetry: ConnectionRetry?
     let isRunControlVisible: Bool
     let approvalCardID: String?
     let clarifyCardID: String?
@@ -111,20 +122,40 @@ struct ThreadTimelineSnapshot: Equatable {
     }
 
     var contentFingerprint: String {
+        let progressFingerprint: String
+        if let progress {
+            progressFingerprint = [
+                progress.id,
+                "\(progress.updateCount)",
+                "\(progress.adapterUpdateCount)",
+                "\(progress.isExpanded)",
+                "\(progress.isComplete)",
+                "\(progress.timedOut)",
+                progress.finalStatus ?? "no-final-status",
+                "\(progress.canRetry)",
+                progress.completedFinalMessageID ?? "no-final"
+            ].joined(separator: "\u{1f}")
+        } else {
+            progressFingerprint = "no-progress"
+        }
+        let connectionRetryFingerprint: String
+        if let connectionRetry {
+            let nextRetry = connectionRetry.nextRetryAt.map { "\($0)" } ?? "no-next-retry"
+            connectionRetryFingerprint = [
+                connectionRetry.id,
+                "\(connectionRetry.attemptCount)",
+                "\(connectionRetry.eventCount)",
+                nextRetry
+            ].joined(separator: "\u{1f}")
+        } else {
+            connectionRetryFingerprint = "no-connection-retry"
+        }
         let parts = [
             activeProjectKey,
             "\(messages.count)",
             messages.map { "\($0.id)\u{1f}\($0.role)\u{1f}\($0.status)\u{1f}\($0.isFinal)\u{1f}\($0.isProgressUpdate)\u{1f}\($0.content)" }.joined(separator: "\u{1e}"),
-            progress.map {
-                [
-                    $0.id,
-                    "\($0.updateCount)",
-                    "\($0.isExpanded)",
-                    "\($0.isComplete)",
-                    "\($0.timedOut)",
-                    $0.completedFinalMessageID ?? "no-final"
-                ].joined(separator: "\u{1f}")
-            } ?? "no-progress",
+            progressFingerprint,
+            connectionRetryFingerprint,
             "\(isRunControlVisible)",
             approvalCardID ?? "no-approval",
             clarifyCardID ?? "no-clarify",
@@ -402,7 +433,7 @@ struct ContentView: View {
                 LazyVStack(spacing: 12) {
                     timePill
 
-                    if client.messages.isEmpty, client.approvalCard == nil, client.clarifyCard == nil {
+                    if client.messages.isEmpty, client.approvalCard == nil, client.clarifyCard == nil, client.connectionRetryState == nil {
                         EmptyThreadGreeting(connectionState: client.connectionState)
                     }
 
@@ -414,7 +445,12 @@ struct ContentView: View {
                     if let progress = client.progressActivity {
                         ProgressActivityCard(
                             activity: progress,
-                            onToggleExpanded: { client.toggleProgressActivityExpanded() }
+                            isWorking: isProgressWorking,
+                            canStop: canStopProgressRun,
+                            canRetry: canRetryProgressRun,
+                            onToggleExpanded: { client.toggleProgressActivityExpanded() },
+                            onStop: { client.cancelRun() },
+                            onRetry: { _ = client.retryProgressActivity() }
                         )
                         .id("progress-activity")
                     }
@@ -429,15 +465,6 @@ struct ContentView: View {
                             .id("voice-draft")
                     }
 
-                    if shouldShowRunControl {
-                        RunControlStrip(
-                            statusText: runStatusDisplayText,
-                            canStop: client.connectionState == .connected && client.runStatus != .cancelling,
-                            onStop: { client.cancelRun() }
-                        )
-                        .id("run-control")
-                    }
-
                     interactionCards
 
                     if let ackText = client.ackText, ackText.isEmpty == false {
@@ -445,7 +472,12 @@ struct ContentView: View {
                             .id("ack")
                     }
 
-                    if let error = client.lastError, error.isEmpty == false {
+                    if let retry = client.connectionRetryState {
+                        ConnectionRetryCard(state: retry)
+                            .id(retry.id)
+                    }
+
+                    if client.connectionRetryState == nil, let error = client.lastError, error.isEmpty == false {
                         ErrorStrip(text: error)
                             .id("error")
                     }
@@ -573,10 +605,21 @@ struct ContentView: View {
                 ThreadTimelineSnapshot.Progress(
                     id: $0.id,
                     updateCount: $0.updateCount,
+                    adapterUpdateCount: $0.adapterUpdateCount,
                     isExpanded: $0.isExpanded,
                     isComplete: $0.isComplete,
                     timedOut: $0.timedOut,
+                    finalStatus: $0.finalStatus?.rawValue,
+                    canRetry: canRetryProgressRun,
                     completedFinalMessageID: $0.completedFinalMessageID
+                )
+            },
+            connectionRetry: client.connectionRetryState.map {
+                ThreadTimelineSnapshot.ConnectionRetry(
+                    id: $0.id,
+                    attemptCount: $0.attemptCount,
+                    eventCount: $0.events.count,
+                    nextRetryAt: $0.nextRetryAt
                 )
             },
             isRunControlVisible: shouldShowRunControl,
@@ -1942,8 +1985,24 @@ struct ContentView: View {
         }
     }
 
-    private var runStatusDisplayText: String {
-        client.runStatus.rawValue.replacingOccurrences(of: "_", with: " ").capitalized
+    private var isProgressWorking: Bool {
+        guard client.progressActivity?.isComplete == false else { return false }
+        switch client.runStatus {
+        case .running, .queued:
+            return true
+        case .idle, .awaitingApproval, .awaitingClarification, .cancelling, .error:
+            return false
+        }
+    }
+
+    private var canStopProgressRun: Bool {
+        shouldShowRunControl && client.connectionState == .connected && client.runStatus != .cancelling
+    }
+
+    private var canRetryProgressRun: Bool {
+        guard client.connectionState == .connected, client.runStatus == .idle else { return false }
+        guard let progress = client.progressActivity else { return false }
+        return progress.finalStatus == .failed && progress.retryRequest != nil
     }
 
     private var hasComposerDraft: Bool {
@@ -2034,6 +2093,15 @@ struct ContentView: View {
 
     private var statusChipText: String {
         if justCreatedProject { return "Project created · ready" }
+        if client.connectionRetryState != nil {
+            return "Reconnecting…"
+        }
+        if client.connectionState == .connecting {
+            return "Connecting…"
+        }
+        if client.connectionState == .error, client.runStatus != .error {
+            return "Connection error"
+        }
         switch client.runStatus {
         case .idle:
             return client.connectionState == .connected ? "Idle · live" : "Idle · disconnected"
@@ -2052,6 +2120,12 @@ struct ContentView: View {
 
     private var statusChipColor: Color {
         if justCreatedProject { return .logosGreen }
+        if client.connectionRetryState != nil || client.connectionState == .connecting {
+            return .logosAmber
+        }
+        if client.connectionState == .error, client.runStatus != .error {
+            return .logosRed
+        }
         switch client.runStatus {
         case .idle:
             return client.connectionState == .connected ? .logosGreen : .logosLabel3
@@ -2082,10 +2156,7 @@ struct ContentView: View {
     }
 
     private var autoConnectDetail: String {
-        if client.settings.hasCompletedFirstConnection {
-            return client.settings.autoConnect ? "On launch and resume" : "Off"
-        }
-        return "Starts after first connection"
+        client.settings.autoConnect ? "On launch and resume" : "Off"
     }
 
     private var connectionActionTitle: String {
@@ -2282,35 +2353,135 @@ private struct DraftUserBubble: View {
 }
 
 private struct ProgressActivityCard: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
     let activity: ProgressActivityState
+    let isWorking: Bool
+    let canStop: Bool
+    let canRetry: Bool
     let onToggleExpanded: () -> Void
+    let onStop: () -> Void
+    let onRetry: () -> Void
 
     private var totalEventCount: Int {
-        activity.updateCount
+        activity.adapterUpdateCount
+    }
+
+    private var hasAdapterUpdates: Bool {
+        activity.adapterUpdateCount > 0
+    }
+
+    private var progressTitleText: String {
+        switch activity.finalStatus {
+        case .complete: return "Complete"
+        case .failed: return "Failed"
+        case .stopped: return "Stopped"
+        case nil: return "Working"
+        }
+    }
+
+    private var accentColor: Color {
+        if activity.timedOut || activity.finalStatus == .failed { return .logosRed }
+        if activity.finalStatus == .complete { return .logosGreen }
+        if activity.finalStatus == .stopped { return .logosLabel3 }
+        return .logosAmber
+    }
+
+    private var leadingToggleTransition: AnyTransition {
+        accessibilityReduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .move(edge: .leading))
+    }
+
+    private var firstUpdateAnimation: Animation {
+        accessibilityReduceMotion
+            ? .easeInOut(duration: 0.18)
+            : .timingCurve(0.18, 0.82, 0.2, 1, duration: 0.46)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Button(action: onToggleExpanded) {
-                HStack(spacing: 9) {
-                    Image(systemName: activity.isExpanded ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
-                        .foregroundStyle(activity.timedOut ? Color.logosRed : Color.logosAmber)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(activity.timedOut ? "Gateway timed out" : (activity.isComplete ? "Hermes progress" : "Hermes is working"))
+            HStack(alignment: .center, spacing: 10) {
+                if hasAdapterUpdates || accessibilityReduceMotion {
+                    Button(action: onToggleExpanded) {
+                        Image(systemName: activity.isExpanded ? "chevron.down.circle.fill" : "chevron.right.circle.fill")
+                            .foregroundStyle(accentColor)
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("progressActivityToggle")
+                    .accessibilityLabel(activity.isExpanded ? "Collapse progress updates" : "Expand progress updates")
+                    .accessibilityHidden(hasAdapterUpdates == false)
+                    .disabled(hasAdapterUpdates == false)
+                    .opacity(hasAdapterUpdates ? 1 : 0)
+                    .transition(leadingToggleTransition)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(progressTitleText)
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Color.logosLabel)
+                        if isWorking {
+                            SpinningHourglassIcon(isAnimating: isWorking)
+                        }
+                    }
+                    if hasAdapterUpdates {
                         Text("\(totalEventCount) update\(totalEventCount == 1 ? "" : "s")")
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(Color.logosLabel3)
+                            .transition(.opacity)
                     }
-                    Spacer()
+                }
+
+                Spacer(minLength: 8)
+
+                switch activity.finalStatus {
+                case .complete, .stopped:
+                    HStack(spacing: 5) {
+                        Text("Duration")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel3)
+                        ProgressElapsedTimeLabel(activity: activity)
+                    }
+                    .frame(minWidth: 92, alignment: .trailing)
+                case .failed:
+                    ProgressElapsedTimeLabel(activity: activity)
+                        .frame(minWidth: 58)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        onRetry()
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(AmberChipButtonStyle())
+                    .disabled(canRetry == false)
+                    .opacity(canRetry ? 1 : 0.45)
+                    .accessibilityIdentifier("retryRunButton")
+                    .accessibilityLabel("Retry failed Hermes request")
+                case nil:
+                    ProgressElapsedTimeLabel(activity: activity)
+                        .frame(minWidth: 58)
+
+                    Spacer(minLength: 8)
+
+                    if canStop {
+                        Button {
+                            onStop()
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(RedChipButtonStyle())
+                        .accessibilityIdentifier("stopRunButton")
+                        .accessibilityLabel("Stop current Hermes run")
+                    }
                 }
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("progressActivityToggle")
-            .accessibilityLabel(activity.isExpanded ? "Collapse Hermes progress updates" : "Expand Hermes progress updates")
+            .animation(firstUpdateAnimation, value: hasAdapterUpdates)
 
-            if activity.isExpanded {
+            if activity.isExpanded && hasAdapterUpdates {
                 VStack(alignment: .leading, spacing: 7) {
                     ForEach(activity.events) { event in
                         HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -2337,8 +2508,118 @@ private struct ProgressActivityCard: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke((activity.timedOut ? Color.logosRed : Color.logosAmber).opacity(0.24), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(accentColor.opacity(0.24), lineWidth: 0.5))
         .accessibilityIdentifier("progressActivityCard")
+    }
+}
+
+private struct ProgressElapsedTimeLabel: View {
+    let activity: ProgressActivityState
+
+    var body: some View {
+        TimelineView(.periodic(from: Date(), by: 1)) { context in
+            Text(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(activity.isComplete ? Color.logosLabel3 : Color.logosAmber)
+                .lineLimit(1)
+                .monospacedDigit()
+                .accessibilityLabel(activity.isComplete ? "Completed in \(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))" : "Elapsed \(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))")
+        }
+    }
+}
+
+private func elapsedTimeText(startedAt: TimeInterval, completedAt: TimeInterval?, now: Date) -> String {
+    let end = completedAt ?? now.timeIntervalSince1970
+    let elapsed = max(0, Int((end - startedAt).rounded(.down)))
+    let hours = elapsed / 3600
+    let minutes = (elapsed % 3600) / 60
+    let seconds = elapsed % 60
+    if hours > 0 {
+        return "\(hours):\(String(format: "%02d", minutes)):\(String(format: "%02d", seconds))"
+    }
+    return "\(minutes):\(String(format: "%02d", seconds))"
+}
+
+private struct ConnectionRetryCard: View {
+    let state: ConnectionRetryState
+
+    var body: some View {
+        TimelineView(.periodic(from: Date(), by: 1)) { context in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.logosAmber)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reconnecting")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.logosLabel)
+                        Text("\(state.attemptCount) attempt\(state.attemptCount == 1 ? "" : "s")")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.logosLabel3)
+                    }
+                    Spacer(minLength: 8)
+                    Text(retryCountdownText(now: context.date))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.logosAmber)
+                        .monospacedDigit()
+                }
+
+                Text(state.latestError)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.logosLabel2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(state.events.suffix(3)) { event in
+                    Text(event.text)
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Color.logosLabel3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.24), lineWidth: 0.5))
+            .accessibilityIdentifier("connectionRetryCard")
+        }
+    }
+
+    private func retryCountdownText(now: Date) -> String {
+        guard let nextRetryAt = state.nextRetryAt else { return "Retrying now…" }
+        let remaining = max(0, Int(ceil(nextRetryAt - now.timeIntervalSince1970)))
+        return remaining > 0 ? "Retrying in \(remaining)s" : "Retrying now…"
+    }
+}
+
+private struct SpinningHourglassIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @State private var rotationDegrees = 0.0
+
+    let isAnimating: Bool
+
+    var body: some View {
+        Image(systemName: "hourglass")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Color.logosAmber)
+            .rotationEffect(.degrees(accessibilityReduceMotion || isAnimating == false ? 0 : rotationDegrees))
+            .accessibilityHidden(true)
+            .onAppear(perform: updateAnimation)
+            .onChange(of: isAnimating) { _, _ in updateAnimation() }
+            .onChange(of: accessibilityReduceMotion) { _, _ in updateAnimation() }
+    }
+
+    private func updateAnimation() {
+        if isAnimating, accessibilityReduceMotion == false {
+            rotationDegrees = 0
+            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                rotationDegrees = 360
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                rotationDegrees = 0
+            }
+        }
     }
 }
 
@@ -2485,35 +2766,6 @@ private struct ErrorStrip: View {
         .padding(.vertical, 9)
         .background(Color.logosRed.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosRed.opacity(0.25), lineWidth: 0.5))
-    }
-}
-
-private struct RunControlStrip: View {
-    let statusText: String
-    let canStop: Bool
-    let onStop: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Label(statusText, systemImage: "hourglass")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.logosAmber)
-            Spacer()
-            Button {
-                onStop()
-            } label: {
-                Label("Stop", systemImage: "stop.fill")
-                    .labelStyle(.titleAndIcon)
-            }
-            .buttonStyle(RedChipButtonStyle())
-            .accessibilityIdentifier("stopRunButton")
-            .accessibilityLabel("Stop current Hermes run")
-            .disabled(!canStop)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.logosAmberSoft2, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.24), lineWidth: 0.5))
     }
 }
 
