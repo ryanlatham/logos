@@ -99,6 +99,11 @@ async def open_authenticated(config: LiveConfig, *, project_key: str, timeout: f
     if not bool((hello.get("payload") or {}).get("authenticated")):
         await ws.close()
         raise RuntimeError(f"hello was not authenticated: {safe_frame_summary(hello)}")
+    client_config = (hello.get("payload") or {}).get("client_config") or {}
+    stale_timeout = client_config.get("stale_timeout_seconds")
+    if not isinstance(stale_timeout, int) or stale_timeout <= 0:
+        await ws.close()
+        raise RuntimeError(f"hello missing client_config.stale_timeout_seconds: {safe_frame_summary(hello)}")
     await send_json(ws, {
         "type": "register_device",
         "request_id": "register-" + uuid.uuid4().hex,

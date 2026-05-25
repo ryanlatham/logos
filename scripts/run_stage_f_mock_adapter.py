@@ -219,6 +219,29 @@ class StageFMockLogosAdapter(LogosAdapter):
         if content == "/mock_slow_thread_updates":
             asyncio.create_task(self._send_slow_thread_updates(chat_id))
             return
+        if content == "/mock_slow_keepalive":
+            asyncio.create_task(self._send_slow_keepalive(chat_id))
+            return
+        if content == "/mock_post_final_progress":
+            request_id = "stage-f-post-final-progress"
+            await self.send(
+                chat_id=chat_id,
+                content="Post-final progress fixture: final answer arrived first.",
+                metadata={
+                    "request_id": request_id,
+                    "source": "stage_f_mock",
+                    "session_id": "stage-f-post-final-session",
+                },
+            )
+            await asyncio.sleep(0.4)
+            await self._broadcast_progress_text(
+                chat_id=chat_id,
+                content="🔧 terminal: \"post-final-progress\"",
+                metadata={"request_id": request_id, "session_id": "stage-f-post-final-session"},
+                request_id="stage-f-post-final-progress-tool",
+                kind="tool_progress",
+            )
+            return
         if content == "/mock_tall_thread_update":
             request_id = "stage-f-tall-thread-update"
             await asyncio.sleep(0.8)
@@ -280,6 +303,29 @@ class StageFMockLogosAdapter(LogosAdapter):
             },
         )
 
+    async def _send_slow_keepalive(self, chat_id: str) -> None:
+        project_key = self._project_key_from_chat_id(chat_id)
+        request_id = "stage-f-slow-keepalive"
+        session_id = "stage-f-slow-keepalive-session"
+        for _ in range(3):
+            await self._broadcast_run_status(
+                project_key=project_key,
+                session_id=session_id,
+                status="running",
+                request_id=request_id,
+                payload={"keepalive": True, "source": "stage_f_mock", "transient": True},
+            )
+            await asyncio.sleep(2.0)
+        await self.send(
+            chat_id=chat_id,
+            content="Slow keepalive fixture complete.",
+            metadata={
+                "request_id": request_id,
+                "source": "stage_f_mock",
+                "session_id": session_id,
+            },
+        )
+
 
 async def amain() -> int:
     parser = argparse.ArgumentParser(description="Run a Stage F Logos mock adapter for iOS Simulator validation")
@@ -287,6 +333,7 @@ async def amain() -> int:
     parser.add_argument("--port", type=int, default=int(os.getenv("LOGOS_WS_PORT", "8765")))
     parser.add_argument("--secret", default=os.getenv("LOGOS_DEVICE_SECRET", "stage-f-secret"))
     parser.add_argument("--store", default=os.getenv("LOGOS_STORE_PATH", "/tmp/logos-stage-f-simulator.db"))
+    parser.add_argument("--timeout-seconds", type=int, default=None, help="Override client_config.stale_timeout_seconds for iOS stale-notice testing")
     args = parser.parse_args()
 
     if RUNTIME_IMPORT_ERROR is not None:
@@ -305,6 +352,7 @@ async def amain() -> int:
                 "host": args.host,
                 "port": args.port,
                 "store_path": str(store),
+                **({"timeout_seconds": args.timeout_seconds} if args.timeout_seconds is not None else {}),
             },
         )
     )

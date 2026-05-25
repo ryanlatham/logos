@@ -31,6 +31,10 @@ optional_env:
     description: "SQLite path for Logos adapter metadata/store"
     prompt: "Logos store path"
     password: false
+  - name: LOGOS_TIMEOUT_SECONDS
+    description: "Maximum app stale-silence timeout before Logos adds a local notice (default: 900)"
+    prompt: "Logos stale timeout seconds"
+    password: false
   - name: LOGOS_APNS_KEY_ID
     description: "Apple APNS key id for token-based auth"
     prompt: "APNS key id"

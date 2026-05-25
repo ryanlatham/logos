@@ -197,6 +197,7 @@ class LogosWebSocketServer:
                             return
                         authenticated = True
                         project_key = self.adapter._project_key_for_hello(envelope)
+                        client_config = self.adapter.client_config_payload() if hasattr(self.adapter, "client_config_payload") else {}
                         async with self._lock:
                             self._clients[websocket] = {
                                 "device_id": device_id,
@@ -215,6 +216,7 @@ class LogosWebSocketServer:
                                         "auth": "hmac-sha256",
                                         "credential_scope": auth_details.get("credential_scope", "shared_master"),
                                         "protocol_stage": "review-hardening",
+                                        "client_config": client_config,
                                     },
                                 }
                             )

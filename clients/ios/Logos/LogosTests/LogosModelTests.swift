@@ -3,6 +3,124 @@ import AVFoundation
 @testable import Logos
 
 final class LogosModelTests: XCTestCase {
+    func testThreadAutoFollowPolicyUsesViewportBasedDetachThreshold() {
+        XCTAssertEqual(ThreadAutoFollowPolicy.detachThreshold(visibleHeight: 400), 160)
+        XCTAssertEqual(ThreadAutoFollowPolicy.detachThreshold(visibleHeight: 1000), 250)
+        XCTAssertTrue(ThreadAutoFollowPolicy.isNearBottom(distanceFromBottom: 160, visibleHeight: 400))
+        XCTAssertFalse(ThreadAutoFollowPolicy.isNearBottom(distanceFromBottom: 161, visibleHeight: 400))
+        XCTAssertFalse(ThreadAutoFollowPolicy.shouldDetachForUserScroll(distanceFromBottom: 120, visibleHeight: 400))
+        XCTAssertTrue(ThreadAutoFollowPolicy.shouldDetachForUserScroll(distanceFromBottom: 220, visibleHeight: 400))
+        XCTAssertFalse(ThreadAutoFollowPolicy.shouldDetachForProgrammaticScroll(distanceFromBottom: 800, visibleHeight: 400))
+        XCTAssertTrue(ThreadAutoFollowPolicy.shouldApplyFollow(force: true, shouldFollowThread: false, isThreadUserDetached: true))
+    }
+
+    func testThreadTimelineSnapshotChangesForEveryVisibleThreadSignal() {
+        let base = makeThreadTimelineSnapshot()
+
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m2", status: "persisted", isFinal: true, content: "New")]))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello", role: "user")]))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: false, content: "Hello", isProgressUpdate: true)]))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 2, isExpanded: false, isComplete: false, timedOut: false, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: true, isComplete: false, timedOut: false, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: true, timedOut: false, completedFinalMessageID: "session:final")))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: false, timedOut: true, completedFinalMessageID: nil)))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(isRunControlVisible: true))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(approvalCardID: "approval-1"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(clarifyCardID: "clarify-1"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(pendingInteractionResponseID: "approval-1"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(ackText: "Thinking"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(errorText: "Error"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(voiceDraftText: "Listening"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(composerMode: "text"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(composerBottomPadding: 16))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(connectionState: "disconnected"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(runStatus: "cancelling"))
+    }
+
+    private func makeThreadTimelineSnapshot(
+        activeProjectKey: String = "default",
+        messages: [ThreadTimelineSnapshot.Message] = [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello")],
+        progress: ThreadTimelineSnapshot.Progress? = .init(id: "progress", updateCount: 1, isExpanded: false, isComplete: false, timedOut: false, completedFinalMessageID: nil),
+        isRunControlVisible: Bool = false,
+        approvalCardID: String? = nil,
+        clarifyCardID: String? = nil,
+        pendingInteractionResponseID: String? = nil,
+        ackText: String? = nil,
+        errorText: String? = nil,
+        voiceDraftText: String? = nil,
+        composerMode: String = "paused",
+        composerBottomPadding: CGFloat = 28,
+        connectionState: String = "connected",
+        runStatus: String = "running"
+    ) -> ThreadTimelineSnapshot {
+        ThreadTimelineSnapshot(
+            activeProjectKey: activeProjectKey,
+            messages: messages,
+            progress: progress,
+            isRunControlVisible: isRunControlVisible,
+            approvalCardID: approvalCardID,
+            clarifyCardID: clarifyCardID,
+            pendingInteractionResponseID: pendingInteractionResponseID,
+            ackText: ackText,
+            errorText: errorText,
+            voiceDraftText: voiceDraftText,
+            composerMode: composerMode,
+            composerBottomPadding: composerBottomPadding,
+            connectionState: connectionState,
+            runStatus: runStatus
+        )
+    }
+
+    func testThreadProgressPlacementUsesMatchedFinalMessageIdentity() {
+        let messages = [
+            LogosMessage(
+                projectKey: "default",
+                sessionID: "session-placement",
+                messageID: "user-1",
+                serverSeq: 1,
+                role: "user",
+                content: "Question",
+                timestamp: 1,
+                status: "persisted"
+            ),
+            LogosMessage(
+                projectKey: "default",
+                sessionID: "session-placement",
+                messageID: "assistant-final-1",
+                serverSeq: 2,
+                role: "assistant",
+                content: "First final",
+                timestamp: 2,
+                status: "persisted"
+            ),
+            LogosMessage(
+                projectKey: "default",
+                sessionID: "session-placement",
+                messageID: "assistant-final-2",
+                serverSeq: 3,
+                role: "assistant",
+                content: "Later assistant message",
+                timestamp: 3,
+                status: "persisted"
+            )
+        ]
+
+        XCTAssertEqual(
+            ThreadProgressPlacement.insertionIndex(
+                messages: messages,
+                completedFinalMessageID: "session-placement:assistant-final-1"
+            ),
+            1
+        )
+        XCTAssertNil(ThreadProgressPlacement.insertionIndex(messages: messages, completedFinalMessageID: nil))
+        XCTAssertNil(
+            ThreadProgressPlacement.insertionIndex(
+                messages: messages,
+                completedFinalMessageID: "session-placement:missing"
+            )
+        )
+    }
+
     func testProjectSwitcherLayoutCapsDropdownAndMakesOverflowScrollable() throws {
         let metrics = ProjectSwitcherLayout.metrics(
             screenHeight: 812,
@@ -54,13 +172,17 @@ final class LogosModelTests: XCTestCase {
             "metadata": [
                 "finalized": false,
                 "source": "tool_progress",
-                "progress_kind": "terminal"
+                "progress_kind": "terminal",
+                "request_id": "req-progress",
+                "transient": false
             ]
         ]))
         XCTAssertFalse(progress.isFinal)
         XCTAssertTrue(progress.hasFinalizedMetadata)
         XCTAssertEqual(progress.metadataSource, "tool_progress")
         XCTAssertEqual(progress.progressKind, "terminal")
+        XCTAssertEqual(progress.metadataRequestID, "req-progress")
+        XCTAssertEqual(progress.metadataTransient, false)
 
         let final = try XCTUnwrap(LogosMessage.from(dictionary: [
             "project_key": "alpha",
@@ -79,6 +201,39 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(final.hasFinalizedMetadata)
         XCTAssertEqual(final.metadataSource, "hermes")
         XCTAssertNil(final.progressKind)
+    }
+
+    func testSQLiteMessageStorePersistsProgressMetadata() throws {
+        let filename = "LogosTests-\(UUID().uuidString).sqlite3"
+        let store = SQLiteMessageStore(filename: filename)
+        let progress = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-progress",
+            messageID: "progress-1",
+            serverSeq: 12,
+            role: "assistant",
+            content: "🔧 terminal: \"pytest\"",
+            timestamp: 123.0,
+            status: "persisted",
+            isFinal: false,
+            hasFinalizedMetadata: true,
+            metadataSource: "tool_progress",
+            progressKind: "terminal",
+            metadataRequestID: "req-progress",
+            metadataTransient: false
+        )
+
+        store.upsert(progress)
+
+        let reloaded = SQLiteMessageStore(filename: filename)
+        let loaded = try XCTUnwrap(reloaded.loadMessages(projectKey: "default").first)
+        XCTAssertTrue(loaded.isProgressUpdate)
+        XCTAssertFalse(loaded.isFinal)
+        XCTAssertTrue(loaded.hasFinalizedMetadata)
+        XCTAssertEqual(loaded.metadataSource, "tool_progress")
+        XCTAssertEqual(loaded.progressKind, "terminal")
+        XCTAssertEqual(loaded.metadataRequestID, "req-progress")
+        XCTAssertEqual(loaded.metadataTransient, false)
     }
 
     func testSettingsReadSimulatorLaunchEnvironment() throws {
@@ -1105,16 +1260,31 @@ final class LogosModelTests: XCTestCase {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let projectDirectory = testsDirectory.deletingLastPathComponent()
         let contentViewSource = try String(contentsOf: projectDirectory.appendingPathComponent("Logos/ContentView.swift"), encoding: .utf8)
-        let messagesRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(client.messages)"))
+        let messagesRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesBeforeProgress)"))
         let progressRange = try XCTUnwrap(contentViewSource.range(of: "ProgressActivityCard("))
+        let afterProgressRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesAfterProgress)"))
 
         XCTAssertGreaterThan(progressRange.lowerBound, messagesRange.lowerBound)
-        XCTAssertTrue(contentViewSource.contains(".onChange(of: client.progressActivity?.events.count) { _, _ in handleThreadContentChanged() }"))
-        XCTAssertTrue(contentViewSource.contains(".onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertGreaterThan(afterProgressRange.lowerBound, progressRange.lowerBound)
+        XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.events.count) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.updateCount) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.isExpanded) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.isComplete) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertFalse(contentViewSource.contains(".onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertTrue(contentViewSource.contains(".onChange(of: threadTimelineSnapshot) { _, _ in handleThreadContentChanged() }"))
         XCTAssertTrue(contentViewSource.contains("threadScrollPosition.scrollTo(id: \"thread-bottom\", anchor: .bottom)"))
         XCTAssertTrue(contentViewSource.contains(".defaultScrollAnchor(.bottom, for: .alignment)"))
-        XCTAssertTrue(contentViewSource.contains("handleThreadBottomProximityChangedAfterLayout(newValue)"))
+        XCTAssertTrue(contentViewSource.contains("ThreadAutoFollowPolicy.isNearBottom"))
+        XCTAssertTrue(contentViewSource.contains("Only detach"))
+        XCTAssertTrue(contentViewSource.contains("ThreadTimelineSnapshot"))
+        XCTAssertTrue(contentViewSource.contains("runStatus: client.runStatus.rawValue"))
+        XCTAssertTrue(contentViewSource.contains("threadMessagesBeforeProgress"))
+        XCTAssertTrue(contentViewSource.contains("threadMessagesAfterProgress"))
         XCTAssertFalse(contentViewSource.contains("action: { _, newValue in\n                handleThreadBottomProximityChanged(newValue)"))
+        XCTAssertFalse(contentViewSource.contains("Text(event.kind)"))
+        XCTAssertFalse(contentViewSource.contains(".lineLimit(4)"))
+        XCTAssertFalse(contentViewSource.contains("Text(latestEvent.text)"))
+        XCTAssertTrue(contentViewSource.contains("event.count > 1"))
     }
 
     func testConnectionLifecycleRejectsStaleCallbacksAfterDisconnectOrReconnect() throws {
@@ -1243,7 +1413,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testNonFinalProgressAggregatesOutsideMessagesAndNeverAutoplays() throws {
+    func testNonFinalProgressPersistsInProgressCardOnlyAndNeverAutoplays() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
@@ -1254,16 +1424,27 @@ final class LogosModelTests: XCTestCase {
 
         XCTAssertTrue(client.messages.isEmpty)
         XCTAssertEqual(client.progressActivity?.requestID, "req-progress")
+        XCTAssertEqual(client.progressActivity?.updateCount, 1)
         XCTAssertEqual(client.progressActivity?.events.count, 1)
         XCTAssertEqual(client.progressActivity?.events.first?.text, "🔧 terminal…")
         XCTAssertEqual(client.runStatus, .running)
 
         client.handleFrameString(#"""
-        {"type":"tool_progress","request_id":"req-progress","project_key":"default","session_id":"session-progress","payload":{"kind":"terminal","text":"✅ terminal done"}}
+        {"type":"tool_progress","request_id":"req-progress","project_key":"default","session_id":"session-progress","server_seq":71,"payload":{"kind":"tool_progress","progress_kind":"terminal","message_id":"assistant-progress-1","text":"✅ terminal done","transient":false,"finalized":false,"message":{"project_key":"default","session_id":"session-progress","message_id":"assistant-progress-1","server_seq":71,"role":"assistant","content":"✅ terminal done","timestamp":124.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}}}}
         """#)
 
         XCTAssertTrue(client.messages.isEmpty)
-        XCTAssertEqual(client.progressActivity?.events.count, 2)
+        XCTAssertEqual(client.progressActivity?.updateCount, 2)
+        XCTAssertEqual(client.progressActivity?.events.count, 1)
+        XCTAssertEqual(client.progressActivity?.events.first?.text, "✅ terminal done")
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-progress","project_key":"default","session_id":"session-progress","server_seq":72,"payload":{"kind":"tool_progress","progress_kind":"terminal","message_id":"assistant-progress-2","text":"✅ terminal done","transient":false,"finalized":false,"message":{"project_key":"default","session_id":"session-progress","message_id":"assistant-progress-2","server_seq":72,"role":"assistant","content":"✅ terminal done","timestamp":125.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}}}}
+        """#)
+
+        XCTAssertEqual(client.progressActivity?.updateCount, 3)
+        XCTAssertEqual(client.progressActivity?.events.count, 1)
+        XCTAssertEqual(client.progressActivity?.events.first?.count, 2)
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
@@ -1300,9 +1481,9 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testGatewayStatusProgressDoesNotTimeoutOrAutoplayTimeoutAudio() async throws {
+    func testGatewayStatusProgressCanBecomeLocalStaleNoticeWithoutAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, progressTimeoutInterval: 0.05)
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -1311,8 +1492,8 @@ final class LogosModelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 90_000_000)
 
         XCTAssertEqual(client.runStatus, .running)
-        XCTAssertEqual(client.progressActivity?.timedOut, false)
-        XCTAssertEqual(client.progressActivity?.events.filter { $0.kind == "timeout" }.count, 0)
+        XCTAssertEqual(client.progressActivity?.timedOut, true)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
     }
@@ -1363,6 +1544,28 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testFinalMessageStartingWithGatewayWordsRemainsVisible() throws {
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        store.upsert(LogosMessage(
+            projectKey: "default",
+            sessionID: "session-final-still-working",
+            messageID: "assistant-final-still-working",
+            serverSeq: 73,
+            role: "assistant",
+            content: "Still working through the details, but here is the final answer.",
+            timestamp: 123.0,
+            status: "persisted",
+            isFinal: true,
+            hasFinalizedMetadata: true,
+            metadataSource: "hermes"
+        ))
+        let client = LogosClient(store: store)
+
+        XCTAssertEqual(client.messages.map(\.messageID), ["assistant-final-still-working"])
+        XCTAssertTrue(client.messages.first?.isProgressUpdate == false)
+    }
+
+    @MainActor
     func testMessagesBatchClearsProgressWhenFinalResponseArrivesInSameBatch() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
@@ -1378,7 +1581,24 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalOnlyClearsExistingProgressActivity() throws {
+    func testMessagesBatchKeepsDurableProgressOutOfConversationBubblesWhenFinalResponseArrivesInSameBatch() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"req-batch-durable-final","project_key":"default","session_id":"session-batch-durable-final","payload":{"messages":[{"project_key":"default","session_id":"session-batch-durable-final","message_id":"progress-batch","server_seq":81,"role":"assistant","content":"🔧 terminal: \"pytest\"","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}},{"project_key":"default","session_id":"session-batch-durable-final","message_id":"assistant-batch-final","server_seq":82,"role":"assistant","content":"Final response after progress.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
+        """#)
+
+        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.messages.map(\.messageID), ["assistant-batch-final"])
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+    }
+
+    @MainActor
+    func testMessagesBatchFinalCompletesExistingProgressActivity() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
 
@@ -1392,7 +1612,8 @@ final class LogosModelTests: XCTestCase {
         {"type":"messages_batch","request_id":"req-final-only-replay","project_key":"default","session_id":"session-final-only-replay","payload":{"messages":[{"project_key":"default","session_id":"session-final-only-replay","message_id":"assistant-final-only","server_seq":83,"role":"assistant","content":"Final response replayed without transient progress.","timestamp":125.0,"metadata":{"finalized":true}}]}}
         """#)
 
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-final-only-replay")
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
         XCTAssertEqual(client.runStatus, .idle)
         XCTAssertEqual(client.messages.count, 1)
         XCTAssertEqual(client.messages.first?.messageID, "assistant-final-only")
@@ -1440,7 +1661,58 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalizedMessageUpdatedClearsProgressAndAutoplaysFinalAutoOnce() throws {
+    func testUnscopedMessagesBatchFinalAfterNewTextBeforeProgressDoesNotIdlePrompt() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("new request before unscoped batch final"))
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-batch-final","server_seq":86,"role":"assistant","content":"Old unscoped batch final replay.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
+        """#)
+
+        XCTAssertEqual(client.runStatus, .running)
+        XCTAssertNil(client.progressActivity)
+        XCTAssertTrue(client.messages.contains { $0.content == "new request before unscoped batch final" && $0.status == "pending" })
+    }
+
+    @MainActor
+    func testMessagesBatchFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-batch-metadata-final","project_key":"default","session_id":"session-batch-metadata-final","payload":{"kind":"terminal","text":"Running before metadata final"}}
+        """#)
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","project_key":"default","session_id":"session-batch-metadata-final","payload":{"messages":[{"project_key":"default","session_id":"session-batch-metadata-final","message_id":"assistant-batch-metadata-final","server_seq":87,"role":"assistant","content":"Final with metadata request id.","timestamp":129.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-batch-metadata-final"}}]}}
+        """#)
+
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-batch-metadata-final:assistant-batch-metadata-final")
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testStateUpdateFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-state-metadata-final","project_key":"default","session_id":"session-state-metadata-final","payload":{"kind":"terminal","text":"Running before metadata state final"}}
+        """#)
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"session-state-metadata-final","server_seq":88,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-state-metadata-final","message_id":"assistant-state-metadata-final","server_seq":88,"role":"assistant","content":"State final with metadata request id.","timestamp":130.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-state-metadata-final"}}}}
+        """#)
+
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-state-metadata-final:assistant-state-metadata-final")
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testFinalizedMessageUpdatedKeepsProgressCardAndAutoplaysFinalAutoOnce() throws {
         let socket = RecordingWebSocketTask()
         let client = makeSocketBackedClient(socket: socket)
 
@@ -1455,7 +1727,11 @@ final class LogosModelTests: XCTestCase {
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":81,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-finalize-1","server_seq":81,"role":"assistant","content":"Done with the terminal work.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
-        XCTAssertNil(client.progressActivity)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-finalize")
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-finalize:assistant-finalize-1")
+        XCTAssertEqual(client.progressActivity?.events.count, 1)
+        XCTAssertEqual(client.runStatus, .idle)
         XCTAssertEqual(client.messages.count, 1)
         XCTAssertEqual(client.messages.first?.messageID, "assistant-finalize-1")
         XCTAssertTrue(client.messages.first?.isFinal == true)
@@ -1465,6 +1741,18 @@ final class LogosModelTests: XCTestCase {
         let payload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
         XCTAssertEqual(payload["message_id"] as? String, "assistant-finalize-1")
         XCTAssertEqual(payload["mode"] as? String, "final_auto")
+
+        client.handleFrameString(#"""
+        {"type":"state_update","project_key":"default","session_id":"session-finalize","server_seq":82,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-later-unrelated","server_seq":82,"role":"assistant","content":"Later unrelated assistant message.","timestamp":125.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-finalize:assistant-finalize-1")
+
+        client.handleFrameString(#"""
+        {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":83,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-second-same-request","server_seq":83,"role":"assistant","content":"A later same-request final should not move progress.","timestamp":126.0,"metadata":{"finalized":true,"source":"hermes"}}}}
+        """#)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-finalize:assistant-finalize-1")
+        let framesAfterLaterSameRequest = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(framesAfterLaterSameRequest.filter { $0["type"] as? String == "playback_audio" }.count, 1)
 
         client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":81,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-finalize-1","server_seq":81,"role":"assistant","content":"Done with the terminal work.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}}}
@@ -1496,7 +1784,7 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testProgressSilenceTimeoutIsVisualOnlyAndFinalCancelsTimeout() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, progressTimeoutInterval: 0.05)
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -1505,6 +1793,8 @@ final class LogosModelTests: XCTestCase {
         try await Task.sleep(nanoseconds: 90_000_000)
 
         XCTAssertEqual(client.progressActivity?.timedOut, true)
+        XCTAssertNotEqual(client.runStatus, .error)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
         var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         var playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertTrue(playbackFrames.isEmpty)
@@ -1515,7 +1805,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(playbackFrames.isEmpty)
 
         let socket2 = RecordingWebSocketTask()
-        let client2 = makeSocketBackedClient(socket: socket2, progressTimeoutInterval: 0.05)
+        let client2 = makeSocketBackedClient(socket: socket2, staleTimeoutInterval: 0.05)
         let baselineCount2 = socket2.sentMessages.count
         client2.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-timeout","project_key":"default","session_id":"session-cancel-timeout","payload":{"kind":"terminal","text":"Almost done"}}
@@ -1525,7 +1815,10 @@ final class LogosModelTests: XCTestCase {
         """#)
         try await Task.sleep(nanoseconds: 90_000_000)
 
-        XCTAssertNil(client2.progressActivity)
+        XCTAssertEqual(client2.progressActivity?.requestID, "req-cancel-timeout")
+        XCTAssertEqual(client2.progressActivity?.isComplete, true)
+        XCTAssertEqual(client2.progressActivity?.timedOut, false)
+        XCTAssertTrue(client2.messages.filter { $0.status == "local_notice" }.isEmpty)
         let finalFrames = try socket2.sentMessages.dropFirst(baselineCount2).map { try frameRoot(from: $0) }
         let finalPlaybackFrames = finalFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertEqual(finalPlaybackFrames.count, 1)
@@ -1534,9 +1827,137 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testServerClientConfigOverridesStaleTimeoutAndPromptSilenceAddsLocalNotice() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 30)
+
+        client.handleFrameString(#"""
+        {"type":"hello","request_id":"hello-config","payload":{"client_config":{"stale_timeout_seconds":0.05}}}
+        """#)
+        let baselineCount = socket.sentMessages.count
+        XCTAssertTrue(client.sendText("Do something slow."))
+        let sentCount = socket.sentMessages.count
+
+        try await Task.sleep(nanoseconds: 90_000_000)
+
+        XCTAssertNotEqual(client.runStatus, .error)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "text_input" }.count, 1)
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        let framesAfterSend = try socket.sentMessages.dropFirst(sentCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(framesAfterSend.filter { $0["type"] as? String == "text_input" }.isEmpty)
+    }
+
+    @MainActor
+    func testRunStatusKeepaliveResetsStaleNoticeTimer() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08)
+        XCTAssertTrue(client.sendText("Stay alive while working."))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        try await Task.sleep(nanoseconds: 40_000_000)
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
+        """)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(client.messages.filter { $0.status == "local_notice" }.isEmpty)
+
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
+        XCTAssertNotEqual(client.runStatus, .error)
+    }
+
+    @MainActor
+    func testMismatchedRunStatusKeepaliveDoesNotResetActiveStaleTimer() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08)
+        XCTAssertTrue(client.sendText("Active run should not be reset by old keepalive."))
+
+        try await Task.sleep(nanoseconds: 40_000_000)
+        client.handleFrameString(#"""
+        {"type":"run_status","request_id":"req-old-keepalive","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
+        """#)
+        try await Task.sleep(nanoseconds: 55_000_000)
+
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
+        XCTAssertNotEqual(client.runStatus, .error)
+    }
+
+    @MainActor
+    func testTerminalRunStatusAfterStaleNoticeStopsRepeatingNotices() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        XCTAssertTrue(client.sendText("This will become stale, then idle."))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
+
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle"}}
+        """)
+        try await Task.sleep(nanoseconds: 90_000_000)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
+    }
+
+    @MainActor
+    func testTimedOutProgressIgnoresUnrelatedLateProgress() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-timeout-current","project_key":"default","session_id":"session-timeout-current","payload":{"kind":"terminal","text":"Current request running"}}
+        """#)
+        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertEqual(client.progressActivity?.requestID, "req-timeout-current")
+        XCTAssertEqual(client.progressActivity?.timedOut, true)
+
+        client.handleFrameString(#"""
+        {"type":"tool_progress","request_id":"req-unrelated-late","project_key":"default","session_id":"session-timeout-current","payload":{"kind":"terminal","text":"Unrelated late progress"}}
+        """#)
+
+        XCTAssertEqual(client.progressActivity?.requestID, "req-timeout-current")
+        XCTAssertTrue(client.progressActivity?.events.last?.text.contains("not heard from Hermes") == true)
+    }
+
+    @MainActor
+    func testMessagesBatchDurableProgressDoesNotReviveLiveProgressOrStaleTimer() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"session-replay","payload":{"messages":[{"project_key":"default","session_id":"session-replay","message_id":"progress-replay","server_seq":91,"role":"assistant","content":"🔧 terminal: \"old\"","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","request_id":"req-old-replay","transient":false}}]}}
+        """#)
+        try await Task.sleep(nanoseconds: 90_000_000)
+
+        XCTAssertNil(client.progressActivity)
+        XCTAssertTrue(client.messages.isEmpty)
+        XCTAssertTrue(client.messages.filter { $0.status == "local_notice" }.isEmpty)
+    }
+
+    @MainActor
+    func testLocalStaleNoticePersistsAcrossStoreReload() async throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        let client = makeSocketBackedClient(socket: socket, store: store, staleTimeoutInterval: 0.05)
+        XCTAssertTrue(client.sendText("Persist stale notice."))
+
+        try await Task.sleep(nanoseconds: 90_000_000)
+
+        let reloaded = LogosClient(store: store, staleTimeoutInterval: 0.05)
+        XCTAssertEqual(reloaded.messages.filter { $0.status == "local_notice" }.count, 1)
+        XCTAssertEqual(reloaded.messages.first(where: { $0.status == "local_notice" })?.metadataSource, "local_notice")
+    }
+
+    @MainActor
     func testProgressTimeoutSuspendsWhileAwaitingApproval() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, progressTimeoutInterval: 0.05)
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -1557,7 +1978,7 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testCancelRunDedupeSuspendsProgressTimeoutAndAcceptsIdle() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, progressTimeoutInterval: 0.05)
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel","project_key":"default","session_id":"session-cancel","payload":{"kind":"terminal","text":"Long task running"}}
         """#)
@@ -3430,13 +3851,13 @@ private func makeSocketBackedClient(
     autoConnect: Bool = true,
     store: SQLiteMessageStore? = nil,
     audioPlayback: AudioPlaybackController = AudioPlaybackController(),
-    progressTimeoutInterval: TimeInterval = 45
+    staleTimeoutInterval: TimeInterval = 45
 ) -> LogosClient {
     let client = LogosClient(
         store: store ?? SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
         socketFactory: RecordingWebSocketTaskFactory(socket: socket),
         audioPlayback: audioPlayback,
-        progressTimeoutInterval: progressTimeoutInterval
+        staleTimeoutInterval: staleTimeoutInterval
     )
     client.settings.urlString = "ws://127.0.0.1:8765"
     client.settings.deviceID = "ios-simulator"

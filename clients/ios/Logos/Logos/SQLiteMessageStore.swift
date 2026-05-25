@@ -28,8 +28,8 @@ final class SQLiteMessageStore {
         deleteExisting(sessionID: message.sessionID, messageID: message.messageID)
         let sql = """
         INSERT INTO messages (
-            project_key, session_id, message_id, server_seq, role, content, timestamp, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return }
@@ -42,12 +42,13 @@ final class SQLiteMessageStore {
         bind(message.content, at: 6, statement: statement)
         sqlite3_bind_double(statement, 7, message.timestamp)
         bind(message.status, at: 8, statement: statement)
+        bind(metadataJSON(for: message), at: 9, statement: statement)
         sqlite3_step(statement)
     }
 
     func loadMessages(projectKey: String, limit: Int = 100) -> [LogosMessage] {
         let sql = """
-        SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status
+        SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
         FROM messages
         WHERE project_key = ?
         ORDER BY server_seq ASC, timestamp ASC
@@ -61,16 +62,20 @@ final class SQLiteMessageStore {
 
         var results: [LogosMessage] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            results.append(LogosMessage(
-                projectKey: string(at: 0, statement: statement),
-                sessionID: string(at: 1, statement: statement),
-                messageID: string(at: 2, statement: statement),
-                serverSeq: Int(sqlite3_column_int64(statement, 3)),
-                role: string(at: 4, statement: statement),
-                content: string(at: 5, statement: statement),
-                timestamp: sqlite3_column_double(statement, 6),
-                status: string(at: 7, statement: statement)
-            ))
+            let dictionary: [String: Any] = [
+                "project_key": string(at: 0, statement: statement),
+                "session_id": string(at: 1, statement: statement),
+                "message_id": string(at: 2, statement: statement),
+                "server_seq": Int(sqlite3_column_int64(statement, 3)),
+                "role": string(at: 4, statement: statement),
+                "content": string(at: 5, statement: statement),
+                "timestamp": sqlite3_column_double(statement, 6),
+                "status": string(at: 7, statement: statement),
+                "metadata": metadataDictionary(from: string(at: 8, statement: statement))
+            ]
+            if let message = LogosMessage.from(dictionary: dictionary) {
+                results.append(message)
+            }
         }
         return results
     }
@@ -96,11 +101,13 @@ final class SQLiteMessageStore {
             content TEXT NOT NULL,
             timestamp REAL NOT NULL,
             status TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (session_id, message_id)
         );
         CREATE INDEX IF NOT EXISTS idx_messages_project_seq ON messages(project_key, server_seq);
         """
         sqlite3_exec(db, sql, nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'", nil, nil, nil)
     }
 
     private func bind(_ value: String, at index: Int32, statement: OpaquePointer?) {
@@ -110,6 +117,22 @@ final class SQLiteMessageStore {
     private func string(at index: Int32, statement: OpaquePointer?) -> String {
         guard let cString = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: cString)
+    }
+
+    private func metadataJSON(for message: LogosMessage) -> String {
+        let metadata = message.metadataDictionary
+        guard JSONSerialization.isValidJSONObject(metadata),
+              let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return json
+    }
+
+    private func metadataDictionary(from json: String) -> [String: Any] {
+        guard let data = json.data(using: .utf8),
+              let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return decoded
     }
 }
 

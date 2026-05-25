@@ -215,6 +215,7 @@ The adapter reads configuration from Hermes platform config and environment vari
 | `LOGOS_PORT` | No | adapter | Bind port. Default: `8765`. |
 | `LOGOS_PUBLIC_URL` | Physical device | pairing | Public-to-phone adapter URL, normally `wss://<mac-hostname>.<tailnet-name>.ts.net/`. |
 | `LOGOS_STORE_PATH` | No | adapter/tests | SQLite mirror-store path override. |
+| `LOGOS_TIMEOUT_SECONDS` | No | adapter/app | Stale-silence threshold sent to the iOS app as `client_config.stale_timeout_seconds`. Default: `900`; config fallback: `platforms.logos.extra.timeout_seconds`. |
 | `LOGOS_ALLOWED_USERS` | No | gateway auth | Comma-separated device IDs allowed through gateway auth. QR-paired devices are also bridged into Hermes gateway authorization. |
 | `LOGOS_ALLOW_ALL_USERS` | Dev only | gateway auth | Allow any authenticated device ID. Useful only for local throwaway testing. |
 | `LOGOS_FAST_MODEL_PROVIDER` | No | fast model | `deterministic` or `ollama`. |
@@ -276,7 +277,7 @@ In Xcode:
    | `LOGOS_MESSAGE_STORE_FILENAME` | `LogosSimulator.sqlite3` |
 
 5. Run the app.
-6. Send a text message. The mock adapter should echo deterministic responses and support mock approval/clarification fixtures.
+6. Send a text message. The mock adapter should echo deterministic responses and support mock approval/clarification fixtures. Useful fixture prompts include `/mock_slow_keepalive`, `/mock_post_final_progress`, `/mock_delayed_thread_updates`, `/mock_approval`, and `/mock_clarify`.
 
 Run simulator tests:
 
@@ -330,6 +331,7 @@ LOGOS_SECRET="$(openssl rand -hex 32)"
   printf 'LOGOS_DEVICE_SECRET=%s\n' "$LOGOS_SECRET"
   printf 'LOGOS_HOST=127.0.0.1\n'
   printf 'LOGOS_PORT=8765\n'
+  printf 'LOGOS_TIMEOUT_SECONDS=900\n'
   printf 'LOGOS_TTS_PROVIDER=deterministic\n'
   printf 'LOGOS_FAST_MODEL_PROVIDER=deterministic\n'
 } >> "$ENV_FILE"
@@ -337,6 +339,7 @@ LOGOS_SECRET="$(openssl rand -hex 32)"
 "$HERMES_BIN" config set platforms.logos.enabled true
 "$HERMES_BIN" config set platforms.logos.extra.host 127.0.0.1
 "$HERMES_BIN" config set platforms.logos.extra.port 8765
+"$HERMES_BIN" config set platforms.logos.extra.timeout_seconds 900
 ```
 
 For intelligible local TTS on macOS, change the provider:
@@ -406,6 +409,7 @@ Run all live smoke scenarios only when your Hermes model/tool configuration can 
 Notes:
 
 - The script redacts the device secret in output.
+- `LOGOS_TIMEOUT_SECONDS` changes the app's stale-silence notice threshold; it does not change Hermes' own agent inactivity limits.
 - The `approval` scenario intentionally asks Hermes to attempt a command that should require approval, then denies it through the Logos protocol.
 - If this fails before `hello` authenticates, check `LOGOS_DEVICE_SECRET` and gateway logs first. Do not debug Swift until the adapter itself passes.
 
