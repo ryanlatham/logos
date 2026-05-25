@@ -2,13 +2,13 @@
 
 Last updated: 2026-05-22T20:42:43-07:00
 
-Workspace: `/Users/ryan/Development/logos`
+Workspace: `/path/to/logos`
 
 Kanban board: `logos-agent-voice-app`
 
-Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 17 Pro
+Simulator: `<simulator-udid>` / iPhone 17 Pro
 
-Bundle id: `com.ryan.logos`
+Bundle id: `dev.logos.app`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 
@@ -23,7 +23,7 @@ Automated verification is green:
 - Live Logos smoke against real gateway/plugin: text, TTS, clarification, approval all passed
 - Xcode/Simulator model tests: `LogosModelTests` 67 passed, `** TEST SUCCEEDED **`; focused UI smoke previously passed.
 
-The only remaining validation is the physical/manual hardware pass Ryan said he will run after handoff: real iPhone microphone, physical audio, device network reachability, signing/device install, and APNS delivery.
+The only remaining validation is the physical/manual hardware pass the maintainer said he will run after handoff: real iPhone microphone, physical audio, device network reachability, signing/device install, and APNS delivery.
 
 ## What is implemented
 
@@ -33,7 +33,7 @@ The only remaining validation is the physical/manual hardware pass Ryan said he 
 - WebSocket server with HMAC/shared-secret authentication.
 - Config/database enrollment, including local development `allow_all_users` support.
 - Adapter message routing through Hermes gateway platform events rather than direct agent construction.
-- Project/session persistence in `/Users/ryan/.hermes/logos/logos.db`.
+- Project/session persistence in `$HERMES_HOME/logos/logos.db`.
 - Message mirroring, summaries, project state, pending interaction storage, and reconnect replay.
 - Fast acknowledgment/intent/summary path backed by configured local Ollama model `gemma3:12b`.
 - Real TTS provider support with `macos_say` producing WAV chunks.
@@ -61,7 +61,7 @@ The only remaining validation is the physical/manual hardware pass Ryan said he 
 Command:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python scripts/logos_live_smoke.py --scenario all --timeout 360
 ```
 
@@ -69,7 +69,7 @@ Result: passed.
 
 Observed live scenarios:
 
-- `text`: authenticated to `ws://ryans-mac-studio:8765`, received exact sentinel response through live Hermes path.
+- `text`: authenticated to `ws://your-mac:8765`, received exact sentinel response through live Hermes path.
 - `tts`: received `audio/wav` chunks from `macos_say_tts`; first bytes had `RIFF` prefix.
 - `clarify`: live Hermes clarify request surfaced question/choices and resumed after Logos answer.
 - `approval`: live Hermes approval request surfaced command preview and accepted Logos deny response.
@@ -88,7 +88,7 @@ device_secret_present: True
 Gateway status:
 
 ```text
-Launchd plist: /Users/ryan/Library/LaunchAgents/ai.hermes.gateway.plist
+Launchd plist: ~/Library/LaunchAgents/ai.hermes.gateway.plist
 Gateway service is loaded
 PID: 96285
 LastExitStatus: 0
@@ -97,7 +97,7 @@ LastExitStatus: 0
 ### Python verification
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m pytest tests -q
 python -m compileall -q plugins/logos scripts tests
 ```
@@ -114,7 +114,7 @@ compileall passed with no output
 Mock adapter for deterministic UI tests:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 PYTHONPATH=plugins python scripts/run_stage_f_mock_adapter.py \
   --host 127.0.0.1 \
   --port 8766 \
@@ -124,11 +124,11 @@ PYTHONPATH=plugins python scripts/run_stage_f_mock_adapter.py \
 Test command:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 xcodebuild test \
   -project clients/ios/Logos/Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A'
+  -destination 'platform=iOS Simulator,id=<simulator-udid>'
 ```
 
 Result:
@@ -141,7 +141,7 @@ LogosModelTests: 67 tests, 0 failures
 Result bundle:
 
 ```text
-/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.22_20-42-18--0700.xcresult
+~/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.22_20-42-18--0700.xcresult
 ```
 
 Focused UI smoke uses the mock adapter on port `8766`; the latest backend and model-test gates above did not require a persistent mock adapter.
@@ -172,7 +172,7 @@ Material blockers found during review were fixed before final verification: edit
 Open:
 
 ```bash
-open /Users/ryan/Development/logos/docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html
+open /path/to/logos/docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html
 ```
 
 Use that guide for the physical iPhone pass. It covers:
@@ -189,7 +189,7 @@ Use that guide for the physical iPhone pass. It covers:
 
 ## Known limits / deferred work
 
-- Physical iPhone validation remains Ryan-owned after this handoff.
+- Physical iPhone validation remains tester-owned after this handoff.
 - APNS live delivery cannot be honestly completed without the physical/device-signing path.
 - Apple Watch relay remains post-v1/deferred.
 - `allow_all_users: true` is a development validation convenience. Before using Logos as a stricter always-on personal agent surface, switch back to explicit device enrollment/allow-listing.
@@ -197,4 +197,4 @@ Use that guide for the physical iPhone pass. It covers:
 
 ## Kanban disposition
 
-The implementation/automation cards are closed. The physical/manual-validation Kanban card is blocked on Ryan's hardware test, with this report and the HTML guide as the handoff artifact.
+The implementation/automation cards are closed. The physical/manual-validation Kanban card is blocked on the tester's hardware test, with this report and the HTML guide as the handoff artifact.

@@ -167,7 +167,7 @@ Expected after implementation: PASS.
 Run:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m pytest tests/test_stage_g_tts.py tests/test_stage_e_interactions.py tests/test_logos_pairing.py -q
 cd clients/ios/Logos
 xcodebuild -project Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:LogosTests/LogosModelTests test

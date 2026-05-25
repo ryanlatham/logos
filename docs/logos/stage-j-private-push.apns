@@ -1,5 +1,5 @@
 {
-  "Simulator Target Bundle": "com.ryan.logos",
+  "Simulator Target Bundle": "dev.logos.app",
   "aps": {
     "alert": {
       "title": "Hermes finished",

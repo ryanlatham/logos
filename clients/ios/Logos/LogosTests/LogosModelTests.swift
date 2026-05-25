@@ -101,7 +101,7 @@ final class LogosModelTests: XCTestCase {
 
         let settings = LogosSettings(environment: [:], userDefaults: userDefaults)
 
-        XCTAssertEqual(settings.urlString, "wss://studio.tail752253.ts.net/")
+        XCTAssertEqual(settings.urlString, "wss://your-mac.your-tailnet.ts.net/")
     }
 
     @MainActor
@@ -111,7 +111,7 @@ final class LogosModelTests: XCTestCase {
             store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
             socketFactory: RecordingWebSocketTaskFactory(socket: socket)
         )
-        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
 
         client.connect()
@@ -142,7 +142,7 @@ final class LogosModelTests: XCTestCase {
             store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
             socketFactory: RecordingWebSocketTaskFactory(socket: socket)
         )
-        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
 
         client.connect()
@@ -189,7 +189,7 @@ final class LogosModelTests: XCTestCase {
             store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
             socketFactory: RecordingWebSocketTaskFactory(socket: socket)
         )
-        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "wrong-secret"
 
         client.connect()
@@ -213,7 +213,7 @@ final class LogosModelTests: XCTestCase {
             store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
             socketFactory: RecordingWebSocketTaskFactory(socket: socket)
         )
-        client.settings.urlString = "wss://studio.tail752253.ts.net/"
+        client.settings.urlString = "wss://your-mac.your-tailnet.ts.net/"
         client.settings.secret = "test-secret"
 
         client.connect()
@@ -303,7 +303,7 @@ final class LogosModelTests: XCTestCase {
     func testPairingRouteParsesVersionedBase64URLFragment() throws {
         let payload: [String: Any] = [
             "v": 1,
-            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "adapter_url": "wss://your-mac.your-tailnet.ts.net/",
             "device_id": "iphone-17-pro",
             "pair_token": "one-time-token",
             "expires_at": 1_778_760_000.0,
@@ -313,7 +313,7 @@ final class LogosModelTests: XCTestCase {
 
         let route = try XCTUnwrap(LogosPairingRoute.from(url: url))
 
-        XCTAssertEqual(route.adapterURL, "wss://studio.tail752253.ts.net/")
+        XCTAssertEqual(route.adapterURL, "wss://your-mac.your-tailnet.ts.net/")
         XCTAssertEqual(route.deviceID, "iphone-17-pro")
         XCTAssertEqual(route.pairToken, "one-time-token")
         XCTAssertEqual(route.expiresAt, Date(timeIntervalSince1970: 1_778_760_000.0))
@@ -324,7 +324,7 @@ final class LogosModelTests: XCTestCase {
     func testPairingRouteRejectsPayloadWithoutTokenOrSecret() throws {
         let payload: [String: Any] = [
             "v": 1,
-            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "adapter_url": "wss://your-mac.your-tailnet.ts.net/",
             "device_id": "iphone-17-pro"
         ]
         let url = try XCTUnwrap(URL(string: "logos://pair#\(base64URLPayload(payload))"))
@@ -336,7 +336,7 @@ final class LogosModelTests: XCTestCase {
     func testPairingRouteRejectsDirectDeviceSecretPayload() throws {
         let payload: [String: Any] = [
             "v": 1,
-            "adapter_url": "wss://studio.tail752253.ts.net/",
+            "adapter_url": "wss://your-mac.your-tailnet.ts.net/",
             "device_id": "iphone-17-pro",
             "device_secret": "do-not-accept-secrets-in-qr"
         ]
@@ -347,7 +347,7 @@ final class LogosModelTests: XCTestCase {
 
     func testPairingRouteRequiresSecureTransportExceptLoopback() throws {
         let secure = LogosPairingRoute(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             pairToken: "one-time-token",
             deviceSecret: nil,
@@ -381,7 +381,7 @@ final class LogosModelTests: XCTestCase {
         let socket = RecordingWebSocketTask()
         let exchanger = RecordingPairingCredentialExchanger()
         exchanger.credential = LogosPairingCredential(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             deviceSecret: "per-device-secret"
         )
@@ -391,7 +391,7 @@ final class LogosModelTests: XCTestCase {
             pairingExchanger: exchanger
         )
         let route = LogosPairingRoute(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             pairToken: "one-time-token",
             deviceSecret: nil,
@@ -402,7 +402,7 @@ final class LogosModelTests: XCTestCase {
         await client.applyPairingRoute(route)
 
         XCTAssertEqual(exchanger.routes, [route])
-        XCTAssertEqual(client.settings.urlString, "wss://studio.tail752253.ts.net/")
+        XCTAssertEqual(client.settings.urlString, "wss://your-mac.your-tailnet.ts.net/")
         XCTAssertEqual(client.settings.deviceID, "iphone-17-pro")
         XCTAssertEqual(client.settings.secret, "per-device-secret")
         XCTAssertTrue(client.settings.autoConnect)
@@ -422,7 +422,7 @@ final class LogosModelTests: XCTestCase {
             socketFactory: RecordingWebSocketTaskFactory(socket: socket),
             pairingExchanger: exchanger
         )
-        client.settings.urlString = "wss://old-adapter.tail752253.ts.net/"
+        client.settings.urlString = "wss://old-adapter.your-tailnet.ts.net/"
         client.settings.deviceID = "old-device"
         client.settings.secret = "old-secret"
         client.connect()
@@ -432,7 +432,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.connectionState, .connected)
 
         let route = LogosPairingRoute(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             pairToken: "one-time-token",
             deviceSecret: nil,
@@ -443,7 +443,7 @@ final class LogosModelTests: XCTestCase {
 
         XCTAssertEqual(exchanger.routes, [route])
         XCTAssertEqual(client.connectionState, .connected)
-        XCTAssertEqual(client.settings.urlString, "wss://old-adapter.tail752253.ts.net/")
+        XCTAssertEqual(client.settings.urlString, "wss://old-adapter.your-tailnet.ts.net/")
         XCTAssertEqual(client.settings.deviceID, "old-device")
         XCTAssertEqual(client.settings.secret, "old-secret")
         XCTAssertTrue(client.lastError?.contains("Logos pairing failed") == true)
@@ -455,7 +455,7 @@ final class LogosModelTests: XCTestCase {
         let socket = RecordingWebSocketTask()
         let exchanger = RecordingPairingCredentialExchanger()
         exchanger.credential = LogosPairingCredential(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             deviceSecret: "per-device-secret"
         )
@@ -465,7 +465,7 @@ final class LogosModelTests: XCTestCase {
             pairingExchanger: exchanger
         )
         let route = LogosPairingRoute(
-            adapterURL: "wss://studio.tail752253.ts.net/",
+            adapterURL: "wss://your-mac.your-tailnet.ts.net/",
             deviceID: "iphone-17-pro",
             pairToken: "one-time-token",
             deviceSecret: nil,

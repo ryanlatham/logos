@@ -76,7 +76,7 @@ Run targeted Python/iOS tests, then:
 
 ```bash
 python -m pytest tests -q
-xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' -only-testing:LogosTests/LogosModelTests test
+xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,id=<simulator-udid>' -only-testing:LogosTests/LogosModelTests test
 ```
 
 ## Risks

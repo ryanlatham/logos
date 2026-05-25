@@ -1,6 +1,6 @@
 # Logos Real Spectrum Analyzer Implementation Plan
 
-> **For Hermes:** Planning only. Do not implement until Ryan explicitly approves. If approved, use TDD and keep the first implementation narrowly scoped to the iOS playback overlay.
+> **For Hermes:** Planning only. Do not implement until the maintainer explicitly approves. If approved, use TDD and keep the first implementation narrowly scoped to the iOS playback overlay.
 
 **Goal:** Replace the current fake/static audio bars with a real, continuously updating spectrum analyzer driven by decoded playback PCM and Accelerate/vDSP FFT analysis.
 
@@ -388,18 +388,18 @@ Expose a narrow internal method like `refreshPlaybackSpectrumForTesting(audioID:
 Python suite:
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 ```
 
 iOS unit suite:
 
 ```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
   -only-testing:LogosTests \
   test
 ```
@@ -407,9 +407,9 @@ xcodebuild -project Logos.xcodeproj \
 iOS UI mock suite:
 
 ```bash
-cd /Users/ryan/Development/logos
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python scripts/run_stage_f_mock_adapter.py \
+cd /path/to/logos
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON scripts/run_stage_f_mock_adapter.py \
   --host 127.0.0.1 \
   --port 8766
 ```
@@ -417,11 +417,11 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Then in a separate command:
 
 ```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 LOGOS_MESSAGE_STORE_FILENAME="LogosUITests-spectrum-$(uuidgen).sqlite3" \
 xcodebuild -project Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
   -only-testing:LogosUITests \
   test
 ```
@@ -495,7 +495,7 @@ Decision: the analyzer should stay visually idle until playback starts. This avo
 
 ---
 
-## Ryan decisions
+## Maintainer decisions
 
 1. During the **receiving** phase, the analyzer remains visually idle until playback starts.
 2. Analyzer tuning is **voice/TTS-focused** using roughly `80-8000 Hz` bands.

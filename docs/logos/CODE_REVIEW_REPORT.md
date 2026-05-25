@@ -62,7 +62,7 @@ Fixed APNS token timing issue:
 Commands/results:
 
 ```text
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent $HERMES_PYTHON -m pytest -q tests
 45 passed in 0.22s
 
 python3 -m compileall -q plugins scripts tests
@@ -70,7 +70,7 @@ passed
 
 cd clients/ios/Logos
 xcodegen generate --spec project.yml
-xcodebuild -project Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+xcodebuild -project Logos.xcodeproj -scheme Logos -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 TEST SUCCEEDED
 Executed 19 unit tests, 0 failures
 Executed 2 UI tests, 0 failures
@@ -121,6 +121,6 @@ Nonblocking suggestions:
 
 ## Remaining nonblocking follow-ups
 
-- Physical/manual validation has been accepted complete by Ryan as of 2026-05-18 after follow-up field fixes. Detailed hardware metadata was not captured in this code-review report.
+- Physical/manual validation has been accepted complete by the maintainer as of 2026-05-18 after follow-up field fixes. Detailed hardware metadata was not captured in this code-review report.
 - Apple Watch relay remains intentionally deferred.
 - Minor hardening/doc refresh items above remain post-v1 polish, not blockers.

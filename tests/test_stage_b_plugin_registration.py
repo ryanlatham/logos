@@ -73,7 +73,7 @@ def test_registered_logos_pair_command_handler_generates_qr_media(tmp_path, monk
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.setenv("LOGOS_DEVICE_SECRET", "master-secret")
     monkeypatch.setenv("LOGOS_STORE_PATH", str(tmp_path / "logos.db"))
-    monkeypatch.setenv("LOGOS_PUBLIC_URL", "wss://studio.tail752253.ts.net/")
+    monkeypatch.setenv("LOGOS_PUBLIC_URL", "wss://your-mac.your-tailnet.ts.net/")
 
     ctx = RecordingContext()
     register(ctx)

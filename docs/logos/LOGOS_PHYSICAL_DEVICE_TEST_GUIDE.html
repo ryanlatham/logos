@@ -202,7 +202,7 @@
     <div class="grid">
       <div class="card">
         <h3>Workspace</h3>
-        <p class="path">/Users/ryan/Development/logos</p>
+        <p class="path">/path/to/logos</p>
         <p class="muted tiny">Final report: <span class="path">docs/logos/FINAL_REPORT.md</span></p>
       </div>
       <div class="card">
@@ -232,15 +232,17 @@
       <div class="command">
         <div class="command-head"><strong>Find a private Mac address</strong><button class="copy-btn" data-copy="cmd-tailnet">Copy</button></div>
         <pre id="cmd-tailnet">tailscale ip -4 2>/dev/null || ipconfig getifaddr en0</pre>
-        <p class="muted tiny">Use this address in the iPhone app as <code>ws://&lt;private-mac-ip&gt;:8765</code>.</p>
+        <p class="muted tiny">Use this address in the iPhone app as <code>ws://&lt;private-mac-ip&gt;:8765</code> only for a private mock-smoke test. For normal physical-device use, prefer the README's Tailscale Serve <code>wss://your-mac.your-tailnet.ts.net/</code> path.</p>
       </div>
 
       <div class="command">
         <div class="command-head"><strong>Start the mock adapter for hardware transport/UI smoke test</strong><button class="copy-btn" data-copy="cmd-mock">Copy</button></div>
-        <pre id="cmd-mock">cd /Users/ryan/Development/logos
+        <pre id="cmd-mock">cd /path/to/logos
+export HERMES_SRC="${HERMES_SRC:-/path/to/hermes-agent}"
+export HERMES_PYTHON="${HERMES_PYTHON:-$HERMES_SRC/venv/bin/python}"
 export LOGOS_DEVICE_SECRET='[REDACTED]'
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python scripts/run_stage_f_mock_adapter.py \
+PYTHONPATH="/path/to/logos/plugins:$HERMES_SRC" \
+  "$HERMES_PYTHON" scripts/run_stage_f_mock_adapter.py \
   --host &lt;mac-tailnet-or-private-lan-ip&gt; \
   --port 8765 \
   --secret "$LOGOS_DEVICE_SECRET" \
@@ -249,7 +251,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 
       <div class="command">
         <div class="command-head"><strong>Generate/open the iOS project</strong><button class="copy-btn" data-copy="cmd-xcode">Copy</button></div>
-        <pre id="cmd-xcode">cd /Users/ryan/Development/logos/clients/ios/Logos
+        <pre id="cmd-xcode">cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 open Logos.xcodeproj</pre>
         <p class="muted tiny">In Xcode: select the Logos app target, set your signing team, confirm <code>Logos/Logos.entitlements</code> is attached, select the physical iPhone, then build/run.</p>
@@ -257,15 +259,17 @@ open Logos.xcodeproj</pre>
 
       <div class="command">
         <div class="command-head"><strong>Install/enable real Hermes plugin when ready</strong><button class="copy-btn" data-copy="cmd-real">Copy</button></div>
-        <pre id="cmd-real">mkdir -p /Users/ryan/.hermes/plugins
-ln -sfn /Users/ryan/Development/logos/plugins/logos /Users/ryan/.hermes/plugins/logos
-/Users/ryan/.hermes/hermes-agent/venv/bin/hermes plugins enable logos
-/Users/ryan/.hermes/hermes-agent/venv/bin/hermes config set platforms.logos.enabled true
+        <pre id="cmd-real">export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export HERMES_BIN="${HERMES_BIN:-hermes}"
+mkdir -p "$HERMES_HOME/plugins"
+ln -sfn "/path/to/logos/plugins/logos" "$HERMES_HOME/plugins/logos"
+"$HERMES_BIN" plugins enable logos
+"$HERMES_BIN" config set platforms.logos.enabled true
 
 export LOGOS_DEVICE_SECRET='[REDACTED]'
 export LOGOS_HOST='&lt;mac-tailnet-or-private-lan-ip&gt;'
 export LOGOS_PORT='8765'
-export LOGOS_STORE_PATH='/Users/ryan/Development/logos/logos-store.db'</pre>
+export LOGOS_STORE_PATH='/path/to/logos/logos-store.db'</pre>
         <p class="muted tiny">Then run Hermes using the normal gateway/deployment mode for this machine.</p>
       </div>
     </div>

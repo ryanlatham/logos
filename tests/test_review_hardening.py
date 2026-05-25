@@ -171,14 +171,14 @@ def test_connect_refuses_wildcard_bind_without_explicit_override(tmp_path, monke
 
 def test_safe_bind_allows_private_and_tailscale_hostnames(monkeypatch):
     def fake_getaddrinfo(host, port, proto=0):
-        assert host == "ryans-mac-studio"
+        assert host == "your-mac"
         return [
             (socket.AF_INET, socket.SOCK_STREAM, proto, "", ("100.116.9.88", 0)),
             (socket.AF_INET, socket.SOCK_STREAM, proto, "", ("192.168.1.39", 0)),
         ]
 
     monkeypatch.setattr("logos.adapter.socket.getaddrinfo", fake_getaddrinfo)
-    assert LogosAdapter._is_safe_bind_host("ryans-mac-studio") is True
+    assert LogosAdapter._is_safe_bind_host("your-mac") is True
 
 
 def test_safe_bind_rejects_public_hostname(monkeypatch):
@@ -513,7 +513,7 @@ async def test_run_cancel_returns_terminal_error_when_stop_dispatch_fails(tmp_pa
     adapter.ws_server = capture  # type: ignore[assignment]
 
     async def failing_dispatch(envelope, text_override=None, **kwargs):
-        raise RuntimeError("gateway unavailable: /Users/ryan/.hermes/secret-token")
+        raise RuntimeError("gateway unavailable: /path/to/hermes/secret-token")
 
     adapter._dispatch_gateway_text = failing_dispatch  # type: ignore[method-assign]
 
@@ -670,7 +670,7 @@ async def test_websocket_internal_error_does_not_echo_exception_details(tmp_path
     )
 
     async def boom(envelope):
-        raise RuntimeError("leaked /Users/ryan/.hermes/secret-token")
+        raise RuntimeError("leaked /path/to/hermes/secret-token")
 
     adapter.handle_ws_envelope = boom  # type: ignore[method-assign]
     assert await adapter.connect() is True
@@ -708,6 +708,6 @@ async def test_websocket_internal_error_does_not_echo_exception_details(tmp_path
             assert response["payload"]["code"] == "internal_error"
             assert response["payload"]["message"] == "Logos adapter internal error."
             assert "secret-token" not in json.dumps(response)
-            assert "/Users/ryan" not in json.dumps(response)
+            assert "/path/to/user" not in json.dumps(response)
     finally:
         await adapter.disconnect()

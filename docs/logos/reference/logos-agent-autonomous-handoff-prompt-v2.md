@@ -6,7 +6,7 @@ Use this prompt together with `logos-architecture-v2.2.md`.
 
 Operator-specific requirements in this version:
 
-- Development work must happen under `/Users/ryan/Development`.
+- Development work must happen under `/path/to/development`.
 - Before changing implementation files, create and use a Hermes Kanban board that tasks out the full Logos implementation plan.
 
 ---
@@ -35,22 +35,22 @@ Do not ask the user for confirmation between stages. Work autonomously, document
 All development work for Logos must live under:
 
 ```text
-/Users/ryan/Development
+/path/to/development
 ```
 
 Rules:
 
-1. Create `/Users/ryan/Development` if it does not exist.
-2. Put new checkouts, worktrees, project directories, generated iOS app directories, implementation docs, test logs, screenshots, and local artifacts under `/Users/ryan/Development`.
+1. Create `/path/to/development` if it does not exist.
+2. Put new checkouts, worktrees, project directories, generated iOS app directories, implementation docs, test logs, screenshots, and local artifacts under `/path/to/development`.
 3. Do not create project source directories elsewhere unless required by Hermes, Xcode, Python, package-manager caches, temporary build systems, or the existing installed Hermes repository location.
-4. If the Hermes repository already exists outside `/Users/ryan/Development`, inspect it as needed, but prefer creating a Logos worktree, clone, or implementation workspace under `/Users/ryan/Development` when doing new development.
-5. If a plugin must be installed in a Hermes-required runtime location such as `~/.hermes/plugins/`, keep the source of truth under `/Users/ryan/Development` and install, copy, or symlink into the Hermes runtime location as appropriate. Document the chosen strategy.
+4. If the Hermes repository already exists outside `/path/to/development`, inspect it as needed, but prefer creating a Logos worktree, clone, or implementation workspace under `/path/to/development` when doing new development.
+5. If a plugin must be installed in a Hermes-required runtime location such as `~/.hermes/plugins/`, keep the source of truth under `/path/to/development` and install, copy, or symlink into the Hermes runtime location as appropriate. Document the chosen strategy.
 6. Do not move, delete, or reorganize existing user projects to satisfy this path rule.
 
 Suggested workspace layout, adjustable after inspecting the installed repo:
 
 ```text
-/Users/ryan/Development/
+/path/to/development/
   logos-agent-reference/
     README.md
     logos-architecture-v2.2.md
@@ -63,8 +63,8 @@ Suggested workspace layout, adjustable after inspecting the installed repo:
 
 Persist the handoff materials before development:
 
-1. Copy `logos-architecture-v2.2.md` and this handoff prompt into `/Users/ryan/Development/logos-agent-reference/` without modifying their contents.
-2. Record hashes for both files in `/Users/ryan/Development/logos-agent-reference/README.md`.
+1. Copy `logos-architecture-v2.2.md` and this handoff prompt into `/path/to/logos-agent-reference/` without modifying their contents.
+2. Record hashes for both files in `/path/to/logos-agent-reference/README.md`.
 3. Once the implementation repo/workspace is identified, also copy both files into a repo-local traceability directory such as `docs/logos/reference/`.
 4. Treat the copied architecture document as the stable design reference for this run. Do not rely on transient chat attachments after the run begins.
 
@@ -94,7 +94,7 @@ Board requirements:
 - Board slug: `logos-agent-voice-app`, unless an existing equivalent board is found.
 - Board display name: `Logos Agent Voice App`.
 - Board description: `Implementation of the Logos iPhone voice-and-tap interface for Hermes Agent.`
-- Workspace: all development artifacts under `/Users/ryan/Development`.
+- Workspace: all development artifacts under `/path/to/development`.
 
 Use the installed Hermes Kanban surface that is actually available in this environment. Prefer model-visible `kanban_*` tools when running as a Kanban worker or orchestrator; otherwise use `/kanban ...` slash commands or `hermes kanban ...` CLI commands. Verify the available surface before relying on it.
 
@@ -151,8 +151,8 @@ If Kanban is unavailable in the installed Hermes build after two reasonable veri
 
 Before implementation:
 
-1. Ensure `/Users/ryan/Development` exists.
-2. Persist this prompt and `logos-architecture-v2.2.md` under `/Users/ryan/Development/logos-agent-reference/` with hashes.
+1. Ensure `/path/to/development` exists.
+2. Persist this prompt and `logos-architecture-v2.2.md` under `/path/to/logos-agent-reference/` with hashes.
 3. Create or reuse the `logos-agent-voice-app` Hermes Kanban board and task out the whole plan before code changes.
 4. Run `git status --short` in any repo you will modify and record the baseline.
 5. Identify the Hermes repo root, profile path, Python environment, and existing test commands.
@@ -215,16 +215,16 @@ Goal: establish the durable workspace and project-management substrate before co
 
 Deliverables:
 
-- `/Users/ryan/Development` confirmed or created.
-- Handoff prompt and `logos-architecture-v2.2.md` copied to `/Users/ryan/Development/logos-agent-reference/`.
-- Hashes recorded in `/Users/ryan/Development/logos-agent-reference/README.md`.
+- `/path/to/development` confirmed or created.
+- Handoff prompt and `logos-architecture-v2.2.md` copied to `/path/to/logos-agent-reference/`.
+- Hashes recorded in `/path/to/logos-agent-reference/README.md`.
 - `logos-agent-voice-app` Hermes Kanban board created or reused.
 - Full project task plan created on the board, covering all stages and major features.
 - Kanban command/tool surface verified or fallback file created only if Kanban is unavailable.
 
 Acceptance criteria:
 
-- Development will happen under `/Users/ryan/Development`.
+- Development will happen under `/path/to/development`.
 - The architecture and prompt are persisted outside ephemeral chat/upload context.
 - The board contains a complete, inspectable task breakdown before implementation begins.
 - The first implementation task is clearly selected or claimed.

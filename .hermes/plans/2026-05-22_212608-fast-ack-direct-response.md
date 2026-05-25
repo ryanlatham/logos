@@ -1,6 +1,6 @@
 # Fast Acknowledgement and Simple Direct Response Implementation Plan
 
-> **For Hermes:** Planning only. Do not implement until Ryan approves this plan. Keep changes inside the Logos repo/plugin/iOS app; do not modify Hermes core.
+> **For Hermes:** Planning only. Do not implement until the maintainer approves this plan. Keep changes inside the Logos repo/plugin/iOS app; do not modify Hermes core.
 
 **Goal:** Make Logos' first-response acknowledgement feel natural instead of repeating `Got it.`, allow the fast local model to answer narrowly-scoped simple asks without invoking a full Hermes run, and make transient acknowledgement UI clear itself reliably.
 
@@ -92,7 +92,7 @@ For direct response:
 - Do not call `handle_message(event)` / Hermes agent path.
 - Let existing autoplay policy handle speech for the assistant message if the app is active.
 
-Open question for Ryan before implementation: should fast direct responses be included in Hermes conversation history later? My recommendation for v1: **no**. Keep them Logos-local and metadata-marked. If they need long-term continuity, the request was probably not simple enough for fast-only handling.
+Open question for the maintainer before implementation: should fast direct responses be included in Hermes conversation history later? My recommendation for v1: **no**. Keep them Logos-local and metadata-marked. If they need long-term continuity, the request was probably not simple enough for fast-only handling.
 
 ---
 
@@ -204,7 +204,7 @@ This keeps tests stable and prevents the fallback model from getting clever. Cle
 **Verification command:**
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m pytest tests/test_stage_h_fast_model.py -q
 ```
 
@@ -483,7 +483,7 @@ No special UI badge for fast responses in this first pass. That can become clutt
 Run backend tests:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m pytest tests/test_stage_h_fast_model.py tests/test_stage_b_adapter_ws.py tests/test_stage_e_interactions.py -q
 python -m pytest tests -q
 python -m compileall -q plugins/logos scripts tests
@@ -492,10 +492,10 @@ python -m compileall -q plugins/logos scripts tests
 Run iOS model tests:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 xcodebuild -project clients/ios/Logos/Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
   -only-testing:LogosTests/LogosModelTests \
   test
 ```
@@ -503,7 +503,7 @@ xcodebuild -project clients/ios/Logos/Logos.xcodeproj \
 Optional live smoke after implementation approval:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python scripts/logos_live_smoke.py --scenario text --timeout 180
 ```
 
@@ -542,7 +542,7 @@ Manual checks on phone:
    - Mitigation: normalize generic model output through `natural_ack_for()`.
 
 5. **Autoplay may speak trivial fast responses.**
-   - This is probably desirable for hands-free mode. If it becomes annoying, add a later `autoplay_eligible` metadata flag and skip social responses. Not first pass unless Ryan wants it.
+   - This is probably desirable for hands-free mode. If it becomes annoying, add a later `autoplay_eligible` metadata flag and skip social responses. Not first pass unless the maintainer wants it.
 
 ---
 

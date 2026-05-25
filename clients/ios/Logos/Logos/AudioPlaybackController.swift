@@ -261,7 +261,7 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         sampleDecoder: any AudioSampleDecoding = AVAudioFileSampleDecoder(),
         spectrumAnalyzer: AudioSpectrumAnalyzer = AudioSpectrumAnalyzer(),
         limits: AudioPlaybackLimits = AudioPlaybackLimits(),
-        spectrumDecodeQueue: DispatchQueue = DispatchQueue(label: "com.ryan.logos.audio-spectrum-decode", qos: .utility)
+        spectrumDecodeQueue: DispatchQueue = DispatchQueue(label: "dev.logos.audio-spectrum-decode", qos: .utility)
     ) {
         self.sessionManager = sessionManager
         self.playerFactory = playerFactory

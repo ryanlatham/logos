@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-HERMES_ROOT = Path('/Users/ryan/.hermes/hermes-agent')
+HERMES_ROOT = Path(os.environ.get('HERMES_SRC', Path.home() / '.hermes' / 'hermes-agent'))
 
 for path in (ROOT / 'plugins', HERMES_ROOT):
     value = str(path)

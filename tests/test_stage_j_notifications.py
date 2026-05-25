@@ -35,7 +35,7 @@ def test_private_completion_payload_contains_only_routing_ids():
         session_id="session-1",
         message_id="msg-42",
         server_seq=982,
-        sensitive_context={"summary": "SECRET answer /Users/ryan/private.txt", "command": "rm -rf nope"},
+        sensitive_context={"summary": "SECRET answer /path/to/private.txt", "command": "rm -rf nope"},
     )
 
     assert payload["aps"]["alert"]["title"] == "Hermes finished"
@@ -83,7 +83,7 @@ def test_register_device_persists_token_without_echoing_secret_token(tmp_path):
                 request_id="reg-1",
                 device_id="iphone-test",
                 payload={
-                    "display_name": "Ryan's iPhone",
+                    "display_name": "Test iPhone",
                     "apns_token": "abcdef123456",
                     "apns_environment": "sandbox",
                     "capabilities": ["text", "speech", "notifications"],
