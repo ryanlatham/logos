@@ -224,7 +224,15 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
 @MainActor
 final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published var settings = LogosSettings() {
-        didSet { settings.persist() }
+        didSet {
+            settings.persist()
+            if settings.urlString != oldValue.urlString
+                || settings.secret != oldValue.secret
+                || settings.autoConnect != oldValue.autoConnect
+            {
+                clearConnectionRetryState()
+            }
+        }
     }
     @Published private(set) var connectionState: LogosConnectionState = .disconnected
     @Published private(set) var projects: [LogosProject] = []
@@ -248,6 +256,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published private(set) var ackText: String?
     @Published private(set) var undeliveredSpeechDraft: UndeliveredSpeechDraft?
     @Published private(set) var progressActivity: ProgressActivityState?
+    @Published private(set) var connectionRetryState: ConnectionRetryState?
     @Published private(set) var audioPlaybackOverlay: AudioPlaybackOverlayState?
 
     private var task: (any WebSocketTasking)?
@@ -279,11 +288,15 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var requiresScopedLiveResponse = false
     private var pendingProjectSwitchRequestID: String?
     private var pendingProjectSwitchTarget: String?
+    private var reconnectTask: Task<Void, Never>?
+    private var connectionRetryAttemptCount = 0
+    private var connectionRetryEventSequence = 0
 
     private static let staleSilenceNoticeText = "Logos has not heard from Hermes in a while. The run may still be working; waiting for the next adapter update."
     private static let maxStaleTimeoutInterval: TimeInterval = 86_400
     private static let maxInboundFrameBytes = 2_000_000
     private static let stoppedAudioIDRetentionLimit = 128
+    private static let maxConnectionRetryEvents = 8
 
     init(
         store: SQLiteMessageStore = SQLiteMessageStore(),
@@ -346,21 +359,31 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         )
         LogosConnectionLog.logger.info("Auto-connect evaluated should_attempt=\(shouldAttempt, privacy: .public) auto_connect=\(self.settings.autoConnect, privacy: .public) has_completed_first_connection=\(self.settings.hasCompletedFirstConnection, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public)")
         guard shouldAttempt else { return }
-        connect()
+        connect(isAutomaticRetry: true)
     }
 
     func connect() {
+        connect(isAutomaticRetry: false)
+    }
+
+    private func connect(isAutomaticRetry: Bool) {
         LogosConnectionLog.logger.info("Connect requested url=\(LogosConnectionLog.urlDescription(self.settings.urlString), privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) has_secret=\(!self.settings.secret.isEmpty, privacy: .public) pending_apns_token=\(self.pendingAPNSToken != nil, privacy: .public)")
+        if isAutomaticRetry == false {
+            clearConnectionRetryState()
+        }
         cancelCurrentSocket()
         lastError = nil
+        resetRunErrorIfNoActiveProgress()
         guard let url = URL(string: settings.urlString) else {
             LogosConnectionLog.logger.error("Connect failed before socket creation: invalid adapter URL value=\(self.settings.urlString, privacy: .public)")
+            clearConnectionRetryState()
             recordError("Invalid adapter URL")
             connectionState = .error
             return
         }
         guard settings.secret.isEmpty == false else {
             LogosConnectionLog.logger.error("Connect failed before socket creation: missing Logos device secret")
+            clearConnectionRetryState()
             recordError("Missing Logos device secret")
             connectionState = .error
             return
@@ -377,6 +400,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
 
     func disconnect() {
         LogosConnectionLog.logger.info("Disconnect requested state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) has_task=\(self.task != nil, privacy: .public)")
+        clearConnectionRetryState()
         cancelCurrentSocket()
         lastError = nil
         clearRunScopedStateForSocketClosure(runStatus: .idle)
@@ -392,6 +416,68 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         connectionLifecycle.invalidate()
         restoreInFlightFinalSpeechDrafts(reason: "The socket closed before Logos confirmed the final speech frame was sent.")
         oldTask?.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func clearConnectionRetryState() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionRetryAttemptCount = 0
+        connectionRetryState = nil
+    }
+
+    private var canAutoRetryConnection: Bool {
+        settings.autoConnect
+            && URL(string: settings.urlString) != nil
+            && LogosSettings.normalizedSecret(settings.secret).isEmpty == false
+    }
+
+    private func resetRunErrorIfNoActiveProgress() {
+        guard runStatus == .error else { return }
+        guard progressActivity?.isComplete == false else {
+            runStatus = .idle
+            return
+        }
+    }
+
+    private func noteConnectionRetryFailure(_ message: String) {
+        guard canAutoRetryConnection else { return }
+        connectionRetryAttemptCount += 1
+        connectionRetryEventSequence += 1
+        let attempt = connectionRetryAttemptCount
+        let now = Date().timeIntervalSince1970
+        let delay = LogosReconnectBackoff.delay(afterFailedAttempt: attempt)
+        let nextRetryAt = now + delay
+        let event = ConnectionRetryEvent(
+            id: "connection-retry-\(connectionRetryEventSequence)",
+            text: "Connection attempt \(attempt) failed: \(message)",
+            timestamp: now
+        )
+        var events = (connectionRetryState?.events ?? []) + [event]
+        if events.count > Self.maxConnectionRetryEvents {
+            events.removeFirst(events.count - Self.maxConnectionRetryEvents)
+        }
+        connectionRetryState = ConnectionRetryState(
+            attemptCount: attempt,
+            latestError: message,
+            nextRetryAt: nextRetryAt,
+            events: events
+        )
+        scheduleConnectionRetry(after: delay)
+    }
+
+    private func scheduleConnectionRetry(after delay: TimeInterval) {
+        reconnectTask?.cancel()
+        reconnectTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            guard self.connectionRetryState != nil, self.canAutoRetryConnection else { return }
+            guard self.connectionState == .error || self.connectionState == .disconnected else { return }
+            self.connect(isAutomaticRetry: true)
+        }
     }
 
     @discardableResult
@@ -419,6 +505,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         if sent {
             clearProgressActivity()
+            startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .text(trimmed))
             suppressedRunRequestIDs.remove(requestID)
             outstandingOutboundResponseRequestIDs.insert(requestID)
             pendingOutboundResponseRequestID = requestID
@@ -469,6 +556,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             inFlightFinalSpeechDrafts.removeValue(forKey: inputID)
         } else if sent, isFinal {
             clearProgressActivity()
+            startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .speech(text: trimmed))
             suppressedRunRequestIDs.remove(requestID)
             outstandingOutboundResponseRequestIDs.insert(requestID)
             pendingOutboundResponseRequestID = requestID
@@ -477,6 +565,46 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
         }
         return sent
+    }
+
+    private func startProgressActivity(requestID: String, projectKey: String, sessionID: String? = nil, retryRequest: ProgressRetryRequest? = nil) {
+        let now = Date().timeIntervalSince1970
+        progressActivity = ProgressActivityState(
+            requestID: requestID,
+            projectKey: projectKey,
+            sessionID: sessionID,
+            events: [],
+            isExpanded: false,
+            timedOut: false,
+            isComplete: false,
+            completedFinalMessageID: nil,
+            updateCount: 0,
+            lastUpdateAt: now,
+            startedAt: now,
+            completedAt: nil,
+            finalStatus: nil,
+            failureMessage: nil,
+            retryRequest: retryRequest,
+            adapterUpdateCount: 0
+        )
+    }
+
+    @discardableResult
+    func retryProgressActivity() -> Bool {
+        guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
+        guard runStatus == .idle else { return false }
+        guard let activity = progressActivity,
+              activity.finalStatus == .failed,
+              let retryRequest = activity.retryRequest
+        else { return false }
+        switch retryRequest {
+        case .text(let text):
+            return sendText(text)
+        case .speech(let text):
+            let inputID = "voice-retry-\(UUID().uuidString)"
+            let startedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
+            return sendSpeech(text: text, isFinal: true, inputID: inputID, partialSeq: 0, startedAtMilliseconds: startedAtMilliseconds)
+        }
     }
 
     func clearUndeliveredSpeechDraft(id: String) {
@@ -955,7 +1083,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             guard requestID == pendingOutboundResponseRequestID else { return }
             clearOutstandingOutboundRequestID(requestID)
         } else if let activity = progressActivity {
-            guard activity.requestID == requestID else { return }
+            guard activity.requestID == requestID || activity.isComplete else { return }
         }
         let now = Date().timeIntervalSince1970
         var activity = progressActivity ?? ProgressActivityState(
@@ -968,7 +1096,13 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             isComplete: false,
             completedFinalMessageID: nil,
             updateCount: 0,
-            lastUpdateAt: now
+            lastUpdateAt: now,
+            startedAt: now,
+            completedAt: nil,
+            finalStatus: nil,
+            failureMessage: nil,
+            retryRequest: nil,
+            adapterUpdateCount: 0
         )
         if activity.requestID != requestID || activity.projectKey != projectKey {
             activity = ProgressActivityState(
@@ -981,10 +1115,17 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
                 isComplete: false,
                 completedFinalMessageID: nil,
                 updateCount: 0,
-                lastUpdateAt: now
+                lastUpdateAt: now,
+                startedAt: now,
+                completedAt: nil,
+                finalStatus: nil,
+                failureMessage: nil,
+                retryRequest: nil,
+                adapterUpdateCount: 0
             )
         }
         activity.updateCount += 1
+        activity.adapterUpdateCount += 1
         let stableEventID = eventID.flatMap { $0.isEmpty ? nil : $0 }
             ?? "\(requestID)-\(activity.events.count)-\(Int(now * 1000))"
         if let index = activity.events.firstIndex(where: { $0.id == stableEventID }) {
@@ -1090,16 +1231,30 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         progressActivity = nil
     }
 
-    private func completeProgressActivity(requestID: String? = nil, finalMessage: LogosMessage? = nil) {
+    private func completeProgressActivity(
+        requestID: String? = nil,
+        finalMessage: LogosMessage? = nil,
+        finalStatus: ProgressActivityFinalStatus = .complete,
+        failureMessage: String? = nil
+    ) {
         if let requestID, progressActivity?.requestID != requestID { return }
         suspendStaleTimeout()
         guard var activity = progressActivity else { return }
+        let now = Date().timeIntervalSince1970
         activity.isComplete = true
         activity.timedOut = false
+        activity.finalStatus = finalStatus
+        activity.failureMessage = failureMessage
+        if activity.completedAt == nil {
+            activity.completedAt = now
+        }
         if let finalMessage {
             if activity.completedFinalMessageID == nil || activity.completedFinalMessageID == finalMessage.id {
                 activity.completedFinalMessageID = finalMessage.id
             }
+        }
+        if finalStatus != .failed {
+            activity.retryRequest = nil
         }
         progressActivity = activity
     }
@@ -1141,7 +1296,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         let message = socketCloseMessage(closeCode: closeCode, reason: reason)
         LogosConnectionLog.logger.warning("WebSocket close accepted task_id=\(String(describing: taskID), privacy: .public) close_code=\(closeCode.rawValue, privacy: .public) reason=\(LogosConnectionLog.closeReasonDescription(reason), privacy: .public)")
-        failCurrentSocket(message: message)
+        failCurrentSocket(message: message, retryable: true)
     }
 
     private func handleSocketFailure(taskID: ObjectIdentifier, message: String) {
@@ -1150,18 +1305,31 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             return
         }
         LogosConnectionLog.logger.error("WebSocket failure accepted task_id=\(String(describing: taskID), privacy: .public) message=\(message, privacy: .public)")
-        failCurrentSocket(message: message)
+        failCurrentSocket(message: message, retryable: true)
     }
 
-    private func failCurrentSocket(message: String) {
+    private func failCurrentSocket(message: String, retryable: Bool, clearInteractionCards: Bool = true) {
         LogosConnectionLog.logger.error("Failing current socket message=\(message, privacy: .public) previous_state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) in_flight_final_speech=\(self.inFlightFinalSpeechDrafts.count, privacy: .public)")
         self.task = nil
         isWebSocketOpen = false
         restoreInFlightFinalSpeechDrafts(reason: message)
-        if connectionState != .disconnected {
-            recordError(message)
-            clearRunScopedStateForSocketClosure(runStatus: .error)
+        if connectionState != .disconnected || retryable {
+            lastError = message
+            clearAck()
+            if progressActivity?.isComplete != false {
+                runStatus = .idle
+            }
+            if clearInteractionCards {
+                clearInteractionStateForCancel()
+            } else if let pendingInteractionResponseID {
+                clearPendingInteractionResponse(requestID: pendingInteractionResponseID, projectKey: activeProjectKey)
+            }
             connectionState = .error
+            if retryable {
+                noteConnectionRetryFailure(message)
+            } else {
+                clearConnectionRetryState()
+            }
         }
         LogosConnectionLog.logger.error("Socket failure state updated state=\(self.connectionState.rawValue, privacy: .public) last_error=\(self.lastError ?? "<none>", privacy: .public)")
     }
@@ -1237,8 +1405,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
                     }
                     if let error {
                         LogosConnectionLog.logger.error("Frame send failed \(summary, privacy: .public) error=\(LogosConnectionLog.errorDescription(error), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                        self.recordError(error.localizedDescription)
-                        self.connectionState = .error
+                        let frameType = frame["type"] as? String
+                        let shouldKeepInteractionCards = frameType == "approval_response" || frameType == "clarify_response"
+                        self.failCurrentSocket(message: error.localizedDescription, retryable: true, clearInteractionCards: shouldKeepInteractionCards == false)
                         onCompletion?(.failure(error))
                     } else {
                         LogosConnectionLog.logger.info("Frame send completed \(summary, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
@@ -1275,12 +1444,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
                     self.receiveLoop(connectionID: connectionID)
                 case .failure(let error):
                     LogosConnectionLog.logger.error("Receive loop failed error=\(LogosConnectionLog.errorDescription(error), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                    self.restoreInFlightFinalSpeechDrafts(reason: error.localizedDescription)
-                    self.task = nil
-                    self.isWebSocketOpen = false
-                    self.recordError(error.localizedDescription)
-                    self.clearRunScopedStateForSocketClosure(runStatus: .error)
-                    self.connectionState = .error
+                    self.failCurrentSocket(message: error.localizedDescription, retryable: true)
                 }
             }
         }
@@ -1298,8 +1462,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if settings.hasCompletedFirstConnection == false {
             settings.hasCompletedFirstConnection = true
         }
+        clearConnectionRetryState()
         connectionState = .connected
         lastError = nil
+        resetRunErrorIfNoActiveProgress()
         LogosConnectionLog.logger.info("Marked connected previous_state=\(previousState.rawValue, privacy: .public) had_completed_first_connection=\(hadCompletedFirstConnection, privacy: .public) active_project=\(self.activeProjectKey, privacy: .public)")
     }
 
@@ -1376,7 +1542,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             let message = adapterErrorMessage(payload: payload)
             LogosConnectionLog.logger.error("Inbound adapter error code=\(code, privacy: .public) reason=\(payload?["reason"] as? String ?? "<none>", privacy: .public) message=\(message, privacy: .public)")
             if code == "auth_failed" {
-                failCurrentSocket(message: message)
+                failCurrentSocket(message: message, retryable: false)
             } else {
                 handleAdapterError(root: root, code: code, message: message)
             }
@@ -1438,14 +1604,14 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         let decodedMessages = rawMessages.compactMap(LogosMessage.from(dictionary:))
         var persistedMessages: [LogosMessage] = []
         for message in decodedMessages {
-            if message.isProgressUpdate {
-                let progressRequestID = message.metadataRequestID ?? root["request_id"] as? String ?? message.messageID
+            let progressRequestID = message.metadataRequestID ?? root["request_id"] as? String ?? message.messageID
+            if shouldRouteMessageToProgress(message, requestID: progressRequestID) {
                 if shouldApplyBatchProgressToLiveRun(requestID: progressRequestID, projectKey: message.projectKey) {
                     appendProgressEvent(
                         requestID: progressRequestID,
                         projectKey: message.projectKey,
                         sessionID: message.sessionID,
-                        kind: message.progressEventKind,
+                        kind: progressEventKind(for: message),
                         text: message.content,
                         eventID: message.messageID
                     )
@@ -1469,7 +1635,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         let batchRequestID = root["request_id"] as? String
         let completingFinalMessage = persistedMessages.first { message in
-            guard message.projectKey == activeProjectKey, message.role != "user", message.isFinal else { return false }
+            guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
             let finalRequestID = batchRequestID ?? message.metadataRequestID
             guard progressActivity != nil else { return isActiveRunRequestID(finalRequestID) }
             return shouldClearProgressActivity(for: message, requestID: finalRequestID)
@@ -1577,6 +1743,34 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         clearAudioPlaybackForProjectSwitch()
     }
 
+    private func finishProgressRun(
+        requestID: String? = nil,
+        finalStatus: ProgressActivityFinalStatus,
+        failureMessage: String? = nil,
+        suppressLateFrames: Bool = false
+    ) {
+        if suppressLateFrames {
+            suppressCurrentRunRequestIDs()
+            requiresScopedLiveResponse = true
+        }
+        completeProgressActivity(requestID: requestID, finalStatus: finalStatus, failureMessage: failureMessage)
+        runStatus = .idle
+        pendingCancelRequestID = nil
+        pendingOutboundResponseRequestID = nil
+        outstandingOutboundResponseRequestIDs.removeAll()
+        clearInteractionStateForCancel()
+        clearAck()
+        clearAudioPlaybackForProjectSwitch()
+    }
+
+    private func activeRunErrorMatches(_ requestID: String?) -> Bool {
+        guard let activity = progressActivity, activity.isComplete == false else { return false }
+        guard let requestID, requestID.isEmpty == false else { return true }
+        return activity.requestID == requestID
+            || pendingOutboundResponseRequestID == requestID
+            || outstandingOutboundResponseRequestIDs.contains(requestID)
+    }
+
     private func handleAdapterError(root: [String: Any], code: String, message: String) {
         let requestID = root["request_id"] as? String
         let projectKey = frameProjectKey(root) ?? activeProjectKey
@@ -1588,6 +1782,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         if let requestID, requestID == pendingInteractionResponseID {
             clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
+        }
+        if activeRunErrorMatches(requestID) {
+            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message)
+            return
         }
         if code == "approval_not_pending" {
             if approvalCard?.id == requestID { approvalCard = nil }
@@ -1667,6 +1865,22 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             || outstandingOutboundResponseRequestIDs.contains(requestID)
     }
 
+    private func isExplicitTerminalAssistantMessage(_ message: LogosMessage) -> Bool {
+        guard message.role != "user", message.isProgressUpdate == false else { return false }
+        return message.hasFinalizedMetadata && message.isFinal
+    }
+
+    private func shouldRouteMessageToProgress(_ message: LogosMessage, requestID: String?) -> Bool {
+        if message.isProgressUpdate { return true }
+        guard message.projectKey == activeProjectKey, message.role != "user" else { return false }
+        guard let requestID, requestID.isEmpty == false, isActiveRunRequestID(requestID) else { return false }
+        return isExplicitTerminalAssistantMessage(message) == false
+    }
+
+    private func progressEventKind(for message: LogosMessage) -> String {
+        message.isProgressUpdate ? message.progressEventKind : "gateway_status"
+    }
+
     private func suppressRunRequestID(_ requestID: String?) {
         guard let requestID, requestID.isEmpty == false else { return }
         suppressedRunRequestIDs.insert(requestID)
@@ -1692,7 +1906,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard let activity = progressActivity else { return false }
         guard runStatus != .cancelling else { return false }
         guard isSuppressedRunRequestID(requestID) == false else { return false }
-        guard message.projectKey == activeProjectKey, message.role != "user", message.isFinal else { return false }
+        guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
         if activity.isComplete, let completedFinalMessageID = activity.completedFinalMessageID {
             return message.id == completedFinalMessageID
         }
@@ -1728,12 +1942,12 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         if let messageDict = payload["message"] as? [String: Any], let message = LogosMessage.from(dictionary: messageDict) {
             let messageRequestID = root["request_id"] as? String ?? message.metadataRequestID
-            if message.isProgressUpdate {
+            if shouldRouteMessageToProgress(message, requestID: messageRequestID ?? message.messageID) {
                 appendProgressEvent(
                     requestID: messageRequestID ?? message.messageID,
                     projectKey: message.projectKey,
                     sessionID: message.sessionID,
-                    kind: message.progressEventKind,
+                    kind: progressEventKind(for: message),
                     text: message.content,
                     eventID: message.messageID
                 )
@@ -1849,16 +2063,22 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard let payload = root["payload"] as? [String: Any], let statusRaw = payload["status"] as? String else { return }
         let previous = runStatus
         let next = LogosRunStatus(rawValue: statusRaw) ?? .error
+        let requestID = root["request_id"] as? String
         if previous == .cancelling {
             if isCurrentCancelTerminalRunStatus(root: root, payload: payload, status: next) {
-                clearRunScopedStateForSocketClosure(runStatus: next)
+                finishProgressRun(finalStatus: .stopped, suppressLateFrames: true)
             }
             return
         }
         if payload["cancelled"] as? Bool == true, isTerminalRunStatus(next) {
-            suppressCurrentRunRequestIDs()
-            requiresScopedLiveResponse = true
-            clearRunScopedStateForSocketClosure(runStatus: next)
+            finishProgressRun(finalStatus: .stopped, suppressLateFrames: true)
+            return
+        }
+        if next == .error, activeRunErrorMatches(requestID) {
+            let message = payload["message"] as? String
+                ?? payload["error"] as? String
+                ?? "Hermes run failed."
+            finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message)
             return
         }
         if next == .idle, let activity = progressActivity, activity.timedOut == false, activity.isComplete == false {
@@ -1874,7 +2094,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             suspendStaleTimeout()
         }
         if next == .running || next == .queued {
-            let requestID = root["request_id"] as? String
             if let requestID, isActiveRunRequestID(requestID) {
                 scheduleStaleTimeout(requestID: requestID, projectKey: frameProjectKey(root) ?? activeProjectKey)
             }
@@ -2076,6 +2295,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
 
     private func handlePendingTextSendFailure(messageID: String, projectKey: String, requestID: String, error _: Error) {
         clearOutstandingOutboundRequestID(requestID)
+        clearProgressActivity(requestID: requestID)
         if outstandingOutboundResponseRequestIDs.isEmpty && pendingOutboundResponseRequestID == nil && progressActivity?.requestID != requestID {
             suspendStaleTimeout()
         }
@@ -2092,6 +2312,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func handleFinalSpeechSendFailure(_ draft: UndeliveredSpeechDraft, requestID: String, error: Error) {
         guard inFlightFinalSpeechDrafts.removeValue(forKey: draft.inputID) != nil else { return }
         clearOutstandingOutboundRequestID(requestID)
+        clearProgressActivity(requestID: requestID)
         if outstandingOutboundResponseRequestIDs.isEmpty && pendingOutboundResponseRequestID == nil && progressActivity?.requestID != requestID {
             suspendStaleTimeout()
         }

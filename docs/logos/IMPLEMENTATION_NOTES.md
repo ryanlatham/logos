@@ -225,7 +225,7 @@ For non-streaming final replies, `GatewayRunner._handle_message()` returns text 
 3. Emit a `state_update` / message append frame to connected WebSocket clients.
 4. Return `SendResult(success=True, message_id=<logos-visible-id>)`.
 
-Streaming/draft paths use adapter methods such as `send`, `edit_message`, and platform stream consumers where supported. Logos v1 can start with final-response forwarding and add richer progress frames from gateway hooks/callbacks.
+Streaming/draft paths use adapter methods such as `send`, `edit_message`, and platform stream consumers where supported. Gateway activity text that is not a true Hermes final response, including still-working, retry, individual provider-call abort/timeout notices, preflight compression, and context-compaction notices, should be forwarded as transient `gateway_status` progress so clients keep the run active until a real final response or terminal run-status arrives. Real final assistant responses emitted by the Logos adapter carry `metadata.finalized = true` and default `metadata.source = "hermes"`; active-request assistant text without that terminal metadata is a progress/status signal for iOS.
 
 ## Slash command and run-state facts
 

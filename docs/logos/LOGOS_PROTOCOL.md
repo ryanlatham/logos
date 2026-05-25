@@ -142,6 +142,19 @@ Deduplication key:
 
 `server_seq` is a monotonic adapter event sequence. It is used for replay and delta sync, not as a replacement for Hermes message ids.
 
+Final Hermes assistant responses must include explicit terminal metadata:
+
+```json
+{
+  "metadata": {
+    "finalized": true,
+    "source": "hermes"
+  }
+}
+```
+
+Clients should treat active-request assistant messages without explicit final metadata as progress/status updates unless they arrive through another scoped terminal path such as a whole-request cancellation.
+
 ## Durable progress
 
 Non-`gateway_status` `tool_progress` frames are mirrored as normal Logos messages so the app can keep a visible history of tool activity after the final assistant response arrives:
@@ -180,7 +193,7 @@ Non-`gateway_status` `tool_progress` frames are mirrored as normal Logos message
 }
 ```
 
-Routine gateway keepalives such as "Still working..." continue to use `kind: "gateway_status"` and `transient: true`; clients should treat them as activity signals, not durable conversation history.
+Routine gateway activity such as "Still working...", retry notices, provider-call abort/timeout notices, preflight compression, and context-compaction notices continue to use `kind: "gateway_status"` and `transient: true`; clients should treat them as activity/progress signals, not durable conversation history or final assistant responses.
 
 ## Reconnect / replay
 

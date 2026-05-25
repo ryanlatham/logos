@@ -98,16 +98,25 @@ struct LogosSettings: Equatable {
 enum LogosAutoConnectPolicy {
     static func shouldAttempt(
         autoConnect: Bool,
-        hasCompletedFirstConnection: Bool,
+        hasCompletedFirstConnection _: Bool,
         connectionState: LogosConnectionState
     ) -> Bool {
-        guard autoConnect, hasCompletedFirstConnection else { return false }
+        guard autoConnect else { return false }
         switch connectionState {
         case .disconnected, .error:
             return true
         case .connecting, .connected:
             return false
         }
+    }
+}
+
+enum LogosReconnectBackoff {
+    private static let delays: [TimeInterval] = [1, 2, 4, 8, 15, 30, 60]
+
+    static func delay(afterFailedAttempt attempt: Int) -> TimeInterval {
+        let index = min(max(attempt, 1) - 1, delays.count - 1)
+        return delays[index]
     }
 }
 
@@ -435,6 +444,17 @@ struct ProgressActivityEvent: Identifiable, Hashable {
     let count: Int
 }
 
+enum ProgressActivityFinalStatus: String, Hashable {
+    case complete
+    case failed
+    case stopped
+}
+
+enum ProgressRetryRequest: Hashable {
+    case text(String)
+    case speech(text: String)
+}
+
 struct ProgressActivityState: Identifiable, Hashable {
     var id: String { requestID }
     let requestID: String
@@ -447,6 +467,26 @@ struct ProgressActivityState: Identifiable, Hashable {
     var completedFinalMessageID: String?
     var updateCount: Int
     var lastUpdateAt: TimeInterval
+    var startedAt: TimeInterval = Date().timeIntervalSince1970
+    var completedAt: TimeInterval? = nil
+    var finalStatus: ProgressActivityFinalStatus? = nil
+    var failureMessage: String? = nil
+    var retryRequest: ProgressRetryRequest? = nil
+    var adapterUpdateCount: Int = 0
+}
+
+struct ConnectionRetryEvent: Identifiable, Hashable {
+    let id: String
+    let text: String
+    let timestamp: TimeInterval
+}
+
+struct ConnectionRetryState: Identifiable, Hashable {
+    var id: String { "connection-retry" }
+    var attemptCount: Int
+    var latestError: String
+    var nextRetryAt: TimeInterval?
+    var events: [ConnectionRetryEvent]
 }
 
 struct LogosMessage: Identifiable, Hashable {
@@ -500,6 +540,15 @@ struct LogosMessage: Identifiable, Hashable {
         }
         let lower = trimmed.lowercased()
         if lower.hasPrefix("still working...") || lower.hasPrefix("still working…") {
+            return "gateway_status"
+        }
+        if lower.range(of: #"^retrying\s+in\s+.+\battempt\s+\d+/\d+\b"#, options: .regularExpression) != nil {
+            return "gateway_status"
+        }
+        if lower.range(of: #"^no response from provider for\s+.*\baborting call\.?$"#, options: .regularExpression) != nil {
+            return "gateway_status"
+        }
+        if lower.range(of: #"(?:preflight\s+compression|context\s+(?:compaction|compression)|(?:compact|compacting|compressing)\s+context)"#, options: .regularExpression) != nil {
             return "gateway_status"
         }
         if lower.hasPrefix("gateway restarting") || lower.hasPrefix("gateway shutting down") {

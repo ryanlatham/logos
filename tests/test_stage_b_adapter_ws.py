@@ -350,6 +350,10 @@ async def test_send_broadcasts_gateway_response_as_state_update(tmp_path):
     assert frame["payload"]["op"] == "message_appended"
     assert frame["payload"]["message"]["role"] == "assistant"
     assert frame["payload"]["message"]["content"] == "Hermes response"
+    assert frame["payload"]["message"]["metadata"]["finalized"] is True
+    assert frame["payload"]["message"]["metadata"]["source"] == "hermes"
+    assert fake_server.frames[-1]["frame"]["type"] == "run_status"
+    assert fake_server.frames[-1]["frame"]["payload"]["status"] == "idle"
 
 
 @pytest.mark.asyncio
@@ -371,6 +375,8 @@ async def test_edit_message_updates_existing_logos_message_for_final_content(tmp
     assert stored is not None
     assert stored.content == "Hermes finished the response."
     assert stored.server_seq > original.server_seq
+    assert stored.metadata["finalized"] is True
+    assert stored.metadata["source"] == "hermes"
     update_frames = [item["frame"] for item in fake_server.frames if item["frame"]["type"] == "state_update" and item["frame"]["payload"].get("op") == "message_updated"]
     assert update_frames
     update = update_frames[-1]
@@ -454,6 +460,7 @@ async def test_progress_message_id_finalize_persists_progress_and_appends_final_
     assert final_stored is not None
     assert final_stored.content == "Final answer after the tool finished."
     assert final_stored.metadata["finalized"] is True
+    assert final_stored.metadata["source"] == "hermes"
     assert final_stored.metadata.get("source") != "tool_progress"
     frames = [item["frame"] for item in fake_server.frames]
     assert frames[0]["type"] == "tool_progress"
@@ -618,6 +625,75 @@ async def test_gateway_still_working_send_broadcasts_transient_status_progress_w
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
     content = "⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+
+    assert sent.success is True
+    assert str(sent.message_id).startswith("progress-")
+    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress"]
+    frame = frames[0]
+    assert frame["project_key"] == "archwright"
+    assert frame["session_id"] == "sess-progress"
+    assert frame["payload"]["kind"] == "gateway_status"
+    assert frame["payload"]["progress_kind"] == "gateway_status"
+    assert frame["payload"]["text"] == content
+    assert frame["payload"]["transient"] is True
+
+
+@pytest.mark.asyncio
+async def test_retry_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    content = "⏳ Retrying in 2.6s (attempt 1/3)..."
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+
+    assert sent.success is True
+    assert str(sent.message_id).startswith("progress-")
+    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress"]
+    frame = frames[0]
+    assert frame["project_key"] == "archwright"
+    assert frame["session_id"] == "sess-progress"
+    assert frame["payload"]["kind"] == "gateway_status"
+    assert frame["payload"]["progress_kind"] == "gateway_status"
+    assert frame["payload"]["text"] == content
+    assert frame["payload"]["transient"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_abort_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    content = "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call."
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+
+    assert sent.success is True
+    assert str(sent.message_id).startswith("progress-")
+    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress"]
+    frame = frames[0]
+    assert frame["project_key"] == "archwright"
+    assert frame["session_id"] == "sess-progress"
+    assert frame["payload"]["kind"] == "gateway_status"
+    assert frame["payload"]["progress_kind"] == "gateway_status"
+    assert frame["payload"]["text"] == content
+    assert frame["payload"]["transient"] is True
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    content = "Preflight compression: compacting context before continuing."
 
     sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
 
