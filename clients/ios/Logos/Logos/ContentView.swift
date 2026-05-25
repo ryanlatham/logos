@@ -1900,8 +1900,7 @@ struct ContentView: View {
 
     private var connectionDetail: String {
         if client.settings.urlString.contains("tail")
-            || client.settings.urlString.contains(".ts")
-            || client.settings.urlString.contains("ryans-mac-studio") {
+            || client.settings.urlString.contains(".ts.net") {
             return "via Tailscale"
         }
         return client.settings.urlString

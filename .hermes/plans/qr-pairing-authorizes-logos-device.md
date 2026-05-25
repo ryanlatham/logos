@@ -67,6 +67,6 @@ python -m pytest tests/test_logos_pairing.py tests/test_stage_e_interactions.py 
 ## Task 4: Safety checks
 
 **Checks:**
-- No files under `/Users/ryan/.hermes/hermes-agent` modified.
+- No files under `/path/to/hermes-agent` modified.
 - No device secrets, QR tokens, or connection strings printed into test output or final report.
 - Existing devices paired before this fix are covered by the dispatch/register path.

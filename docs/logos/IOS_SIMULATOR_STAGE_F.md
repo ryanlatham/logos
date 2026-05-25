@@ -5,13 +5,13 @@ Stage F creates the first SwiftUI phone surface for Logos and validates it again
 ## Location
 
 ```text
-/Users/ryan/Development/logos/clients/ios/Logos
+/path/to/logos/clients/ios/Logos
 ```
 
 Generated project:
 
 ```text
-/Users/ryan/Development/logos/clients/ios/Logos/Logos.xcodeproj
+/path/to/logos/clients/ios/Logos/Logos.xcodeproj
 ```
 
 The project is generated from `project.yml` with XcodeGen. `Logos.xcodeproj/` is generated output and is ignored by the local `.gitignore`.
@@ -39,7 +39,7 @@ The project is generated from `project.yml` with XcodeGen. `Logos.xcodeproj/` is
 
 ## Simulator fixture
 
-`/Users/ryan/Development/logos/scripts/run_stage_f_mock_adapter.py` runs a mock Hermes adapter that uses the real Logos WebSocket, schema, adapter, and SQLite store, but replaces Hermes gateway execution with deterministic fixture behavior:
+`/path/to/logos/scripts/run_stage_f_mock_adapter.py` runs a mock Hermes adapter that uses the real Logos WebSocket, schema, adapter, and SQLite store, but replaces Hermes gateway execution with deterministic fixture behavior:
 
 - normal text -> assistant echo: `Mock Hermes received: <text>`
 - `/mock_approval` -> real `approval_request` frame
@@ -52,9 +52,9 @@ This validates the app against the same wire protocol used by the plugin without
 Start the mock adapter:
 
 ```bash
-cd /Users/ryan/Development/logos
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python \
+cd /path/to/logos
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON \
   scripts/run_stage_f_mock_adapter.py \
   --host 127.0.0.1 \
   --port 8765 \
@@ -65,7 +65,7 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
 Generate the project:
 
 ```bash
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 ```
 
@@ -75,7 +75,7 @@ Build:
 xcodebuild \
   -project Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
   build
 ```
 
@@ -85,7 +85,7 @@ Test:
 xcodebuild \
   -project Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' \
   test
 ```
 
@@ -97,25 +97,25 @@ SIMCTL_CHILD_LOGOS_DEVICE_SECRET=stage-f-secret \
 SIMCTL_CHILD_LOGOS_DEVICE_ID=ios-simulator \
 SIMCTL_CHILD_LOGOS_AUTOCONNECT=1 \
 xcrun simctl launch --terminate-running-process \
-  FD91D719-6C01-4917-A654-B81D3465595A \
-  com.ryan.logos
+  <simulator-udid> \
+  dev.logos.app
 ```
 
 ## Verification
 
-Passed on iPhone 17 Pro Simulator `FD91D719-6C01-4917-A654-B81D3465595A`:
+Passed on iPhone 17 Pro Simulator `<simulator-udid>`:
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 28 passed
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' build
 # succeeded
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 3 unit tests + 2 UI tests
 ```
 

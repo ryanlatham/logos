@@ -6,7 +6,7 @@ This checklist tracks validation that cannot be completed by Xcode Simulator alo
 
 ## Manual gate status
 
-2026-05-18: Ryan reports the physical/manual gate is finished after the follow-up code fixes. This file remains the checklist/template for future reruns. Detailed device model, iOS version, locale, APNS environment, and route metadata were not captured in this repository; do not backfill guesses. No secrets, APNS tokens, or device keys should be pasted here.
+2026-05-18: A tester reports the physical/manual gate is finished after the follow-up code fixes. This file remains the checklist/template for future reruns. Detailed device model, iOS version, locale, APNS environment, and route metadata were not captured in this repository; do not backfill guesses. No secrets, APNS tokens, or device keys should be pasted here.
 
 ## Stage I — real iPhone ASR and speech state machine
 
@@ -15,7 +15,7 @@ Prerequisites:
 - Install the Logos app on a physical iPhone signed with a real development team.
 - Run the Logos adapter on the Mac with `LOGOS_DEVICE_SECRET` configured.
 - Put the iPhone and Mac on the same trusted private network / Tailscale path.
-- Confirm the app adapter URL is `ws://ryans-mac-studio:8765`, or edit it only if the Mac is using a different tailnet/LAN address.
+- Confirm the app adapter URL is `ws://your-mac:8765`, or edit it only if the Mac is using a different tailnet/LAN address.
 
 Validation steps:
 

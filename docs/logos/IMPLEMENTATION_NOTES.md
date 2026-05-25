@@ -27,7 +27,7 @@ During the final Logos Kanban closure rerun, the adapter correctly received the 
 Verification after this fix:
 
 - Focused UI regression: `LogosUITests/testTextMessageRoundTripThroughMockAdapter` passed.
-- Full Xcode target: `LogosModelTests` 50/50 and `LogosUITests` 5/5 passed on Simulator `FD91D719-6C01-4917-A654-B81D3465595A`.
+- Full Xcode target: `LogosModelTests` 50/50 and `LogosUITests` 5/5 passed on Simulator `<simulator-udid>`.
 - Python tests: `49 passed`.
 - Python compile check: passed.
 - `git diff --check`: passed.
@@ -36,15 +36,15 @@ Verification after this fix:
 
 ## Stage A — environment and contract verification
 
-Status: complete for implementation planning. No Hermes core implementation files were modified during this stage. The only repo-local changes are Logos documentation/reference files under `/Users/ryan/Development/logos/docs/logos/`.
+Status: complete for implementation planning. No Hermes core implementation files were modified during this stage. The only repo-local changes are Logos documentation/reference files under `/path/to/logos/docs/logos/`.
 
 ### Workspace and references
 
-- Development workspace: `/Users/ryan/Development/logos`
-- Hermes source inspected: `/Users/ryan/.hermes/hermes-agent`
-- Hermes profile/home: `/Users/ryan/.hermes`
-- Stable reference directory: `/Users/ryan/Development/logos-agent-reference`
-- Repo-local reference copy: `/Users/ryan/Development/logos/docs/logos/reference`
+- Development workspace: `/path/to/logos`
+- Hermes source inspected: `/path/to/hermes-agent`
+- Hermes profile/home: `$HERMES_HOME`
+- Stable reference directory: `/path/to/logos-agent-reference`
+- Repo-local reference copy: `/path/to/logos/docs/logos/reference`
 - Reference hashes copied into repo-local docs:
   - `logos-agent-autonomous-handoff-prompt-v2.md`: `27e7866b927e0fa0d8b9495754ddebaf182feb403cc9848b35e9e93fa9a3f42c`
   - `logos-architecture-v2.2.md`: `6b83ccbb308f23211a1e1b34a33c045e472e0fbd73440a39b91c3dbed5cb63d0`
@@ -53,16 +53,16 @@ Status: complete for implementation planning. No Hermes core implementation file
 
 Hermes repo:
 
-- Root: `/Users/ryan/.hermes/hermes-agent`
+- Root: `/path/to/hermes-agent`
 - `git status --short`: clean
-- Hermes CLI: `/Users/ryan/.hermes/hermes-agent/venv/bin/hermes`
+- Hermes CLI: `/path/to/hermes-agent/venv/bin/hermes`
 - Hermes version: `Hermes Agent v0.13.0 (2026.5.7)`
 - Hermes runtime Python reported by CLI: `3.11.15`
 - System `python3`: `Python 3.9.6` at `/usr/bin/python3`; use Hermes venv Python for Hermes-side scripts/tests.
 
 Logos workspace:
 
-- Root: `/Users/ryan/Development/logos`
+- Root: `/path/to/logos`
 - Git repo initialized.
 - Baseline before Stage A notes: `?? docs/` only.
 
@@ -74,15 +74,15 @@ Logos workspace:
 - Available iOS runtime: `iOS 26.4 (26.4.1 - 23E254a)`
 - Available watchOS runtime: `watchOS 26.4 (26.4 - 23T240b)`
 - Chosen initial simulator destination: `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4`
-  - UDID: `FD91D719-6C01-4917-A654-B81D3465595A`
+  - UDID: `<simulator-udid>`
 - Other available iOS simulators: iPhone 17 Pro Max, iPhone 17e, iPhone Air, iPhone 17, and current iPad devices.
 
 ### Test profile strategy
 
-- Automated Hermes integration tests should avoid mutating the real profile at `/Users/ryan/.hermes`.
-- Use a temporary `HERMES_HOME` under `/Users/ryan/Development/logos/.hermes-test/<name>` for adapter/gateway integration tests whenever possible.
+- Automated Hermes integration tests should avoid mutating the real profile at `$HERMES_HOME`.
+- Use a temporary `HERMES_HOME` under `/path/to/logos/.hermes-test/<name>` for adapter/gateway integration tests whenever possible.
 - Do not run migrations or table changes against the real `state.db` without a timestamped backup.
-- SQLite source of truth for the real profile currently exists at `/Users/ryan/.hermes/state.db`.
+- SQLite source of truth for the real profile currently exists at `$HERMES_HOME/state.db`.
 - Kanban is intentionally shared under Hermes root and should remain on the real `logos-agent-voice-app` board for this implementation ledger.
 
 ## Hermes platform plugin facts
@@ -109,9 +109,9 @@ Important operational details:
 
 Recommended Logos source/runtime strategy:
 
-- Source of truth: `/Users/ryan/Development/logos/plugins/logos/` or equivalent repo path.
-- Runtime install: symlink or copy to `/Users/ryan/.hermes/plugins/logos/`.
-- Manifest: `/Users/ryan/.hermes/plugins/logos/plugin.yaml`.
+- Source of truth: `/path/to/logos/plugins/logos/` or equivalent repo path.
+- Runtime install: symlink or copy to `$HERMES_HOME/plugins/logos/`.
+- Manifest: `$HERMES_HOME/plugins/logos/plugin.yaml`.
 - Enable plugin: `hermes plugins enable logos` or equivalent config edit.
 - Enable platform config: `platforms.logos.enabled: true` in Hermes config once plugin exists.
 
@@ -389,9 +389,9 @@ Logos implications:
 - Board name: `Logos Agent Voice App`
 - Board description: `Implementation of the Logos iPhone voice-and-tap interface for Hermes Agent.`
 - Current active board: `logos-agent-voice-app`
-- Board DB: `/Users/ryan/.hermes/kanban/boards/logos-agent-voice-app/kanban.db`
-- Board metadata: `/Users/ryan/.hermes/kanban/boards/logos-agent-voice-app/board.json`
-- Kanban home/root: `/Users/ryan/.hermes`
+- Board DB: `$HERMES_HOME/kanban/boards/logos-agent-voice-app/kanban.db`
+- Board metadata: `$HERMES_HOME/kanban/boards/logos-agent-voice-app/board.json`
+- Kanban home/root: `$HERMES_HOME`
 
 Available Kanban surface in this agent run:
 
@@ -433,7 +433,7 @@ Available Kanban surface in this agent run:
 
 ## Stage plan adjustments before coding
 
-- Stage B should start with a user plugin scaffold under the Logos workspace, then symlink/copy to `/Users/ryan/.hermes/plugins/logos` only after the source files exist.
+- Stage B should start with a user plugin scaffold under the Logos workspace, then symlink/copy to `$HERMES_HOME/plugins/logos` only after the source files exist.
 - Use a test profile and a minimal gateway runner test before touching real profile config.
 - For first bridge tests, use `chat_type="dm"`, `chat_id="project:default"`, and a deterministic test `user_id` that is admitted by Logos auth config.
 - Implement a Logos-owned sequence/message mirror. Do not depend on Hermes timestamps for pagination.
@@ -474,11 +474,11 @@ Status: implemented and simulator-independent tests passing.
 
 ### Runtime install strategy
 
-- Source of truth remains under `/Users/ryan/Development/logos/plugins/logos`.
+- Source of truth remains under `/path/to/logos/plugins/logos`.
 - Runtime plugin path installed as a symlink:
 
 ```text
-/Users/ryan/.hermes/plugins/logos -> /Users/ryan/Development/logos/plugins/logos
+$HERMES_HOME/plugins/logos -> /path/to/logos/plugins/logos
 ```
 
 - Enabled plugin with `hermes plugins enable logos`.
@@ -508,22 +508,22 @@ Status: implemented and simulator-independent tests passing.
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q \
   tests/test_stage_b_cli.py \
   tests/test_stage_b_schema.py \
   tests/test_stage_b_plugin_registration.py \
   tests/test_stage_b_adapter_ws.py
 # 10 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q \
   plugins/logos scripts/logos_ws_client.py tests
 
 /usr/bin/python3 scripts/logos_ws_client.py --help
 
-PYTHONPATH=/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python - <<'PY'
+PYTHONPATH=/path/to/hermes-agent \
+  $HERMES_PYTHON - <<'PY'
 from hermes_cli.plugins import discover_plugins, get_plugin_manager
 from gateway.config import PlatformConfig
 from gateway.platform_registry import platform_registry
@@ -610,8 +610,8 @@ Tests pass `platforms.logos.extra.store_path` and do not write the real profile.
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q \
   tests/test_stage_b_cli.py \
   tests/test_stage_b_schema.py \
   tests/test_stage_b_plugin_registration.py \
@@ -621,8 +621,8 @@ PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agen
   tests/test_stage_c_adapter_replay.py
 # 18 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q \
   plugins/logos scripts/logos_ws_client.py tests
 ```
 
@@ -676,8 +676,8 @@ Status: implemented for Logos-owned project routing and gateway pass-through. Ex
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 23 passed
 ```
 
@@ -726,12 +726,12 @@ Status: implemented with deterministic adapter fixtures and gateway-compatible c
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 28 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q \
   plugins/logos scripts/logos_ws_client.py tests
 ```
 
@@ -782,22 +782,22 @@ Status: implemented and validated in iPhone Simulator against a deterministic Lo
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 28 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q \
   plugins/logos scripts tests
 
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' build
 # succeeded
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 3 unit tests + 2 UI tests
 ```
 
@@ -843,7 +843,7 @@ Status: implemented with deterministic server-side WAV stub and iOS `AVAudioPlay
 ### Verification commands run
 
 ```bash
-/Users/ryan/.hermes/hermes-agent/venv/bin/python - <<'PY'
+$HERMES_PYTHON - <<'PY'
 try:
     import kokoro
     print('kokoro installed')
@@ -852,21 +852,21 @@ except Exception as exc:
 PY
 # kokoro unavailable: ModuleNotFoundError No module named 'kokoro'
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 31 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins/logos scripts tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q plugins/logos scripts tests
 
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' build
 # succeeded
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 3 unit tests + 2 UI tests
 ```
 
@@ -892,7 +892,7 @@ Status: implemented with deterministic fallback model, strict output validation,
 ### Environment check
 
 ```bash
-/Users/ryan/.hermes/hermes-agent/venv/bin/python - <<'PY'
+$HERMES_PYTHON - <<'PY'
 for mod in ('mlx_lm','mlx','ollama'):
     try:
         __import__(mod)
@@ -939,21 +939,21 @@ ollama list
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests/test_stage_h_fast_model.py
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests/test_stage_h_fast_model.py
 # 5 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 36 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins/logos scripts tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q plugins/logos scripts tests
 
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 3 unit tests + 2 UI tests
 ```
 
@@ -1001,20 +1001,20 @@ Status: implemented and Simulator-verified as far as Simulator can represent.
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 36 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins/logos scripts tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q plugins/logos scripts tests
 
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' build
 # succeeded
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 8 unit tests + 2 UI tests
 ```
 
@@ -1076,28 +1076,28 @@ Status: implemented with private payloads, credential-gated live APNS, and Simul
 ### Verification commands run
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 45 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins/logos scripts tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q plugins/logos scripts tests
 
-cd /Users/ryan/Development/logos/clients/ios/Logos
+cd /path/to/logos/clients/ios/Logos
 xcodegen generate --spec project.yml
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' build
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' build
 # succeeded
 
 xcodebuild -project Logos.xcodeproj -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'platform=iOS Simulator,id=<simulator-udid>' test
 # succeeded: 19 unit tests + 2 UI tests
 
-xcrun simctl push FD91D719-6C01-4917-A654-B81D3465595A \
-  com.ryan.logos docs/logos/stage-j-private-push.apns
-# Notification sent to 'com.ryan.logos'
+xcrun simctl push <simulator-udid> \
+  dev.logos.app docs/logos/stage-j-private-push.apns
+# Notification sent to 'dev.logos.app'
 
-xcrun simctl openurl FD91D719-6C01-4917-A654-B81D3465595A \
+xcrun simctl openurl <simulator-udid> \
   'logos://notification?kind=approval&project_key=default&request_id=appr-sim&server_seq=1'
 # Simulator displayed first-open confirmation for Logos URL route.
 ```
@@ -1163,11 +1163,11 @@ Stage L conclusion:
 - Stage K test report is complete.
 - Device checklist is complete enough for first hardware pass and should be filled in during real iPhone testing.
 - No Apple Watch relay work was started.
-- Physical/manual gate has now been accepted complete by Ryan; no v1 implementation blocker remains.
+- Physical/manual gate has now been accepted complete by the maintainer; no v1 implementation blocker remains.
 
 ## Post-physical/manual closure — 2026-05-18
 
-Status: accepted complete by Ryan after direct code fixes to the remaining field issues.
+Status: accepted complete by the maintainer after direct code fixes to the remaining field issues.
 
 Post-manual code changes reviewed in this closure pass:
 
@@ -1185,22 +1185,22 @@ Post-manual code changes reviewed in this closure pass:
 Fresh verification from this pass:
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q tests
 # 49 passed
 
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/python -m compileall -q plugins scripts tests
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m compileall -q plugins scripts tests
 # passed
 
 xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
-  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' \
+  -destination 'id=<simulator-udid>' \
   -only-testing:LogosTests test
 # LogosModelTests: 50 passed
 
 LOGOS_UI_TEST_WS_URL=ws://127.0.0.1:8766 \
   xcodebuild -project clients/ios/Logos/Logos.xcodeproj -scheme Logos \
-  -destination 'id=FD91D719-6C01-4917-A654-B81D3465595A' test
+  -destination 'id=<simulator-udid>' test
 # LogosUITests: 5 passed against Stage F mock adapter
 ```
 
@@ -1214,8 +1214,8 @@ No v1 implementation blocker remains. Remaining ideas are post-v1 hardening/defe
 Smoke verification after report generation:
 
 ```bash
-PYTHONPATH=/Users/ryan/Development/logos/plugins:/Users/ryan/.hermes/hermes-agent \
-  /Users/ryan/.hermes/hermes-agent/venv/bin/pytest -q \
+PYTHONPATH=/path/to/logos/plugins:/path/to/hermes-agent \
+  $HERMES_PYTHON -m pytest -q \
   tests/test_stage_j_notifications.py tests/test_stage_h_fast_model.py tests/test_stage_g_tts.py
 # 12 passed
 ```

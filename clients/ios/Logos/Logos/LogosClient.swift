@@ -20,7 +20,7 @@ protocol WebSocketTaskMaking {
 }
 
 private enum LogosConnectionLog {
-    static let logger = Logger(subsystem: "com.ryan.logos", category: "connection")
+    static let logger = Logger(subsystem: "dev.logos", category: "connection")
 
     static func urlDescription(_ url: URL) -> String {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)

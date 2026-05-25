@@ -1,6 +1,6 @@
 name: Logos
 options:
-  bundleIdPrefix: com.ryan
+  bundleIdPrefix: dev.logos
   deploymentTarget:
     iOS: "18.0"
   xcodeVersion: "26.0"
@@ -20,7 +20,7 @@ targets:
       - sdk: libsqlite3.tbd
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ryan.logos
+        PRODUCT_BUNDLE_IDENTIFIER: dev.logos.app
         PRODUCT_NAME: Logos
         INFOPLIST_FILE: Logos/Info.plist
         CODE_SIGN_ENTITLEMENTS: Logos/Logos.entitlements
@@ -36,7 +36,7 @@ targets:
       - target: Logos
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ryan.logos.tests
+        PRODUCT_BUNDLE_IDENTIFIER: dev.logos.app.tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Logos.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Logos"
         BUNDLE_LOADER: "$(TEST_HOST)"
@@ -50,7 +50,7 @@ targets:
       - target: Logos
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ryan.logos.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: dev.logos.app.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Logos
 schemes:

@@ -16,6 +16,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -40,18 +41,18 @@ def load_config(path: Path, *, device_id: str | None = None, url: str | None = N
     config = yaml.safe_load(path.expanduser().read_text()) or {}
     logos = ((config.get("platforms") or {}).get("logos") or {})
     extra = logos.get("extra") or {}
-    secret = str(extra.get("device_secret") or "").strip()
+    secret = str(os.getenv("LOGOS_DEVICE_SECRET") or extra.get("device_secret") or "").strip()
     if not secret:
-        raise SystemExit("Logos device_secret missing from config; refusing unauthenticated smoke")
-    host = str(extra.get("host") or "127.0.0.1").strip()
-    port = int(extra.get("port") or 8765)
+        raise SystemExit("Logos device secret missing from LOGOS_DEVICE_SECRET or config platforms.logos.extra.device_secret; refusing unauthenticated smoke")
+    host = str(os.getenv("LOGOS_HOST") or extra.get("host") or "127.0.0.1").strip()
+    port = int(os.getenv("LOGOS_PORT") or extra.get("port") or 8765)
     return LiveConfig(
         url=url or f"ws://{host}:{port}",
         secret=secret,
         device_id=device_id or "logos-live-smoke-cli",
-        fast_model_provider=extra.get("fast_model_provider"),
-        fast_model_model=extra.get("fast_model_model"),
-        tts_provider=extra.get("tts_provider"),
+        fast_model_provider=os.getenv("LOGOS_FAST_MODEL_PROVIDER") or extra.get("fast_model_provider"),
+        fast_model_model=os.getenv("LOGOS_FAST_MODEL_MODEL") or extra.get("fast_model_model"),
+        tts_provider=os.getenv("LOGOS_TTS_PROVIDER") or extra.get("tts_provider"),
     )
 
 
@@ -376,7 +377,8 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run live Logos smoke tests against the Hermes gateway plugin")
-    parser.add_argument("--config", default="/Users/ryan/.hermes/config.yaml")
+    default_config = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")).expanduser() / "config.yaml"
+    parser.add_argument("--config", default=str(default_config))
     parser.add_argument("--device-id", default="logos-live-smoke-cli")
     parser.add_argument("--url", default=None)
     parser.add_argument("--project-prefix", default="live-smoke")

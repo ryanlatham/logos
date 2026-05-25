@@ -47,7 +47,7 @@ def test_derive_device_secret_is_stable_per_device_and_not_master_secret():
 
 def test_pairing_deep_link_is_versioned_url_safe_and_does_not_expose_device_secret():
     url = build_pairing_deep_link(
-        adapter_url="wss://studio.tail752253.ts.net/",
+        adapter_url="wss://your-mac.your-tailnet.ts.net/",
         device_id="iphone-17-pro",
         pair_token="pair-token-secret-value",
         expires_at=1_778_760_000.0,
@@ -59,7 +59,7 @@ def test_pairing_deep_link_is_versioned_url_safe_and_does_not_expose_device_secr
     payload = decode_pairing_deep_link(url)
     assert payload == {
         "v": 1,
-        "adapter_url": "wss://studio.tail752253.ts.net/",
+        "adapter_url": "wss://your-mac.your-tailnet.ts.net/",
         "device_id": "iphone-17-pro",
         "pair_token": "pair-token-secret-value",
         "expires_at": 1_778_760_000.0,
@@ -106,7 +106,7 @@ async def test_websocket_pairing_token_exchange_returns_per_device_secret_and_re
                         "payload": {
                             "pair_token": invite.pair_token,
                             "device_id": "iphone-17-pro",
-                            "display_name": "Ryan's iPhone",
+                            "display_name": "Test iPhone",
                         },
                     }
                 )
@@ -163,7 +163,7 @@ async def test_websocket_accepts_hello_signed_with_per_device_secret_for_enrolle
     device_secret = derive_device_secret(master_secret, device_id)
     adapter.store.upsert_device(
         device_id=device_id,
-        display_name="Ryan's iPhone",
+        display_name="Test iPhone",
         shared_secret_hash=hashlib.sha256(device_secret.encode("utf-8")).hexdigest(),
         capabilities=["text", "speech"],
     )
@@ -224,7 +224,7 @@ async def test_websocket_rejects_post_auth_frames_for_different_device_id(tmp_pa
     device_secret = derive_device_secret(master_secret, device_id)
     adapter.store.upsert_device(
         device_id=device_id,
-        display_name="Ryan's iPhone",
+        display_name="Test iPhone",
         shared_secret_hash=hashlib.sha256(device_secret.encode("utf-8")).hexdigest(),
         capabilities=["text", "speech"],
     )
@@ -280,7 +280,7 @@ async def test_websocket_rejects_post_auth_frames_for_different_device_id(tmp_pa
 def test_qr_pairing_command_registers_and_generates_png_without_printing_token(tmp_path, monkeypatch):
     monkeypatch.setenv("LOGOS_DEVICE_SECRET", "master-secret")
     monkeypatch.setenv("LOGOS_STORE_PATH", str(tmp_path / "logos.db"))
-    monkeypatch.setenv("LOGOS_PUBLIC_URL", "wss://studio.tail752253.ts.net/")
+    monkeypatch.setenv("LOGOS_PUBLIC_URL", "wss://your-mac.your-tailnet.ts.net/")
 
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"store_path": str(tmp_path / "logos.db")}))
     response = adapter.build_pairing_command_response(
@@ -319,7 +319,7 @@ async def test_qr_paired_device_is_gateway_authorized_before_dispatch(tmp_path, 
     )
     adapter.store.upsert_device(
         device_id=device_id,
-        display_name="Ryan's iPhone",
+        display_name="Test iPhone",
         shared_secret_hash=hashlib.sha256(device_secret.encode("utf-8")).hexdigest(),
         capabilities=["text", "speech"],
     )

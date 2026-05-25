@@ -38,7 +38,7 @@ struct LogosConnectionLifecycle: Equatable {
 }
 
 struct LogosSettings: Equatable {
-    static let defaultURLString = "wss://studio.tail752253.ts.net/"
+    static let defaultURLString = "wss://your-mac.your-tailnet.ts.net/"
 
     private static let urlKey = "logos.adapter.url"
     private static let deviceIDKey = "logos.device.id"
@@ -338,7 +338,7 @@ private extension String {
 }
 
 enum LogosKeychain {
-    private static let service = "com.ryan.logos.device-secret"
+    private static let service = "dev.logos.device-secret"
     private static let account = "logos-device-secret"
 
     static func loadSecret() -> String? {

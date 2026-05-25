@@ -2,13 +2,13 @@
 
 Last updated: 2026-05-22T20:42:43-07:00
 
-Workspace: `/Users/ryan/Development/logos`
+Workspace: `/path/to/logos`
 
 Kanban board: `logos-agent-voice-app`
 
-Simulator: `FD91D719-6C01-4917-A654-B81D3465595A` / iPhone 17 Pro
+Simulator: `<simulator-udid>` / iPhone 17 Pro
 
-Bundle id: `com.ryan.logos`
+Bundle id: `dev.logos.app`
 
 Secrets and tokens are intentionally omitted or shown as `[REDACTED]`.
 
@@ -28,7 +28,7 @@ Verified paths:
 - iOS client unit/UI tests pass against the mock adapter for deterministic Simulator UI coverage.
 - Python tests pass for plugin/protocol/store/LLM/TTS/APNS/callback behavior.
 
-Remaining gate: Ryan still needs to run the physical iPhone/manual validation using `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`. Simulator and live CLI smoke tests cannot prove physical microphone, physical speaker audibility, APNS delivery on hardware, or real-device network conditions. Annoying, but physics remains stubborn.
+Remaining gate: the maintainer still needs to run the physical iPhone/manual validation using `docs/logos/LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`. Simulator and live CLI smoke tests cannot prove physical microphone, physical speaker audibility, APNS delivery on hardware, or real-device network conditions. Annoying, but physics remains stubborn.
 
 ## Runtime configuration observed
 
@@ -44,7 +44,7 @@ device_secret_present: True
 Gateway status:
 
 ```text
-Launchd plist: /Users/ryan/Library/LaunchAgents/ai.hermes.gateway.plist
+Launchd plist: ~/Library/LaunchAgents/ai.hermes.gateway.plist
 Service definition matches current Hermes install
 Gateway service is loaded
 PID: 96285
@@ -56,7 +56,7 @@ LastExitStatus: 0
 ### Python tests
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m pytest tests -q
 ```
 
@@ -69,7 +69,7 @@ Result:
 ### Python compile check
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python -m compileall -q plugins/logos scripts tests
 ```
 
@@ -78,7 +78,7 @@ Result: passed with no output.
 ### Live Logos smoke test against real Hermes gateway/plugin
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 python scripts/logos_live_smoke.py --scenario all --timeout 360
 ```
 
@@ -86,7 +86,7 @@ Result summary:
 
 ```json
 {
-  "url": "ws://ryans-mac-studio:8765",
+  "url": "ws://your-mac:8765",
   "device_id": "logos-live-smoke-cli",
   "fast_model_provider": "ollama",
   "fast_model_model": "gemma3:12b",
@@ -133,7 +133,7 @@ This smoke test does **not** use `scripts/run_stage_f_mock_adapter.py`; it conne
 ### Direct TTS runtime probe
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 PYTHONPATH=plugins python - <<'PY'
 from logos.tts import MacOSSayTTS
 audio = MacOSSayTTS(timeout_seconds=8).synthesize('Logos speech smoke test.')
@@ -158,7 +158,7 @@ Ollama was reachable at `127.0.0.1:11434`; model list included `gemma3:12b`.
 Mock adapter setup used for deterministic Simulator UI tests:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 PYTHONPATH=plugins python scripts/run_stage_f_mock_adapter.py \
   --host 127.0.0.1 \
   --port 8766 \
@@ -168,11 +168,11 @@ PYTHONPATH=plugins python scripts/run_stage_f_mock_adapter.py \
 Test command:
 
 ```bash
-cd /Users/ryan/Development/logos
+cd /path/to/logos
 xcodebuild test \
   -project clients/ios/Logos/Logos.xcodeproj \
   -scheme Logos \
-  -destination 'platform=iOS Simulator,id=FD91D719-6C01-4917-A654-B81D3465595A'
+  -destination 'platform=iOS Simulator,id=<simulator-udid>'
 ```
 
 Result:
@@ -185,7 +185,7 @@ LogosModelTests: 67 tests, 0 failures
 Result bundle:
 
 ```text
-/Users/ryan/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.22_20-42-18--0700.xcresult
+~/Library/Developer/Xcode/DerivedData/Logos-dlclbxwcbdpywgftxzecnnzrzohg/Logs/Test/Test-Logos-2026.05.22_20-42-18--0700.xcresult
 ```
 
 Focused UI smoke uses the mock adapter on port `8766`; the latest backend and model-test gates above did not require a persistent mock adapter.
@@ -220,7 +220,7 @@ Review-driven hardening included editable device-key setup, local-network usage 
 | iOS playback lifecycle | Pass | Unit tests cover audio chunk assembly/session activation; UI test observes playback status |
 | iOS approval/clarification UI | Pass | UI tests render and respond to fixture cards |
 | APNS/private notification payload shape | Pass | Unit tests cover private payload/route parsing; live APNS delivery remains physical/manual |
-| Physical iPhone microphone/speaker/APNS | Manual gate | Covered by `LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`; Ryan to run after handoff |
+| Physical iPhone microphone/speaker/APNS | Manual gate | Covered by `LOGOS_PHYSICAL_DEVICE_TEST_GUIDE.html`; a tester should run after handoff |
 
 ## Known limits and manual gate
 
