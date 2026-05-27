@@ -21,6 +21,7 @@ htmlcov/
 # Xcode / Swift generated artifacts
 build/
 DerivedData/
+DerivedData-*/
 *.xcresult
 *.xcuserstate
 xcuserdata/
