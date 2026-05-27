@@ -1,5 +1,10 @@
 import SwiftUI
 import UIKit
+import OSLog
+
+private enum ThreadFocusLog {
+    static let logger = Logger(subsystem: "dev.logos", category: "thread_focus")
+}
 
 @MainActor
 private final class ThreadScrollProximityScheduler {
@@ -93,6 +98,11 @@ struct ThreadTimelineSnapshot: Equatable {
         let nextRetryAt: TimeInterval?
     }
 
+    struct FocusRequest: Equatable {
+        let id: String
+        let targetMessageID: String
+    }
+
     let activeProjectKey: String
     let messages: [Message]
     let progress: Progress?
@@ -108,6 +118,7 @@ struct ThreadTimelineSnapshot: Equatable {
     let composerBottomPadding: CGFloat
     let connectionState: String
     let runStatus: String
+    let focusRequest: FocusRequest?
 
     var messageFingerprint: String {
         [
@@ -166,7 +177,9 @@ struct ThreadTimelineSnapshot: Equatable {
             composerMode,
             "\(composerBottomPadding)",
             connectionState,
-            runStatus
+            runStatus,
+            focusRequest?.id ?? "no-focus",
+            focusRequest?.targetMessageID ?? "no-focus-target"
         ]
         return parts.joined(separator: "|")
     }
@@ -224,6 +237,8 @@ struct ContentView: View {
     @State private var detachedThreadContentFingerprint: String?
     @State private var lastFollowedThreadContentFingerprint = ""
     @State private var lastForceFollowedThreadContentFingerprint: String?
+    @State private var lastHandledThreadFocusRequestID: String?
+    @State private var suppressNextThreadContentChangeForFocusClear = false
     @State private var hasInitializedThreadScroll = false
     @State private var threadScrollProximityScheduler = ThreadScrollProximityScheduler()
     @State private var threadFollowTask: Task<Void, Never>?
@@ -297,6 +312,7 @@ struct ContentView: View {
         .animation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28), value: showSettings)
         .onAppear(perform: configureRuntime)
         .onChange(of: scenePhase) { _, newPhase in
+            client.updateSceneActivationForPlayback(isActive: newPhase == .active)
             if newPhase == .active {
                 client.resumeAudioForSceneActive()
                 client.connectIfAutoConnectEnabled()
@@ -632,7 +648,10 @@ struct ContentView: View {
             composerMode: String(describing: composerMode),
             composerBottomPadding: composerMode == .text ? 16 : 28,
             connectionState: client.connectionState.rawValue,
-            runStatus: client.runStatus.rawValue
+            runStatus: client.runStatus.rawValue,
+            focusRequest: client.threadFocusRequest.map {
+                ThreadTimelineSnapshot.FocusRequest(id: $0.id, targetMessageID: $0.targetMessageID)
+            }
         )
     }
 
@@ -1524,6 +1543,10 @@ struct ContentView: View {
         notifications.onDeviceToken = { token in
             client.registerDevice(apnsToken: token)
         }
+        if let token = notifications.deviceToken {
+            client.registerDevice(apnsToken: token)
+        }
+        client.updateSceneActivationForPlayback(isActive: scenePhase == .active)
         notifications.onRoute = { route in
             client.handleNotificationRoute(route)
         }
@@ -1581,6 +1604,10 @@ struct ContentView: View {
     private func handleThreadContentChanged(forceFollow: Bool = false) {
         // ThreadTimelineSnapshot is the single visible-thread trigger; ThreadAutoFollowPolicy defines when to stay attached.
         // Only detach after an intentional user scroll far enough from bottom.
+        if suppressNextThreadContentChangeForFocusClear, forceFollow == false {
+            suppressNextThreadContentChangeForFocusClear = false
+            return
+        }
         if forceFollow {
             let followedFingerprint = threadContentFingerprint
             lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
@@ -1590,6 +1617,8 @@ struct ContentView: View {
                 followedFingerprint: followedFingerprint,
                 force: true
             )
+        } else if let focus = client.threadFocusRequest, handleThreadFocusRequest(focus) {
+            return
         } else if shouldFollowThread && isThreadUserDetached == false {
             let followedFingerprint = threadContentFingerprint
             scrollThreadToBottomAfterLayout(
@@ -1602,6 +1631,20 @@ struct ContentView: View {
                 hasUnseenThreadUpdates = true
             }
         }
+    }
+
+    private func handleThreadFocusRequest(_ focus: ThreadFocusRequest) -> Bool {
+        guard focus.projectKey == client.activeProjectKey else { return false }
+        guard client.messages.contains(where: { $0.id == focus.targetMessageID }) else { return false }
+        guard lastHandledThreadFocusRequestID != focus.id else { return true }
+        lastHandledThreadFocusRequestID = focus.id
+        lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
+        suppressNextThreadContentChangeForFocusClear = true
+        // Finished-notification taps are explicit route focus events; generic bottom scrolling is insufficient for notification replay.
+        scrollThreadToTargetAfterLayout(targetID: focus.targetMessageID, anchor: .bottom, animated: true, force: true)
+        ThreadFocusLog.logger.info("Thread focus scheduled focus_id=\(focus.id, privacy: .public) project_key=\(focus.projectKey, privacy: .public) target_message_id=\(focus.targetMessageID, privacy: .public) visible=true")
+        client.completeThreadFocusRequest(id: focus.id)
+        return true
     }
 
     private func detachThreadFromAutoFollow() {
@@ -1710,6 +1753,31 @@ struct ContentView: View {
         }
     }
 
+    private func scrollThreadToTarget(
+        targetID: String,
+        anchor: UnitPoint,
+        animated: Bool,
+        recordFollowedSnapshot: Bool = true,
+        followedFingerprint: String? = nil
+    ) {
+        let action = {
+            threadScrollPosition.scrollTo(id: targetID, anchor: anchor)
+            shouldFollowThread = true
+            hasUnseenThreadUpdates = false
+            isThreadUserDetached = false
+            userInitiatedThreadScrollObserved = false
+            detachedThreadContentFingerprint = nil
+            if recordFollowedSnapshot {
+                lastFollowedThreadContentFingerprint = followedFingerprint ?? threadContentFingerprint
+            }
+        }
+        if animated {
+            withAnimation(.easeOut(duration: 0.18), action)
+        } else {
+            action()
+        }
+    }
+
     private func scrollThreadToBottomAfterLayout(
         animated: Bool,
         recordFollowedSnapshot: Bool = true,
@@ -1754,8 +1822,57 @@ struct ContentView: View {
         }
     }
 
+    private func scrollThreadToTargetAfterLayout(
+        targetID: String,
+        anchor: UnitPoint,
+        animated: Bool,
+        force: Bool = false
+    ) {
+        cancelPendingThreadFollow()
+        threadFollowEpoch += 1
+        let scheduledEpoch = threadFollowEpoch
+        let scheduledProjectKey = client.activeProjectKey
+        let followedFingerprint = threadContentFingerprint
+        let scheduledCanFollow = ThreadAutoFollowPolicy.shouldApplyFollow(
+            force: force,
+            shouldFollowThread: shouldFollowThread,
+            isThreadUserDetached: isThreadUserDetached
+        )
+        threadFollowTask = Task { @MainActor in
+            defer {
+                if scheduledEpoch == threadFollowEpoch {
+                    threadFollowTask = nil
+                }
+            }
+            await Task.yield()
+            guard shouldApplyScheduledThreadTargetFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, targetID: targetID, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
+            scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: animated, followedFingerprint: followedFingerprint)
+            ThreadFocusLog.logger.info("Thread focus applied pass=1 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
+
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard shouldApplyScheduledThreadTargetFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, targetID: targetID, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
+            scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: false, followedFingerprint: followedFingerprint)
+            ThreadFocusLog.logger.info("Thread focus applied pass=2 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
+
+            try? await Task.sleep(nanoseconds: 420_000_000)
+            guard shouldApplyScheduledThreadTargetFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, targetID: targetID, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
+            scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: false, followedFingerprint: followedFingerprint)
+            ThreadFocusLog.logger.info("Thread focus applied pass=3 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
+        }
+    }
+
     private func shouldApplyScheduledThreadFollow(epoch: Int, projectKey: String?, force: Bool, scheduledCanFollow: Bool) -> Bool {
         guard Task.isCancelled == false, epoch == threadFollowEpoch, client.activeProjectKey == projectKey else { return false }
+        return ThreadAutoFollowPolicy.shouldApplyFollow(
+            force: force,
+            shouldFollowThread: scheduledCanFollow && shouldFollowThread,
+            isThreadUserDetached: isThreadUserDetached
+        )
+    }
+
+    private func shouldApplyScheduledThreadTargetFollow(epoch: Int, projectKey: String?, targetID: String, force: Bool, scheduledCanFollow: Bool) -> Bool {
+        guard Task.isCancelled == false, epoch == threadFollowEpoch, client.activeProjectKey == projectKey else { return false }
+        guard client.messages.contains(where: { $0.id == targetID }) else { return false }
         return ThreadAutoFollowPolicy.shouldApplyFollow(
             force: force,
             shouldFollowThread: scheduledCanFollow && shouldFollowThread,
@@ -1799,6 +1916,8 @@ struct ContentView: View {
         detachedThreadContentFingerprint = nil
         lastFollowedThreadContentFingerprint = threadContentFingerprint
         lastForceFollowedThreadContentFingerprint = threadMessageFingerprint
+        lastHandledThreadFocusRequestID = nil
+        suppressNextThreadContentChangeForFocusClear = false
         scrollThreadToBottomAfterLayout(animated: false, force: true)
     }
 
@@ -2635,7 +2754,7 @@ private struct AudioPlaybackOverlayView: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(overlay.phase == .paused ? "Audio paused" : "Audio playing")
+                Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.logosLabel)
                 Text(overlay.detail)
@@ -2679,6 +2798,23 @@ private struct AudioPlaybackOverlayView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
         .shadow(color: .black.opacity(0.28), radius: 16, x: 0, y: 8)
         .accessibilityIdentifier("audioPlaybackOverlay")
+    }
+
+    private var title: String {
+        switch overlay.phase {
+        case .requesting:
+            return "Preparing audio"
+        case .receiving:
+            return "Receiving audio"
+        case .playing:
+            return "Audio playing"
+        case .paused:
+            return "Audio paused"
+        case .finished:
+            return "Audio finished"
+        case .failed:
+            return "Audio failed"
+        }
     }
 }
 

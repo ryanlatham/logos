@@ -105,6 +105,23 @@ Authenticated `hello` responses and `registered` responses include app-facing co
 
 `client_config.stale_timeout_seconds` is the app's silence threshold for adding a local "haven't heard from Hermes" notice. It defaults to `900`, can be configured with `platforms.logos.extra.timeout_seconds`, and is overridden by `LOGOS_TIMEOUT_SECONDS`. It does not change Hermes' own agent inactivity timeout.
 
+## Private notification routing
+
+`register_device` may include `apns_token`, `apns_environment`, and `capabilities`. iOS sends `apns_environment: "sandbox"` for Debug/device builds and `"production"` for Release/TestFlight builds. The adapter stores that environment per device and uses it to choose the APNS host, so mixed development and TestFlight devices can share the same Logos store.
+
+Server APNS delivery uses Apple's token-based HTTP/2 provider API with the configured `.p8` auth key. Logos does not use APNS SSL certificates.
+
+Completion, approval, and clarification APNS payloads are private signals. They carry routing ids only:
+
+- `kind`
+- `project_key`
+- `session_id`
+- `message_id`
+- `request_id`
+- `server_seq`
+
+On a `kind: "finished"` notification tap, the app switches to `project_key`, reconnects/authenticates if needed, fetches `messages_get` from `max(server_seq - 1, 0)`, and plays one matched finalized assistant response using `final_auto`. Approval and clarification notifications only route and sync state; they do not trigger playback.
+
 ## Message model
 
 Swift shape:

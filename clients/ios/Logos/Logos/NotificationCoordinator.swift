@@ -47,6 +47,20 @@ struct LogosNotificationRoute: Equatable {
     }
 }
 
+enum LogosAPNSEnvironment {
+    static func resolved(isDebugBuild: Bool = Self.isDebugBuild) -> String {
+        isDebugBuild ? "sandbox" : "production"
+    }
+
+    private static var isDebugBuild: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
+}
+
 @MainActor
 final class NotificationCoordinator: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationCoordinator()
@@ -55,7 +69,11 @@ final class NotificationCoordinator: NSObject, ObservableObject, UNUserNotificat
     @Published private(set) var deviceToken: String?
     @Published private(set) var lastRoute: LogosNotificationRoute?
 
-    var onRoute: ((LogosNotificationRoute) -> Void)?
+    var onRoute: ((LogosNotificationRoute) -> Void)? {
+        didSet {
+            deliverLastRouteIfPossible()
+        }
+    }
     var onDeviceToken: ((String) -> Void)?
 
     private override init() {
@@ -90,7 +108,13 @@ final class NotificationCoordinator: NSObject, ObservableObject, UNUserNotificat
 
     func route(_ route: LogosNotificationRoute) {
         lastRoute = route
-        onRoute?(route)
+        deliverLastRouteIfPossible()
+    }
+
+    private func deliverLastRouteIfPossible() {
+        guard let route = lastRoute, let onRoute else { return }
+        lastRoute = nil
+        onRoute(route)
     }
 
     nonisolated func userNotificationCenter(

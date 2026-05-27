@@ -1039,13 +1039,13 @@ Status: implemented with private payloads, credential-gated live APNS, and Simul
 
 ### Files added/changed
 
-- `plugins/logos/apns.py` — APNS config/env loading, ES256 provider-token signing path, private payload builder, and live-send skip behavior when credentials/device tokens are absent.
-- `plugins/logos/store.py` — `logos_devices` table plus `LogosDevice` model and upsert/list/get helpers for APNS token and capability metadata.
+- `plugins/logos/apns.py` — APNS config/env loading, ES256 provider-token signing path, HTTP/2 live-send transport, per-device sandbox/production host selection, private payload builder, and live-send skip behavior when credentials/device tokens are absent.
+- `plugins/logos/store.py` — `logos_devices` table plus `LogosDevice` model and upsert/list/get helpers for APNS token and capability metadata, including APNS registration clearing for stale Apple tokens.
 - `plugins/logos/adapter.py` — `register_device` handling, device persistence, server capability negotiation, private completion/approval/clarification notification sends, and app-focus update handling.
-- `tests/test_stage_j_notifications.py` — private-payload regression tests, device registration persistence, and missing-credential APNS skip test.
+- `tests/test_stage_j_notifications.py` — private-payload regression tests, device registration persistence, device capability/environment routing, HTTP/2 APNS transport metadata, Apple error-reason preservation, stale-token cleanup, finalized completion push coverage, and missing-credential APNS skip test.
 - `clients/ios/Logos/Logos/NotificationCoordinator.swift` — notification authorization, APNS device-token capture, notification route parsing, URL deep-link route parsing, and route callback.
 - `clients/ios/Logos/Logos/LogosApp.swift` — iOS app delegate registration for APNS token callbacks.
-- `clients/ios/Logos/Logos/LogosClient.swift` — `register_device` frame sender and notification-route reconnect/delta sync handling.
+- `clients/ios/Logos/Logos/LogosClient.swift` — `register_device` frame sender, build-derived APNS environment registration, notification-route reconnect/delta sync handling, and finished-notification final-response playback.
 - `clients/ios/Logos/Logos/ContentView.swift` — Notifications panel with explicit Enable button and route status surface.
 - `clients/ios/Logos/Logos/Info.plist` — `remote-notification` background mode and `logos://` URL scheme.
 - `clients/ios/Logos/LogosTests/LogosModelTests.swift` — unit tests for private-push route parsing, `logos://` deep-link parsing, URL scheme, and background mode.
@@ -1055,8 +1055,11 @@ Status: implemented with private payloads, credential-gated live APNS, and Simul
 
 ### Implemented Stage J behavior
 
-- Client sends `register_device` with device id, display name, capabilities, APNS token when available, and APNS environment.
+- Client sends `register_device` with device id, display name, capabilities, APNS token when available, and APNS environment. Debug/device builds register `sandbox`; Release/TestFlight builds register `production`.
 - Adapter persists devices in `logos_devices` without echoing raw APNS tokens back over WebSocket.
+- Adapter sends APNS through the stored device environment, so sandbox and production devices can coexist. Devices without APNS tokens or without the `notifications` capability are skipped.
+- Live APNS uses Apple's HTTP/2 provider API with token-based `.p8` authentication. APNS SSL certificates are not required for Logos.
+- Apple APNS errors preserve status, APNS id, and reason in sanitized logs. `BadDeviceToken`, `DeviceTokenNotForTopic`, and `Unregistered` clear the stored APNS token without revoking the Logos device pairing.
 - APNS payloads are private by construction:
   - completion: `Hermes finished` / `Open Logos to view the result.`
   - approval: `Hermes needs approval` / `Open Logos to continue.`
@@ -1069,8 +1072,9 @@ Status: implemented with private payloads, credential-gated live APNS, and Simul
   - `LOGOS_APNS_BUNDLE_ID`
   - `LOGOS_APNS_AUTH_KEY_PATH`
   - `LOGOS_APNS_ENV` (`sandbox` or `production`)
-- iOS notification permission is user-controlled via the Notifications panel `Enable` button; no surprise permission prompt on launch. Sensible. Ambushing users with prompts is amateur hour.
+- iOS notification permission is user-controlled via the Notifications panel `Enable` button; no surprise permission prompt on launch.
 - Notification tap / route handling maps payload ids to app state and calls reconnect + `messages_get` delta sync from `server_seq - 1`.
+- Finished notification routes are retained until the app is authenticated and the final assistant message is available. The app matches by `message_id` first, falls back to the latest finalized assistant message in the routed project/session at or after `server_seq`, and requests `final_auto` playback exactly once. Approval and clarification notifications sync state but do not auto-play.
 - `logos://notification?...` deep links are supported for Simulator/development route validation.
 
 ### Verification commands run

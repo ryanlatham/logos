@@ -813,9 +813,11 @@ After the user taps the notification:
 
 1. App opens to the relevant project.
 2. WebSocket reconnects.
-3. App sends `messages_get` with `after_server_seq`.
+3. App sends `messages_get` with `after_server_seq`, usually `server_seq - 1` from the private payload.
 4. Adapter returns the missed message, summary-ready metadata, or pending approval/clarification request.
-5. User reads or taps play for audio.
+5. For `kind: "finished"`, the app matches the finalized assistant message by `message_id` first, falls back to the latest finalized message in the routed project/session at or after `server_seq`, and starts `final_auto` playback once. Approval and clarification routes reveal their cards without autoplay.
+
+The app records the APNS environment during `register_device`: Debug/device builds use `sandbox`; Release/TestFlight builds use `production`. The adapter must send through the stored device environment rather than a single global host, because development and TestFlight devices can be registered at the same time.
 
 A convenience mode that includes the summary in APNS can be added later as an explicit privacy tradeoff, but it is not core v1.
 

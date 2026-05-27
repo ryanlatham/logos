@@ -62,6 +62,20 @@ class SummaryResult:
         }
 
 
+@dataclass(frozen=True)
+class ErrorExplanationResult:
+    message_text: str
+    source_hash: str
+    source_chars: int
+
+    def to_protocol(self) -> dict[str, Any]:
+        return {
+            "message_text": self.message_text,
+            "source_hash": self.source_hash,
+            "source_chars": self.source_chars,
+        }
+
+
 def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     if isinstance(raw, dict):
         data = raw
@@ -140,12 +154,45 @@ def parse_summary_json(raw: str | bytes | dict[str, Any], *, source_text: str, s
     )
 
 
+def parse_error_explanation_json(raw: str | bytes | dict[str, Any], *, source_text: str) -> ErrorExplanationResult:
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        try:
+            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"error explanation model output is not valid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("error explanation model output must be a JSON object")
+    message_text = sanitize_error_explanation_text(_optional_nonempty_str(data.get("message_text"), "message_text"))
+    if not message_text:
+        raise ValueError("message_text is required")
+    original = str(source_text or "")
+    return ErrorExplanationResult(
+        message_text=message_text,
+        source_hash=hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        source_chars=len(original),
+    )
+
+
 def sanitize_summary_text(text: str) -> str:
     sanitized = str(text or "")
     for pattern in _SECRET_PATTERNS:
         sanitized = pattern.sub(lambda match: (match.group(1) if match.lastindex else "") + "[REDACTED]", sanitized)
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
     return sanitized
+
+
+MAX_ERROR_EXPLANATION_CHARS = 420
+
+
+def sanitize_error_explanation_text(text: str | None) -> str | None:
+    if text is None:
+        return None
+    sanitized = sanitize_summary_text(text).replace("```", "").strip()
+    if len(sanitized) > MAX_ERROR_EXPLANATION_CHARS:
+        sanitized = sanitized[: max(0, MAX_ERROR_EXPLANATION_CHARS - 1)].rstrip() + "…"
+    return sanitized or None
 
 
 DIRECT_RESPONSE_KINDS = {"social", "app_help", "simple_text"}
@@ -383,6 +430,23 @@ class DeterministicFastModel:
             source_chars=len(original),
         )
 
+    def explain_error(self, text: str) -> ErrorExplanationResult:
+        original = str(text or "")
+        source_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        raw = sanitize_summary_text(original).lstrip("⚠️⚠❌ ").strip()
+        if not raw:
+            raw = "an internal error"
+        message = (
+            "Hermes hit an unrecoverable error before it could answer. "
+            f"The underlying error was: {raw}. "
+            "Please retry, or switch models if it keeps happening."
+        )
+        return ErrorExplanationResult(
+            message_text=sanitize_error_explanation_text(message) or "Hermes hit an unrecoverable error before it could answer.",
+            source_hash=source_hash,
+            source_chars=len(original),
+        )
+
     @staticmethod
     def _ack_text(normalized: str) -> str:
         if not normalized:
@@ -456,6 +520,22 @@ class OllamaFastModel:
         except Exception as exc:
             self.last_error = str(exc)
             return self.fallback.summarize(text)
+
+    def explain_error(self, text: str) -> ErrorExplanationResult:
+        prompt = _error_explanation_prompt(text)
+        try:
+            raw = self.transport(
+                endpoint=self.endpoint,
+                model=self.model,
+                prompt=prompt,
+                timeout_seconds=self.timeout_seconds,
+            )
+            result = parse_error_explanation_json(raw, source_text=text)
+            self.last_error = None
+            return result
+        except Exception as exc:
+            self.last_error = str(exc)
+            return self.fallback.explain_error(text)
 
     def _apply_direct_response_policy(self, result: FastModelResult, text: str) -> FastModelResult:
         if not result.direct_response_text:
@@ -555,6 +635,16 @@ def _summary_prompt(text: str, *, summary_max_chars: int) -> str:
         "Summarize this Hermes assistant response for notification metadata and compact surfaces. Return only strict JSON: "
         "{\"summary_text\":\"...\"}. One sentence, no secrets, no markdown, "
         f"maximum {summary_max_chars} characters. Text: {json.dumps(str(text or ''))}"
+    )
+
+
+def _error_explanation_prompt(text: str) -> str:
+    return (
+        "Rewrite this raw Hermes/provider failure into one short, user-facing final message. "
+        "Return only strict JSON: {\"message_text\":\"...\"}. Explain that Hermes could not complete the request, "
+        "include the useful provider error in plain language, suggest retrying or switching models if it repeats, "
+        "and do not include secrets, stack traces, markdown, or blame. Raw error: "
+        f"{json.dumps(str(text or ''))}"
     )
 
 

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import base64
-import http.client
 import json
 import os
 import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 class PrivateNotificationKind(str, Enum):
@@ -43,9 +42,13 @@ class APNSConfig:
 
     @property
     def host(self) -> str:
-        if self.environment == "production":
-            return "api.push.apple.com"
-        return "api.sandbox.push.apple.com"
+        return apns_host_for_environment(self.environment)
+
+
+def apns_host_for_environment(environment: str | None) -> str:
+    if str(environment or "").strip().lower() == "production":
+        return "api.push.apple.com"
+    return "api.sandbox.push.apple.com"
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,17 @@ class APNSSendResult:
     reason: str | None = None
     status: int | None = None
     apns_id: str | None = None
+    environment: str | None = None
+    host: str | None = None
+    http_version: str | None = None
+    temporary_failure: bool = False
+
+
+APNS_PROVIDER_TOKEN_ERROR_REASONS = {
+    "ExpiredProviderToken",
+    "InvalidProviderToken",
+    "MissingProviderToken",
+}
 
 
 def build_private_apns_payload(
@@ -102,25 +116,46 @@ def build_private_apns_payload(
 
 
 class APNSClient:
-    def __init__(self, config: APNSConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: APNSConfig | None = None,
+        *,
+        http_client_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self.config = config or APNSConfig.from_env()
         self._jwt: str | None = None
         self._jwt_created_at: float = 0.0
+        self._http_client_factory = http_client_factory or _default_http_client_factory
+        self._clients: dict[str, Any] = {}
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "APNSClient":
         return cls(APNSConfig.from_env(env))
 
-    def send(self, device_token: str, payload: dict[str, Any]) -> APNSSendResult:
+    async def send(self, device_token: str, payload: dict[str, Any], *, environment: str | None = None) -> APNSSendResult:
+        resolved_environment = _normalize_environment(environment or self.config.environment)
+        host = apns_host_for_environment(resolved_environment)
         if not self.config.configured:
-            return APNSSendResult(success=False, skipped=True, reason="missing_credentials")
+            return APNSSendResult(
+                success=False,
+                skipped=True,
+                reason="missing_credentials",
+                environment=resolved_environment,
+                host=host,
+            )
         token = str(device_token or "").strip()
         if not token:
-            return APNSSendResult(success=False, skipped=True, reason="missing_device_token")
+            return APNSSendResult(
+                success=False,
+                skipped=True,
+                reason="missing_device_token",
+                environment=resolved_environment,
+                host=host,
+            )
         try:
             jwt = self._provider_token()
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            conn = http.client.HTTPSConnection(self.config.host, timeout=self.config.timeout_seconds)
+            client = self._client_for(resolved_environment)
             headers = {
                 "authorization": f"bearer {jwt}",
                 "apns-topic": self.config.bundle_id or "",
@@ -128,16 +163,58 @@ class APNSClient:
                 "apns-priority": "10",
                 "content-type": "application/json",
             }
-            conn.request("POST", f"/3/device/{token}", body=body, headers=headers)
-            response = conn.getresponse()
-            response_body = response.read().decode("utf-8", errors="replace")
-            apns_id = response.getheader("apns-id")
-            if 200 <= response.status < 300:
-                return APNSSendResult(success=True, status=response.status, apns_id=apns_id)
-            reason = response_body or response.reason
-            return APNSSendResult(success=False, status=response.status, apns_id=apns_id, reason=reason)
+            response = await client.post(f"/3/device/{token}", content=body, headers=headers)
+            status = int(getattr(response, "status_code", 0) or 0)
+            response_headers = getattr(response, "headers", {}) or {}
+            apns_id = response_headers.get("apns-id") or response_headers.get("apns-request-id")
+            reason = _apns_response_reason(response)
+            http_version = str(getattr(response, "http_version", "") or "") or None
+            success = 200 <= status < 300
+            result = APNSSendResult(
+                success=success,
+                status=status,
+                apns_id=apns_id,
+                reason=None if success else reason,
+                environment=resolved_environment,
+                host=host,
+                http_version=http_version,
+                temporary_failure=_is_temporary_apns_status(status),
+            )
+            if reason in APNS_PROVIDER_TOKEN_ERROR_REASONS:
+                await self._reset_auth_state()
+            return result
         except Exception as exc:
-            return APNSSendResult(success=False, reason=type(exc).__name__)
+            return APNSSendResult(
+                success=False,
+                reason=type(exc).__name__,
+                environment=resolved_environment,
+                host=host,
+                temporary_failure=_is_temporary_transport_error(exc),
+            )
+
+    async def aclose(self) -> None:
+        clients = list(self._clients.values())
+        self._clients.clear()
+        for client in clients:
+            close = getattr(client, "aclose", None)
+            if close is None:
+                continue
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
+    def _client_for(self, environment: str) -> Any:
+        client = self._clients.get(environment)
+        if client is None:
+            host = apns_host_for_environment(environment)
+            client = self._http_client_factory(host=host, timeout=self.config.timeout_seconds, http2=True)
+            self._clients[environment] = client
+        return client
+
+    async def _reset_auth_state(self) -> None:
+        self._jwt = None
+        self._jwt_created_at = 0.0
+        await self.aclose()
 
     def _provider_token(self) -> str:
         now = time.time()
@@ -174,3 +251,51 @@ def _b64url_json(value: dict[str, Any]) -> str:
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _normalize_environment(environment: str | None) -> str:
+    return "production" if str(environment or "").strip().lower() == "production" else "sandbox"
+
+
+def _default_http_client_factory(*, host: str, timeout: float, http2: bool) -> Any:
+    try:
+        import h2  # noqa: F401
+        import httpx
+    except Exception as exc:  # pragma: no cover - depends on optional runtime package
+        raise RuntimeError("httpx with HTTP/2 support is required for APNS delivery") from exc
+    return httpx.AsyncClient(base_url=f"https://{host}", http2=http2, timeout=timeout)
+
+
+def _apns_response_reason(response: Any) -> str | None:
+    content = getattr(response, "content", b"")
+    if content:
+        try:
+            parsed = response.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("reason", "error", "message"):
+                value = parsed.get(key)
+                if value:
+                    return str(value)
+        text = str(getattr(response, "text", "") or "").strip()
+        if text:
+            return text
+    phrase = str(getattr(response, "reason_phrase", "") or "").strip()
+    return phrase or None
+
+
+def _is_temporary_apns_status(status: int | None) -> bool:
+    if status is None:
+        return False
+    return int(status) == 429 or int(status) >= 500
+
+
+def _is_temporary_transport_error(exc: Exception) -> bool:
+    if "Timeout" in type(exc).__name__:
+        return True
+    try:
+        import httpx
+    except Exception:
+        return False
+    return isinstance(exc, httpx.TransportError)

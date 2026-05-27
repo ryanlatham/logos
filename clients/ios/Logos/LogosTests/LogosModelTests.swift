@@ -38,6 +38,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(composerBottomPadding: 16))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(connectionState: "disconnected"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(runStatus: "cancelling"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(focusRequest: .init(id: "focus-1", targetMessageID: "session:final")))
     }
 
     private func makeThreadTimelineSnapshot(
@@ -55,7 +56,8 @@ final class LogosModelTests: XCTestCase {
         composerMode: String = "paused",
         composerBottomPadding: CGFloat = 28,
         connectionState: String = "connected",
-        runStatus: String = "running"
+        runStatus: String = "running",
+        focusRequest: ThreadTimelineSnapshot.FocusRequest? = nil
     ) -> ThreadTimelineSnapshot {
         ThreadTimelineSnapshot(
             activeProjectKey: activeProjectKey,
@@ -72,7 +74,8 @@ final class LogosModelTests: XCTestCase {
             composerMode: composerMode,
             composerBottomPadding: composerBottomPadding,
             connectionState: connectionState,
-            runStatus: runStatus
+            runStatus: runStatus,
+            focusRequest: focusRequest
         )
     }
 
@@ -208,6 +211,67 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNil(final.progressKind)
     }
 
+    func testGatewayErrorStatusTextIsProgressEvenWithLegacyFinalMetadata() throws {
+        let retryStatus = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "alpha",
+            "session_id": "sess-alpha",
+            "message_id": "m-retry-status",
+            "server_seq": 10,
+            "role": "assistant",
+            "content": "⚠️ Non-retryable error (HTTP None) — trying fallback...",
+            "timestamp": 126.0,
+            "metadata": [
+                "finalized": true,
+                "source": "hermes",
+                "request_id": "req-error"
+            ]
+        ]))
+        XCTAssertTrue(retryStatus.isProgressUpdate)
+        XCTAssertEqual(retryStatus.gatewayProgressKind, "gateway_status")
+
+        let terminalStatus = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "alpha",
+            "session_id": "sess-alpha",
+            "message_id": "m-terminal-status",
+            "server_seq": 11,
+            "role": "assistant",
+            "content": "❌ Non-retryable error (HTTP None): 'NoneType' object is not iterable",
+            "timestamp": 127.0,
+            "metadata": [
+                "finalized": true,
+                "source": "hermes",
+                "request_id": "req-error"
+            ]
+        ]))
+        XCTAssertTrue(terminalStatus.isProgressUpdate)
+        XCTAssertEqual(terminalStatus.gatewayProgressKind, "gateway_status")
+    }
+
+    func testReadableErrorFinalMetadataMarksMessageFailedButNotProgress() throws {
+        let message = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "alpha",
+            "session_id": "sess-alpha",
+            "message_id": "m-readable-error",
+            "server_seq": 12,
+            "role": "assistant",
+            "content": "Hermes hit an unrecoverable error before it could answer.",
+            "timestamp": 128.0,
+            "metadata": [
+                "finalized": true,
+                "source": "hermes_error",
+                "final_status": "failed",
+                "error": true,
+                "request_id": "req-error"
+            ]
+        ]))
+
+        XCTAssertFalse(message.isProgressUpdate)
+        XCTAssertTrue(message.isFinal)
+        XCTAssertEqual(message.metadataSource, "hermes_error")
+        XCTAssertEqual(message.metadataFinalStatus, "failed")
+        XCTAssertTrue(message.metadataIsError)
+    }
+
     func testSQLiteMessageStorePersistsProgressMetadata() throws {
         let filename = "LogosTests-\(UUID().uuidString).sqlite3"
         let store = SQLiteMessageStore(filename: filename)
@@ -239,6 +303,26 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(loaded.progressKind, "terminal")
         XCTAssertEqual(loaded.metadataRequestID, "req-progress")
         XCTAssertEqual(loaded.metadataTransient, false)
+    }
+
+    func testSQLiteMessageStoreLoadsLatestMessagesInAscendingOrder() throws {
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        for index in 1...150 {
+            store.upsert(LogosMessage(
+                projectKey: "default",
+                sessionID: "session-history",
+                messageID: "message-\(index)",
+                serverSeq: index,
+                role: "assistant",
+                content: "Message \(index)",
+                timestamp: TimeInterval(index),
+                status: "persisted"
+            ))
+        }
+
+        let loaded = store.loadMessages(projectKey: "default", limit: 100)
+
+        XCTAssertEqual(loaded.map(\.serverSeq), Array(51...150))
     }
 
     func testSettingsReadSimulatorLaunchEnvironment() throws {
@@ -1313,6 +1397,30 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(route.serverSeq, 12)
     }
 
+    @MainActor
+    func testNotificationCoordinatorReplaysLastRouteWhenHandlerInstalls() throws {
+        let coordinator = NotificationCoordinator.shared
+        coordinator.onRoute = nil
+        defer { coordinator.onRoute = nil }
+        let route = LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-cold-route",
+            messageID: "assistant-cold-route-final",
+            requestID: "req-cold-route",
+            serverSeq: 177
+        )
+
+        coordinator.route(route)
+        var delivered: LogosNotificationRoute?
+        coordinator.onRoute = { delivered = $0 }
+
+        XCTAssertEqual(delivered, route)
+        delivered = nil
+        coordinator.onRoute = { delivered = $0 }
+        XCTAssertNil(delivered)
+    }
+
     func testRemoteNotificationBackgroundModeConfigured() throws {
         let info = Bundle.main.infoDictionary ?? [:]
         let modes = try XCTUnwrap(info["UIBackgroundModes"] as? [String])
@@ -1337,6 +1445,515 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(projectYAML.contains("CODE_SIGN_ENTITLEMENTS: Logos/Logos.entitlements"))
     }
 
+    func testAPNSEnvironmentUsesBuildConfiguration() {
+        XCTAssertEqual(LogosAPNSEnvironment.resolved(isDebugBuild: true), "sandbox")
+        XCTAssertEqual(LogosAPNSEnvironment.resolved(isDebugBuild: false), "production")
+    }
+
+    @MainActor
+    func testNotificationRouteDefersMessageFetchUntilAuthenticatedConnection() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            socketFactory: RecordingWebSocketTaskFactory(socket: socket)
+        )
+        client.settings.urlString = "ws://127.0.0.1:8765"
+        client.settings.secret = "test-secret"
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "alpha",
+            sessionID: "session-alpha",
+            messageID: "assistant-alpha-final",
+            requestID: nil,
+            serverSeq: 42
+        ))
+
+        XCTAssertEqual(client.activeProjectKey, "alpha")
+        XCTAssertEqual(client.connectionState, .connecting)
+        XCTAssertTrue(socket.sentMessages.isEmpty)
+
+        socket.open()
+        await Task.yield()
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
+
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-alpha","payload":{"authenticated":true}}"#)
+
+        XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
+            "hello",
+            "register_device",
+            "list_projects",
+            "messages_get"
+        ])
+        let fetchFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        XCTAssertEqual(fetchFrame["project_key"] as? String, "alpha")
+        let payload = try XCTUnwrap(fetchFrame["payload"] as? [String: Any])
+        XCTAssertEqual(payload["after_server_seq"] as? Int, 17)
+    }
+
+    @MainActor
+    func testFinishedNotificationRouteAutoplaysReplayedFinalOnce() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-notification",
+            messageID: "assistant-notification-final",
+            requestID: "req-notification",
+            serverSeq: 120
+        ))
+
+        let fetchFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        XCTAssertEqual(fetchFrame["type"] as? String, "messages_get")
+        XCTAssertEqual(fetchFrame["project_key"] as? String, "default")
+        XCTAssertEqual((try XCTUnwrap(fetchFrame["payload"] as? [String: Any]))["after_server_seq"] as? Int, 95)
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"messages-get-notification","project_key":"default","session_id":"session-notification","payload":{"messages":[{"project_key":"default","session_id":"session-notification","message_id":"user-notification-prompt","server_seq":119,"role":"user","content":"Notification prompt context.","timestamp":122.0,"metadata":{"request_id":"req-notification"}},{"project_key":"default","session_id":"session-notification","message_id":"assistant-notification-final","server_seq":120,"role":"assistant","content":"Notification final response.","timestamp":123.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification"}}]}}
+        """#)
+
+        var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        var playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual(playbackFrames.first?["project_key"] as? String, "default")
+        XCTAssertEqual(playbackFrames.first?["session_id"] as? String, "session-notification")
+        let playbackPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        XCTAssertEqual(playbackPayload["message_id"] as? String, "assistant-notification-final")
+        XCTAssertEqual(playbackPayload["mode"] as? String, "final_auto")
+        XCTAssertEqual(playbackPayload["text"] as? String, "Notification final response.")
+        XCTAssertEqual(client.messages.filter { $0.messageID == "user-notification-prompt" }.count, 1)
+        XCTAssertEqual(client.messages.filter { $0.messageID == "assistant-notification-final" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-notification:assistant-notification-final")
+        XCTAssertEqual(client.threadFocusRequest?.reason, .finishedNotification)
+
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"messages-get-notification","project_key":"default","session_id":"session-notification","payload":{"messages":[{"project_key":"default","session_id":"session-notification","message_id":"assistant-notification-final","server_seq":120,"role":"assistant","content":"Notification final response.","timestamp":123.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification"}}]}}
+        """#)
+
+        newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+    }
+
+    @MainActor
+    func testFinishedNotificationRouteAutoplaysCachedFinalOnce() throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        let cachedMessage = try XCTUnwrap(LogosMessage.from(dictionary: [
+            "project_key": "default",
+            "session_id": "session-cached-notification",
+            "message_id": "assistant-cached-notification-final",
+            "server_seq": 222,
+            "role": "assistant",
+            "content": "Cached notification response.",
+            "timestamp": 123.0,
+            "metadata": ["finalized": true, "source": "hermes"]
+        ]))
+        store.upsert(cachedMessage)
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-cached-notification",
+            messageID: "assistant-cached-notification-final",
+            requestID: nil,
+            serverSeq: 222
+        ))
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        XCTAssertEqual((try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any]))["message_id"] as? String, "assistant-cached-notification-final")
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-cached-notification:assistant-cached-notification-final")
+        XCTAssertEqual(client.threadFocusRequest?.reason, .finishedNotification)
+        let focusID = client.threadFocusRequest?.id
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-cached-notification",
+            messageID: "assistant-cached-notification-final",
+            requestID: nil,
+            serverSeq: 222
+        ))
+
+        let afterDuplicateFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(afterDuplicateFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.id, focusID)
+    }
+
+    @MainActor
+    func testFinishedNotificationRouteFindsFinalPastOldLocalRows() throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        for index in 1...550 {
+            store.upsert(LogosMessage(
+                projectKey: "default",
+                sessionID: "session-long-history",
+                messageID: "assistant-old-\(index)",
+                serverSeq: index,
+                role: "assistant",
+                content: "Old response \(index).",
+                timestamp: TimeInterval(index),
+                status: "persisted",
+                isFinal: true,
+                hasFinalizedMetadata: true,
+                metadataSource: "hermes"
+            ))
+        }
+        store.upsert(LogosMessage(
+            projectKey: "default",
+            sessionID: "session-long-history",
+            messageID: "assistant-notified-final",
+            serverSeq: 551,
+            role: "assistant",
+            content: "The notified final response.",
+            timestamp: 551,
+            status: "persisted",
+            isFinal: true,
+            hasFinalizedMetadata: true,
+            metadataSource: "hermes",
+            metadataRequestID: "req-notified-final"
+        ))
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-long-history",
+            messageID: "assistant-notified-final",
+            requestID: "req-notified-final",
+            serverSeq: 551
+        ))
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        let playbackPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        XCTAssertEqual(playbackPayload["message_id"] as? String, "assistant-notified-final")
+        XCTAssertTrue(client.messages.contains { $0.messageID == "assistant-notified-final" })
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-long-history:assistant-notified-final")
+    }
+
+    @MainActor
+    func testFinishedNotificationRouteAnchorsCachedFinalOutsideLatestWindow() throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        store.upsert(LogosMessage(
+            projectKey: "default",
+            sessionID: "session-anchor-cached",
+            messageID: "assistant-anchor-cached-final",
+            serverSeq: 10,
+            role: "assistant",
+            content: "Older cached final response.",
+            timestamp: 10,
+            status: "persisted",
+            isFinal: true,
+            hasFinalizedMetadata: true,
+            metadataSource: "hermes",
+            metadataRequestID: "req-anchor-cached"
+        ))
+        for index in 11...150 {
+            store.upsert(LogosMessage(
+                projectKey: "default",
+                sessionID: "session-anchor-cached",
+                messageID: "assistant-newer-\(index)",
+                serverSeq: index,
+                role: "assistant",
+                content: "Newer response \(index).",
+                timestamp: TimeInterval(index),
+                status: "persisted",
+                isFinal: true,
+                hasFinalizedMetadata: true,
+                metadataSource: "hermes"
+            ))
+        }
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-anchor-cached-final" })
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-anchor-cached",
+            messageID: "assistant-anchor-cached-final",
+            requestID: "req-anchor-cached",
+            serverSeq: 10
+        ))
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+        XCTAssertEqual(client.messages.filter { $0.messageID == "assistant-anchor-cached-final" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-anchor-cached:assistant-anchor-cached-final")
+    }
+
+    @MainActor
+    func testFinishedNotificationRouteAnchorsReplayedFinalOutsideLatestWindow() throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        for index in 11...150 {
+            store.upsert(LogosMessage(
+                projectKey: "default",
+                sessionID: "session-anchor-replayed",
+                messageID: "assistant-newer-replayed-\(index)",
+                serverSeq: index,
+                role: "assistant",
+                content: "Newer replay response \(index).",
+                timestamp: TimeInterval(index),
+                status: "persisted",
+                isFinal: true,
+                hasFinalizedMetadata: true,
+                metadataSource: "hermes"
+            ))
+        }
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-anchor-replayed",
+            messageID: "assistant-anchor-replayed-final",
+            requestID: "req-anchor-replayed",
+            serverSeq: 10
+        ))
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"messages-get-anchor-replayed","project_key":"default","session_id":"session-anchor-replayed","payload":{"messages":[{"project_key":"default","session_id":"session-anchor-replayed","message_id":"assistant-anchor-replayed-final","server_seq":10,"role":"assistant","content":"Older replayed final response.","timestamp":10.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-anchor-replayed"}}]}}
+        """#)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+        XCTAssertEqual(client.messages.filter { $0.messageID == "assistant-anchor-replayed-final" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-anchor-replayed:assistant-anchor-replayed-final")
+        let focusID = client.threadFocusRequest?.id
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-anchor-replayed",
+            messageID: "assistant-anchor-replayed-final",
+            requestID: "req-anchor-replayed",
+            serverSeq: 10
+        ))
+
+        let afterDuplicateFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(afterDuplicateFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+        XCTAssertEqual(client.messages.filter { $0.messageID == "assistant-anchor-replayed-final" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.id, focusID)
+    }
+
+    @MainActor
+    func testFinishedNotificationReplayedFinalCompletesActiveProgressAndStaysVisible() throws {
+        let socket = RecordingWebSocketTask()
+        let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
+        for index in 11...150 {
+            store.upsert(LogosMessage(
+                projectKey: "default",
+                sessionID: "session-anchor-active",
+                messageID: "assistant-newer-active-\(index)",
+                serverSeq: index,
+                role: "assistant",
+                content: "Newer active response \(index).",
+                timestamp: TimeInterval(index),
+                status: "persisted",
+                isFinal: true,
+                hasFinalizedMetadata: true,
+                metadataSource: "hermes"
+            ))
+        }
+        let client = makeSocketBackedClient(socket: socket, store: store)
+        XCTAssertTrue(client.sendText("finish from notification while backgrounded"))
+        let textFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-anchor-active",
+            messageID: "assistant-anchor-active-final",
+            requestID: requestID,
+            serverSeq: 10
+        ))
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"messages-get-anchor-active","project_key":"default","session_id":"session-anchor-active","payload":{"messages":[{"project_key":"default","session_id":"session-anchor-active","message_id":"assistant-anchor-active-final","server_seq":10,"role":"assistant","content":"Older active final response.","timestamp":10.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(requestID)"}}]}}
+        """)
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-anchor-active:assistant-anchor-active-final")
+        XCTAssertEqual(client.messages.filter { $0.messageID == "assistant-anchor-active-final" }.count, 1)
+        XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-anchor-active:assistant-anchor-active-final")
+    }
+
+    @MainActor
+    func testFinishedNotificationAutoplayWaitsUntilSceneIsActive() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.updateSceneActivationForPlayback(isActive: false)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-inactive-notification",
+            messageID: "assistant-inactive-notification-final",
+            requestID: "req-inactive-notification",
+            serverSeq: 180
+        ))
+        client.handleFrameString(#"""
+        {"type":"messages_batch","request_id":"messages-get-inactive","project_key":"default","session_id":"session-inactive-notification","payload":{"messages":[{"project_key":"default","session_id":"session-inactive-notification","message_id":"assistant-inactive-notification-final","server_seq":180,"role":"assistant","content":"Notification final while inactive.","timestamp":180.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-inactive-notification"}}]}}
+        """#)
+
+        var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+
+        client.updateSceneActivationForPlayback(isActive: true)
+        await Task.yield()
+
+        newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        let playbackPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        XCTAssertEqual(playbackPayload["message_id"] as? String, "assistant-inactive-notification-final")
+    }
+
+    @MainActor
+    func testLiveFinalAutoplayWaitsUntilSceneIsActive() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        client.updateSceneActivationForPlayback(isActive: false)
+        let baselineCount = socket.sentMessages.count
+
+        XCTAssertTrue(client.sendText("finish while inactive"))
+        let textFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"session-live-inactive","payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live-inactive","message_id":"assistant-live-inactive-final","server_seq":181,"role":"assistant","content":"Live final while inactive.","timestamp":181.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(requestID)"}}}}
+        """)
+
+        var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+
+        client.updateSceneActivationForPlayback(isActive: true)
+        await Task.yield()
+
+        newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        let playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        let playbackPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        XCTAssertEqual(playbackPayload["message_id"] as? String, "assistant-live-inactive-final")
+        XCTAssertEqual(playbackPayload["mode"] as? String, "final_auto")
+    }
+
+    @MainActor
+    func testFinishedNotificationPlaybackSendFailureAllowsRouteRetry() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let route = LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-notification-retry",
+            messageID: "assistant-notification-retry-final",
+            requestID: "req-notification-retry",
+            serverSeq: 181
+        )
+        let finalBatch = #"""
+        {"type":"messages_batch","request_id":"messages-get-retry","project_key":"default","session_id":"session-notification-retry","payload":{"messages":[{"project_key":"default","session_id":"session-notification-retry","message_id":"assistant-notification-retry-final","server_seq":181,"role":"assistant","content":"Notification final for retry.","timestamp":181.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification-retry"}}]}}
+        """#
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(route)
+        client.handleFrameString(finalBatch)
+        var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+
+        socket.completeLastSend(error: RecordingSocketError())
+        await Task.yield()
+
+        client.handleNotificationRoute(route)
+        socket.open()
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-retry","payload":{}}"#)
+        newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 2)
+    }
+
+    @MainActor
+    func testFinishedNotificationPlaybackStreamFailureAllowsRouteRetry() async throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        session.preparePlaybackError = RecordingAudioSessionError()
+        let controller = AudioPlaybackController(
+            sessionManager: session,
+            playerFactory: RecordingAudioPlayerFactory()
+        )
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let route = LogosNotificationRoute(
+            kind: "finished",
+            projectKey: "default",
+            sessionID: "session-notification-stream-retry",
+            messageID: "assistant-notification-stream-retry-final",
+            requestID: "req-notification-stream-retry",
+            serverSeq: 182
+        )
+        let finalBatch = #"""
+        {"type":"messages_batch","request_id":"messages-get-stream-retry","project_key":"default","session_id":"session-notification-stream-retry","payload":{"messages":[{"project_key":"default","session_id":"session-notification-stream-retry","message_id":"assistant-notification-stream-retry-final","server_seq":182,"role":"assistant","content":"Notification final for stream retry.","timestamp":182.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification-stream-retry"}}]}}
+        """#
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(route)
+        client.handleFrameString(finalBatch)
+        var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        var playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 1)
+        let firstPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(firstPayload["audio_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-notification-stream-retry","payload":{"audio_id":"\(audioID)","message_id":"assistant-notification-stream-retry-final","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
+        """)
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-notification-stream-retry","payload":{"audio_id":"\(audioID)","message_id":"assistant-notification-stream-retry-final","chunk_count":1}}
+        """)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .failed)
+
+        client.handleNotificationRoute(route)
+        newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
+        XCTAssertEqual(playbackFrames.count, 2)
+    }
+
+    @MainActor
+    func testApprovalNotificationRouteFetchesWithoutAutoplay() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let baselineCount = socket.sentMessages.count
+
+        client.handleNotificationRoute(LogosNotificationRoute(
+            kind: "approval",
+            projectKey: "default",
+            sessionID: "session-approval",
+            messageID: nil,
+            requestID: "appr-1",
+            serverSeq: 9
+        ))
+
+        let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+        XCTAssertEqual(newFrames.filter { $0["type"] as? String == "messages_get" }.count, 1)
+        XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
+        XCTAssertTrue(client.messages.isEmpty)
+        XCTAssertNil(client.threadFocusRequest)
+    }
+
     func testProgressActivityCardLivesInActiveBottomFlowAndScrollsOnProgressUpdates() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let projectDirectory = testsDirectory.deletingLastPathComponent()
@@ -1358,6 +1975,11 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(contentViewSource.contains("ThreadAutoFollowPolicy.isNearBottom"))
         XCTAssertTrue(contentViewSource.contains("Only detach"))
         XCTAssertTrue(contentViewSource.contains("ThreadTimelineSnapshot"))
+        XCTAssertTrue(contentViewSource.contains("focusRequest: client.threadFocusRequest.map"))
+        XCTAssertTrue(contentViewSource.contains("scrollThreadToTargetAfterLayout"))
+        XCTAssertTrue(contentViewSource.contains("threadScrollPosition.scrollTo(id: targetID, anchor: anchor)"))
+        XCTAssertTrue(contentViewSource.contains("client.completeThreadFocusRequest(id: focus.id)"))
+        XCTAssertTrue(contentViewSource.contains("generic bottom scrolling is insufficient for notification replay"))
         XCTAssertTrue(contentViewSource.contains("runStatus: client.runStatus.rawValue"))
         XCTAssertTrue(contentViewSource.contains("threadMessagesBeforeProgress"))
         XCTAssertTrue(contentViewSource.contains("threadMessagesAfterProgress"))
@@ -1380,6 +2002,15 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(contentViewSource.contains("accessibilityReduceMotion ? AnyTransition.opacity"))
         XCTAssertTrue(contentViewSource.contains("stopRunButton"))
         XCTAssertTrue(contentViewSource.contains("retryRunButton"))
+        let configureRuntimeRange = try XCTUnwrap(contentViewSource.range(of: "private func configureRuntime()"))
+        let routeHandlerRange = try XCTUnwrap(contentViewSource.range(
+            of: "notifications.onRoute = { route in",
+            range: configureRuntimeRange.lowerBound..<contentViewSource.endIndex
+        ))
+        XCTAssertNotNil(contentViewSource.range(
+            of: "client.updateSceneActivationForPlayback(isActive: scenePhase == .active)",
+            range: configureRuntimeRange.lowerBound..<routeHandlerRange.lowerBound
+        ))
         XCTAssertFalse(contentViewSource.contains("action: { _, newValue in\n                handleThreadBottomProximityChanged(newValue)"))
         XCTAssertFalse(contentViewSource.contains("Text(event.kind)"))
         XCTAssertFalse(contentViewSource.contains(".lineLimit(4)"))
@@ -1884,6 +2515,58 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.runStatus, .idle)
         let finalFrames = try socket.sentMessages.dropFirst(finalBaselineCount).map { try frameRoot(from: $0) }
         XCTAssertEqual(finalFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
+    }
+
+    @MainActor
+    func testReadableErrorFinalMetadataMarksProgressFailedAfterRawErrorProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger raw provider failure"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let rawError = "⚠️ 'NoneType' object is not iterable"
+        let readableError = "Hermes hit an unrecoverable error before it could answer. The underlying error was: 'NoneType' object is not iterable."
+
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"gateway_status","progress_kind":"gateway_status","message_id":"progress-error","text":"\(rawError)","transient":true}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.events.last?.text, rawError)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+        XCTAssertFalse(client.messages.contains { $0.content == rawError })
+
+        client.handleFrameString("""
+        {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":91,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-readable-error","server_seq":91,"role":"assistant","content":"\(readableError)","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes_error","final_status":"failed","error":true,"request_id":"\(requestID)"}}}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        XCTAssertEqual(client.progressActivity?.failureMessage, readableError)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .text("trigger raw provider failure"))
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-readable-error")
+        XCTAssertTrue(client.messages.contains { $0.messageID == "assistant-readable-error" && $0.content == readableError })
+        XCTAssertEqual(client.runStatus, .idle)
+    }
+
+    @MainActor
+    func testMessagesBatchErrorFinalMetadataMarksProgressFailed() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("trigger replayed provider failure"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let readableError = "Hermes hit an unrecoverable error before it could answer."
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-batch-readable-error","server_seq":92,"role":"assistant","content":"\(readableError)","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes_error","final_status":"failed","error":true,"request_id":"\(requestID)"}}]}}
+        """)
+
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
+        XCTAssertEqual(client.progressActivity?.failureMessage, readableError)
+        XCTAssertEqual(client.progressActivity?.retryRequest, .text("trigger replayed provider failure"))
+        XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "project:default:assistant-batch-readable-error")
+        XCTAssertEqual(client.runStatus, .idle)
     }
 
     @MainActor
@@ -3273,6 +3956,70 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testAudioEndActivationFailureMarksOverlayFailed() throws {
+        let socket = RecordingWebSocketTask()
+        let session = RecordingAudioSessionManager()
+        session.preparePlaybackError = RecordingAudioSessionError()
+        let factory = RecordingAudioPlayerFactory()
+        let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-audio-activation-fail",
+            messageID: "assistant-audio-activation-fail",
+            serverSeq: 190,
+            role: "assistant",
+            content: "This audio activation will fail.",
+            timestamp: 190,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
+        let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
+        client.handleFrameString("""
+        {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-audio-activation-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-audio-activation-fail","chunk_index":0,"data":"\(Data([1, 2]).base64EncodedString())"}}
+        """)
+
+        client.handleFrameString("""
+        {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-audio-activation-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-audio-activation-fail","chunk_count":1}}
+        """)
+
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .failed)
+        XCTAssertEqual(client.audioPlaybackOverlay?.detail, "Session activation failed")
+        XCTAssertNil(client.playbackStatus)
+        XCTAssertEqual(factory.player.playCalls, 0)
+    }
+
+    @MainActor
+    func testSocketFailureFailsInFlightRequestedAudioOverlay() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        let message = LogosMessage(
+            projectKey: "default",
+            sessionID: "session-audio-socket-fail",
+            messageID: "assistant-audio-socket-fail",
+            serverSeq: 191,
+            role: "assistant",
+            content: "This audio stream will be interrupted.",
+            timestamp: 191,
+            status: "persisted"
+        )
+
+        client.playback(message: message)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
+
+        socket.fail(message: "socket dropped during audio")
+        await Task.yield()
+
+        XCTAssertEqual(client.connectionState, .error)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .failed)
+        XCTAssertEqual(client.audioPlaybackOverlay?.detail, "Audio stream interrupted. Reconnect and try again.")
+        XCTAssertEqual(client.lastError, "socket dropped during audio")
+    }
+
+    @MainActor
     func testPlaybackOverlayControlsAudioLifecycleAndSuppressesStoppedFrames() throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
@@ -4363,6 +5110,7 @@ private final class RecordingAudioSessionManager: AudioSessionManaging {
     private(set) var finishRecordingCalls = 0
     private(set) var prepareCalls = 0
     private(set) var finishCalls = 0
+    var preparePlaybackError: Error?
 
     func prepareForRecording() throws {
         prepareRecordingCalls += 1
@@ -4374,10 +5122,19 @@ private final class RecordingAudioSessionManager: AudioSessionManaging {
 
     func prepareForPlayback() throws {
         prepareCalls += 1
+        if let preparePlaybackError {
+            throw preparePlaybackError
+        }
     }
 
     func finishPlayback() throws {
         finishCalls += 1
+    }
+}
+
+private struct RecordingAudioSessionError: LocalizedError {
+    var errorDescription: String? {
+        "Session activation failed"
     }
 }
 
@@ -4506,6 +5263,7 @@ private func makeSocketBackedClient(
     client.settings.deviceID = "ios-simulator"
     client.settings.secret = "test-secret"
     client.settings.autoConnect = autoConnect
+    client.updateSceneActivationForPlayback(isActive: true)
     client.connect()
     socket.open()
     client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)

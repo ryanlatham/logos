@@ -92,7 +92,7 @@ Prerequisites:
   - `LOGOS_APNS_TEAM_ID`
   - `LOGOS_APNS_BUNDLE_ID`
   - `LOGOS_APNS_AUTH_KEY_PATH`
-  - `LOGOS_APNS_ENV=sandbox` for development builds.
+  - `LOGOS_APNS_ENV=sandbox` as the adapter default for development devices. TestFlight/Release devices register `production` and should be routed through the production APNS host.
 - iPhone can reconnect to the adapter over private network / Tailscale after notification tap.
 
 Validation steps:
@@ -107,7 +107,7 @@ Validation steps:
 5. Trigger an assistant completion while the app is backgrounded.
 6. Confirm the phone receives a private notification titled `Hermes finished` with body `Open Logos to view the result.`
 7. Verify the notification payload contains routing ids only, not response text, summaries, command previews, file paths, or secrets.
-8. Tap the notification and verify Logos opens to the correct project/session and runs reconnect + delta sync.
+8. Tap the notification and verify Logos opens to the correct project/session, runs reconnect + delta sync, and plays the matched final response once.
 9. Trigger an approval request while the app is backgrounded.
 10. Confirm the notification title is `Hermes needs approval`, with no command text in the notification body/payload.
 11. Tap it, reconnect, fetch the approval card, and approve/deny from the phone.
