@@ -1,3 +1,4 @@
 Logos.xcodeproj/
 build/
 DerivedData/
+DerivedData-*/
