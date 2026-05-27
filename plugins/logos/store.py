@@ -355,6 +355,22 @@ class LogosStore:
             ).fetchone()
             return self._row_to_device(row) if row else None
 
+    def clear_device_apns_registration(self, device_id: str) -> LogosDevice | None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE logos_devices
+                SET apns_token = NULL, apns_environment = NULL
+                WHERE device_id = ?
+                """,
+                (str(device_id),),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM logos_devices WHERE device_id = ?",
+                (str(device_id),),
+            ).fetchone()
+            return self._row_to_device(row) if row else None
+
     def list_devices(self, *, active_only: bool = True) -> list[LogosDevice]:
         query = "SELECT * FROM logos_devices"
         if active_only:

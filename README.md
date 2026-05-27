@@ -715,20 +715,26 @@ APNS is optional for foreground development. It is required only for live push n
    - Key ID
    - Team ID
    - Bundle ID / topic
+   Logos uses APNS token-based auth; you do not need APNS SSL certificates for this path.
 4. Store the `.p8` file outside the repository.
 5. Add environment variables to Hermes `.env`:
 
 ```bash
 LOGOS_APNS_KEY_ID=<apple-key-id>
 LOGOS_APNS_TEAM_ID=<apple-team-id>
-LOGOS_APNS_BUNDLE_ID=<your.reverse.dns.logos>
+LOGOS_APNS_BUNDLE_ID=dev.logos.app
 LOGOS_APNS_AUTH_KEY_PATH=/absolute/path/outside/repo/AuthKey_<key-id>.p8
 LOGOS_APNS_ENV=sandbox
 ```
 
-6. In Xcode, add Push Notifications capability to the `Logos` app target.
-7. Run the app on a physical device and allow notifications.
-8. Confirm the adapter receives a device registration with an APNS token.
+6. In Xcode, add Push Notifications capability to the `Logos` app target. Debug/device installs register APNS tokens as `sandbox`; Release/TestFlight builds register as `production`.
+7. Run the app on a physical device and allow notifications in the Logos notification settings.
+8. Confirm the adapter receives a device registration with `apns_registered: true`. Do not print or paste the raw APNS token.
+9. Background the app, trigger a Hermes completion, tap the `Hermes finished` notification, and verify Logos reconnects, syncs the final response, and plays it using the app's normal final-response playback path.
+
+`LOGOS_APNS_ENV` remains the adapter default, but each stored iOS device records its own APNS environment so sandbox development devices and production TestFlight devices can coexist.
+
+Live APNS delivery uses Apple's HTTP/2 provider API. The Hermes runtime must have `httpx` with HTTP/2 support and `h2` installed; the standard Hermes environment already includes them.
 
 Private-payload rule: pushes should say only that Logos/Hermes needs attention, finished, or needs input. Fetch response text, summaries, commands, and transcripts over the authenticated WebSocket after reconnect.
 
@@ -792,6 +798,10 @@ The app and adapter disagree on the device secret. For physical devices, pair ag
 - Pick a signing team.
 - Use a unique bundle identifier you control.
 - If APNS is enabled, make sure the bundle ID in Xcode, Apple Developer portal, and `LOGOS_APNS_BUNDLE_ID` match.
+
+### APNS logs show `BadStatusLine`
+
+APNS requires HTTP/2. `BadStatusLine` usually means the adapter is using an HTTP/1.x transport against Apple's provider endpoint, not that an APNS SSL certificate is missing. Logos should use the token-based `.p8` key path over HTTP/2; verify the runtime has `httpx` and `h2`, then restart the Hermes gateway.
 
 ### Speech recognition fails in Simulator
 

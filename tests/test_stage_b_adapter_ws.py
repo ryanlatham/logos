@@ -702,6 +702,83 @@ async def test_retry_status_send_broadcasts_transient_status_progress_without_id
 
 
 @pytest.mark.asyncio
+async def test_non_retryable_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    content = "⚠️ Non-retryable error (HTTP None) — trying fallback..."
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress", "request_id": "req-error"})
+
+    assert sent.success is True
+    assert str(sent.message_id).startswith("progress-")
+    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress"]
+    frame = frames[0]
+    assert frame["request_id"] == "req-error"
+    assert frame["payload"]["kind"] == "gateway_status"
+    assert frame["payload"]["progress_kind"] == "gateway_status"
+    assert frame["payload"]["text"] == content
+    assert frame["payload"]["transient"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_raw_unrecoverable_error_becomes_progress_and_readable_failed_final(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    explained_errors: list[str] = []
+
+    class FakeExplanation:
+        message_text = "Hermes ran into an unrecoverable provider error before it could answer. Please retry the request."
+
+        def to_protocol(self):
+            return {"provider": "fake-fast-model"}
+
+    class FakeSummary:
+        summary_text = "Hermes hit an unrecoverable provider error."
+
+    class FakeFastModel:
+        def explain_error(self, text):
+            explained_errors.append(text)
+            return FakeExplanation()
+
+        def summarize(self, text):
+            return FakeSummary()
+
+    adapter.fast_model = FakeFastModel()
+    content = "⚠️ 'NoneType' object is not iterable"
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-error", "request_id": "req-error"})
+
+    assert sent.success is True
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress", "state_update", "state_update", "run_status"]
+    progress = frames[0]
+    assert progress["request_id"] == "req-error"
+    assert progress["payload"]["kind"] == "gateway_status"
+    assert progress["payload"]["text"] == content
+    assert progress["payload"]["transient"] is True
+    final = frames[1]["payload"]["message"]
+    assert explained_errors == [content]
+    assert final["content"] != content
+    assert final["content"] == FakeExplanation.message_text
+    assert final["metadata"]["finalized"] is True
+    assert final["metadata"]["source"] == "hermes_error"
+    assert final["metadata"]["final_status"] == "failed"
+    assert final["metadata"]["error"] is True
+    assert final["metadata"]["request_id"] == "req-error"
+    assert final["metadata"]["fast_error_explanation"] == {"provider": "fake-fast-model"}
+    assert frames[-1]["payload"]["status"] == "idle"
+    stored = adapter.store.get_message("sess-error", sent.message_id)
+    assert stored is not None
+    assert stored.content == final["content"]
+    assert stored.metadata["final_status"] == "failed"
+    assert adapter.store.messages_after_server_seq("archwright", 0) == [stored]
+
+
+@pytest.mark.asyncio
 async def test_provider_abort_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()

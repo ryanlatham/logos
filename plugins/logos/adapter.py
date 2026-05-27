@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import inspect
 import ipaddress
 import logging
 import os
@@ -36,6 +37,8 @@ from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
 
+APNS_STALE_DEVICE_REASONS = {"BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"}
+
 _CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "logos_request_context",
     default=None,
@@ -57,6 +60,11 @@ DEFAULT_LOGOS_HOME_CHANNEL_NAME = "Logos"
 PROGRESS_MESSAGE_ID_PREFIX = "progress-"
 GATEWAY_STILL_WORKING_RE = re.compile(r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE)
 GATEWAY_RETRY_STATUS_RE = re.compile(r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE)
+GATEWAY_NON_RETRYABLE_STATUS_RE = re.compile(
+    r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*Non-retryable error\s+\(HTTP\s+[^)]*\)"
+    r"(?:\s*[—-]\s*trying fallback(?:\.\.\.|…)?|:\s+.+)\s*$",
+    re.IGNORECASE,
+)
 GATEWAY_PROVIDER_STATUS_RE = re.compile(
     r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*No response from provider for\s+.*?\bAborting call\.?\s*$",
     re.IGNORECASE,
@@ -73,6 +81,13 @@ GATEWAY_CONTEXT_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
+RAW_TERMINAL_ERROR_RE = re.compile(
+    r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*(?:"
+    r"'[^']+'\s+object\s+(?:is\s+not\s+\w+|has\s+no\s+attribute\s+'[^']+')"
+    r"|(?:[A-Za-z_][A-Za-z0-9_.]*Error|Exception|TimeoutError|RuntimeError|TypeError|ValueError):\s+.+"
+    r")\s*$",
+    re.IGNORECASE,
+)
 PROGRESS_TOOL_NAMES = {
     "airtable",
     "browser_click",
@@ -615,6 +630,11 @@ class LogosAdapter(BasePlatformAdapter):
         if self.ws_server is not None:
             await self.ws_server.stop()
             self.ws_server = None
+        close_apns = getattr(self.apns, "aclose", None)
+        if close_apns is not None:
+            result = close_apns()
+            if inspect.isawaitable(result):
+                await result
         self._mark_disconnected()
 
     async def handle_ws_envelope(self, envelope: Envelope) -> dict[str, Any] | None:
@@ -1157,10 +1177,20 @@ class LogosAdapter(BasePlatformAdapter):
         return bool(
             GATEWAY_STILL_WORKING_RE.match(text)
             or GATEWAY_RETRY_STATUS_RE.match(text)
+            or GATEWAY_NON_RETRYABLE_STATUS_RE.match(text)
             or GATEWAY_PROVIDER_STATUS_RE.match(text)
             or GATEWAY_CONTEXT_STATUS_RE.search(text)
             or GATEWAY_LIFECYCLE_STATUS_RE.match(text)
         )
+
+    @staticmethod
+    def _looks_like_terminal_error_text(content: str) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        if GATEWAY_NON_RETRYABLE_STATUS_RE.match(text):
+            return False
+        return bool(RAW_TERMINAL_ERROR_RE.match(text))
 
     def _progress_kind_for_text(self, content: str) -> str | None:
         if self._looks_like_tool_progress_text(content):
@@ -1168,6 +1198,24 @@ class LogosAdapter(BasePlatformAdapter):
         if self._looks_like_gateway_status_text(content):
             return "gateway_status"
         return None
+
+    def _human_readable_error_response(self, content: str) -> tuple[str, dict[str, Any]]:
+        explain_error = getattr(self.fast_model, "explain_error", None)
+        if callable(explain_error):
+            try:
+                result = explain_error(content)
+                message_text = str(getattr(result, "message_text", "") or "").strip()
+                protocol = result.to_protocol() if hasattr(result, "to_protocol") else {}
+                if message_text:
+                    return message_text, dict(protocol or {})
+            except Exception:
+                logger.warning("Logos fast model failed to explain Hermes error", exc_info=True)
+        raw = str(content or "").strip().lstrip("⚠️⚠❌ ").strip() or "an internal error"
+        return (
+            "Hermes hit an unrecoverable error before it could answer. "
+            f"The underlying error was: {raw}. Please retry, or switch models if it keeps happening.",
+            {},
+        )
 
     async def _broadcast_progress_text(
         self,
@@ -1276,6 +1324,22 @@ class LogosAdapter(BasePlatformAdapter):
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
         metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
         session_id = str(metadata.get("session_id") or metadata.get("session") or session_id)
+        if self._looks_like_terminal_error_text(content):
+            await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind="gateway_status")
+            explanation, explanation_protocol = self._human_readable_error_response(content)
+            metadata = dict(metadata)
+            metadata.update(
+                {
+                    "source": "hermes_error",
+                    "finalized": True,
+                    "final_status": "failed",
+                    "error": True,
+                    "raw_error_hash": self._source_hash(content),
+                }
+            )
+            if explanation_protocol:
+                metadata["fast_error_explanation"] = explanation_protocol
+            content = explanation
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
             return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
@@ -1325,12 +1389,13 @@ class LogosAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 status="idle",
             )
-        self._send_private_notification(
+        await self._send_private_notification(
             PrivateNotificationKind.FINISHED,
             project_key=project_key,
             session_id=session_id,
             message_id=stored.message_id,
             server_seq=stored.server_seq,
+            request_id=str(final_metadata.get("request_id") or "") or None,
             sensitive_context={"content": content, "summary": summary.summary_text},
         )
         self._clear_request_bookkeeping(
@@ -1421,6 +1486,26 @@ class LogosAdapter(BasePlatformAdapter):
             await self.ws_server.broadcast(frame, project_key=project_key)
             if summary_frame is not None:
                 await self.ws_server.broadcast(summary_frame, project_key=project_key)
+                await self._broadcast_run_status(
+                    project_key=project_key,
+                    session_id=updated.session_id,
+                    status="idle",
+                )
+        if finalize and summary_frame is not None:
+            await self._send_private_notification(
+                PrivateNotificationKind.FINISHED,
+                project_key=project_key,
+                session_id=updated.session_id,
+                message_id=updated.message_id,
+                server_seq=updated.server_seq,
+                request_id=str(updated.metadata.get("request_id") or "") or None,
+                sensitive_context={"content": content, "summary": summary.summary_text},
+            )
+            self._clear_request_bookkeeping(
+                project_key=project_key,
+                session_id=updated.session_id,
+                request_id=str(updated.metadata.get("request_id") or "") or None,
+            )
         return SendResult(success=True, message_id=updated.message_id, raw_response=frame)
 
     @staticmethod
@@ -1483,12 +1568,13 @@ class LogosAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 status="idle",
             )
-        self._send_private_notification(
+        await self._send_private_notification(
             PrivateNotificationKind.FINISHED,
             project_key=project_key,
             session_id=session_id,
             message_id=stored.message_id,
             server_seq=stored.server_seq,
+            request_id=root_request_id,
             sensitive_context={"content": content, "summary": summary.summary_text},
         )
         self._clear_request_bookkeeping(
@@ -1525,7 +1611,7 @@ class LogosAdapter(BasePlatformAdapter):
             },
         }
 
-    def _send_private_notification(
+    async def _send_private_notification(
         self,
         kind: PrivateNotificationKind,
         *,
@@ -1548,9 +1634,35 @@ class LogosAdapter(BasePlatformAdapter):
         for device in self.store.list_devices(active_only=True):
             if not device.apns_token:
                 continue
-            result = self.apns.send(device.apns_token, payload)
+            if "notifications" not in {str(item).lower() for item in device.capabilities}:
+                continue
+            environment = (
+                str(device.apns_environment or self.apns.config.environment or "").strip().lower() or None
+            )
+            try:
+                result_or_awaitable = self.apns.send(device.apns_token, payload, environment=environment)
+                result = await result_or_awaitable if inspect.isawaitable(result_or_awaitable) else result_or_awaitable
+            except Exception as exc:  # pragma: no cover - exercised with injected clients
+                logger.warning(
+                    "Logos APNS send raised for device_id=%s environment=%s error_type=%s",
+                    device.device_id,
+                    environment,
+                    type(exc).__name__,
+                )
+                continue
             if not result.success and not result.skipped:
-                logger.warning("Logos APNS send failed for device_id=%s status=%s reason=%s", device.device_id, result.status, result.reason)
+                reason = str(result.reason or "")
+                if reason in APNS_STALE_DEVICE_REASONS or result.status == 410:
+                    self.store.clear_device_apns_registration(device.device_id)
+                logger.warning(
+                    "Logos APNS send failed for device_id=%s environment=%s status=%s reason=%s apns_id=%s temporary=%s",
+                    device.device_id,
+                    result.environment or environment,
+                    result.status,
+                    result.reason,
+                    result.apns_id,
+                    result.temporary_failure,
+                )
 
     def _state_update(
         self,
@@ -1793,11 +1905,12 @@ class LogosAdapter(BasePlatformAdapter):
             status="awaiting_clarification",
             payload={"clarify_id": clarify_id},
         )
-        self._send_private_notification(
+        await self._send_private_notification(
             PrivateNotificationKind.CLARIFICATION,
             project_key=project_key,
             session_id=session_id,
             request_id=clarify_id,
+            server_seq=int(frame["server_seq"]),
             sensitive_context={"question": question, "choices": list(choices or [])},
         )
         return SendResult(success=True, message_id=clarify_id, raw_response=frame)
@@ -1850,11 +1963,12 @@ class LogosAdapter(BasePlatformAdapter):
             status="awaiting_approval",
             payload={"approval_id": approval_id},
         )
-        self._send_private_notification(
+        await self._send_private_notification(
             PrivateNotificationKind.APPROVAL,
             project_key=project_key,
             session_id=session_id,
             request_id=approval_id,
+            server_seq=server_seq,
             sensitive_context={"command": command, "description": description, "metadata": metadata},
         )
         return SendResult(success=True, message_id=approval_id, raw_response=frame)

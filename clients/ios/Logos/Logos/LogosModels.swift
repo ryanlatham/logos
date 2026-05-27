@@ -120,6 +120,18 @@ enum LogosReconnectBackoff {
     }
 }
 
+enum ThreadFocusReason: String {
+    case finishedNotification = "finished_notification"
+}
+
+struct ThreadFocusRequest: Equatable, Identifiable {
+    let id: String
+    let projectKey: String
+    let targetMessageID: String
+    let reason: ThreadFocusReason
+    let createdAt: TimeInterval
+}
+
 enum LogosAuthentication {
     static func signHello(secret: String, deviceID: String, requestID: String, projectKey: String?, timestampMilliseconds: Int64, nonce: String) -> String {
         let normalizedSecret = LogosSettings.normalizedSecret(secret)
@@ -506,6 +518,8 @@ struct LogosMessage: Identifiable, Hashable {
     var metadataRequestID: String? = nil
     var metadataTransient: Bool? = nil
     var metadataKind: String? = nil
+    var metadataFinalStatus: String? = nil
+    var metadataIsError: Bool = false
     var metadataJSON: String = "{}"
 
     var gatewayProgressKind: String? {
@@ -522,6 +536,9 @@ struct LogosMessage: Identifiable, Hashable {
 
     var isProgressUpdate: Bool {
         guard role != "user" else { return false }
+        if gatewayProgressKind != nil {
+            return true
+        }
         if hasFinalizedMetadata && isFinal {
             return false
         }
@@ -529,20 +546,23 @@ struct LogosMessage: Identifiable, Hashable {
             || progressKind != nil
             || metadataSource == "tool_progress"
             || metadataSource == "progress"
-            || gatewayProgressKind != nil
     }
 
     static func gatewayProgressKind(for content: String) -> String? {
-        var trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in ["⏳", "⚠️", "⚠"] where trimmed.hasPrefix(prefix) {
-            trimmed = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            break
-        }
-        let lower = trimmed.lowercased()
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed
+            .lowercased()
+            .replacingOccurrences(of: #"^\s*(?:⏳|⚠️|⚠|❌)\s*"#, with: "", options: .regularExpression)
         if lower.hasPrefix("still working...") || lower.hasPrefix("still working…") {
             return "gateway_status"
         }
         if lower.range(of: #"^retrying\s+in\s+.+\battempt\s+\d+/\d+\b"#, options: .regularExpression) != nil {
+            return "gateway_status"
+        }
+        if lower.range(
+            of: #"^non-retryable error\s+\(http\s+[^)]*\)(?:\s*[—-]\s*trying fallback(?:\.\.\.|…)?|:\s+.+)\s*$"#,
+            options: .regularExpression
+        ) != nil {
             return "gateway_status"
         }
         if lower.range(of: #"^no response from provider for\s+.*\baborting call\.?$"#, options: .regularExpression) != nil {
@@ -577,6 +597,8 @@ struct LogosMessage: Identifiable, Hashable {
         let requestID = metadata?["request_id"] as? String
         let transient = Self.boolValue(metadata?["transient"])
         let kind = metadata?["kind"] as? String
+        let finalStatus = metadata?["final_status"] as? String
+        let isError = Self.boolValue(metadata?["error"]) ?? false
         return LogosMessage(
             projectKey: projectKey,
             sessionID: sessionID,
@@ -593,6 +615,8 @@ struct LogosMessage: Identifiable, Hashable {
             metadataRequestID: requestID,
             metadataTransient: transient,
             metadataKind: kind,
+            metadataFinalStatus: finalStatus,
+            metadataIsError: isError,
             metadataJSON: metadata.map(Self.metadataJSONString(from:)) ?? "{}"
         )
     }
@@ -616,6 +640,12 @@ struct LogosMessage: Identifiable, Hashable {
         }
         if let metadataKind {
             metadata["kind"] = metadataKind
+        }
+        if let metadataFinalStatus {
+            metadata["final_status"] = metadataFinalStatus
+        }
+        if metadataIsError {
+            metadata["error"] = true
         }
         return metadata
     }

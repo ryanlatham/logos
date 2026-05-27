@@ -49,8 +49,13 @@ final class SQLiteMessageStore {
     func loadMessages(projectKey: String, limit: Int = 100) -> [LogosMessage] {
         let sql = """
         SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
-        FROM messages
-        WHERE project_key = ?
+        FROM (
+            SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
+            FROM messages
+            WHERE project_key = ?
+            ORDER BY server_seq DESC, timestamp DESC
+            LIMIT ?
+        )
         ORDER BY server_seq ASC, timestamp ASC
         LIMIT ?
         """
@@ -59,6 +64,7 @@ final class SQLiteMessageStore {
         defer { sqlite3_finalize(statement) }
         bind(projectKey, at: 1, statement: statement)
         sqlite3_bind_int(statement, 2, Int32(limit))
+        sqlite3_bind_int(statement, 3, Int32(limit))
 
         var results: [LogosMessage] = []
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -78,6 +84,61 @@ final class SQLiteMessageStore {
             }
         }
         return results
+    }
+
+    func latestServerSeq(projectKey: String) -> Int {
+        let sql = "SELECT MAX(server_seq) FROM messages WHERE project_key = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(statement) }
+        bind(projectKey, at: 1, statement: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    func message(projectKey: String, sessionID: String?, messageID: String) -> LogosMessage? {
+        var sql = """
+        SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
+        FROM messages
+        WHERE project_key = ? AND message_id = ?
+        """
+        if sessionID != nil {
+            sql += " AND session_id = ?"
+        }
+        sql += " ORDER BY server_seq DESC, timestamp DESC LIMIT 1"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        bind(projectKey, at: 1, statement: statement)
+        bind(messageID, at: 2, statement: statement)
+        if let sessionID {
+            bind(sessionID, at: 3, statement: statement)
+        }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return messageFromCurrentRow(statement)
+    }
+
+    func latestFinalMessage(projectKey: String, sessionID: String, atOrAfterServerSeq serverSeq: Int) -> LogosMessage? {
+        let sql = """
+        SELECT project_key, session_id, message_id, server_seq, role, content, timestamp, status, metadata_json
+        FROM messages
+        WHERE project_key = ? AND session_id = ? AND server_seq >= ? AND role != 'user' AND status = 'persisted'
+        ORDER BY server_seq DESC, timestamp DESC
+        LIMIT 100
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        bind(projectKey, at: 1, statement: statement)
+        bind(sessionID, at: 2, statement: statement)
+        sqlite3_bind_int64(statement, 3, sqlite3_int64(serverSeq))
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let message = messageFromCurrentRow(statement) else { continue }
+            if message.isFinal && message.hasFinalizedMetadata && message.isProgressUpdate == false {
+                return message
+            }
+        }
+        return nil
     }
 
     private func deleteExisting(sessionID: String, messageID: String) {
@@ -117,6 +178,21 @@ final class SQLiteMessageStore {
     private func string(at index: Int32, statement: OpaquePointer?) -> String {
         guard let cString = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: cString)
+    }
+
+    private func messageFromCurrentRow(_ statement: OpaquePointer?) -> LogosMessage? {
+        let dictionary: [String: Any] = [
+            "project_key": string(at: 0, statement: statement),
+            "session_id": string(at: 1, statement: statement),
+            "message_id": string(at: 2, statement: statement),
+            "server_seq": Int(sqlite3_column_int64(statement, 3)),
+            "role": string(at: 4, statement: statement),
+            "content": string(at: 5, statement: statement),
+            "timestamp": sqlite3_column_double(statement, 6),
+            "status": string(at: 7, statement: statement),
+            "metadata": metadataDictionary(from: string(at: 8, statement: statement))
+        ]
+        return LogosMessage.from(dictionary: dictionary)
     }
 
     private func metadataJSON(for message: LogosMessage) -> String {
