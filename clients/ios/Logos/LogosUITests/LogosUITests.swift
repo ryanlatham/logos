@@ -38,6 +38,65 @@ final class LogosUITests: XCTestCase {
         app.buttons["text"].tap()
     }
 
+    func testSlashCommandMenuFiltersAndCompletesCommand() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        openTextComposer(in: app)
+
+        let composer = app.textFields["composerTextField"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        composer.tap()
+        composer.typeText("/")
+        XCTAssertTrue(app.otherElements["slashCommandMenu"].waitForExistence(timeout: 8))
+        app.typeText("res")
+
+        let resume = app.buttons["slashCommandRow./resume"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 8))
+        resume.tap()
+
+        XCTAssertEqual(composer.value as? String, "/resume ")
+    }
+
+    func testSlashCommandSubmissionAnchorsThreadLikeNewMessage() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+
+        send("/status", in: app)
+
+        let responseMessage = app.staticTexts["Mock Hermes received: /status"].firstMatch
+        XCTAssertTrue(responseMessage.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForVisible(responseMessage, in: app, timeout: 8))
+        assertElementSitsNearComposer(responseMessage, in: app, message: "Slash command responses should stay visually anchored like new chat messages")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
+    func testGatewayRestartSlashCommandReconnectsAndClearsWorkingStatus() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+
+        send("/mock_gateway_restart", in: app)
+
+        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Idle · live"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Hermes is working…"].exists)
+        XCTAssertTrue(app.staticTexts["Interrupted"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Hermes restarted before this run finished."].waitForExistence(timeout: 10))
+        let retry = app.buttons["retryRunButton"].firstMatch
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertTrue(retry.isEnabled)
+
+        let commandBubbles = app.staticTexts.matching(NSPredicate(format: "label == %@", "/mock_gateway_restart"))
+        let beforeRetryCount = commandBubbles.count
+        retry.tap()
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline, commandBubbles.count <= beforeRetryCount {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertGreaterThan(commandBubbles.count, beforeRetryCount)
+    }
+
     func testProjectTitleFieldAcceptsImmediateTyping() throws {
         let app = launchConfiguredApp()
         XCTAssertTrue(waitForConnectedHome(in: app))

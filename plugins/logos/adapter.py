@@ -21,6 +21,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 from .apns import APNSClient, PrivateNotificationKind, build_private_apns_payload
+from . import commands as command_catalog
 from .fast_llm import FastModelResult, build_fast_model, is_safe_direct_response_for_request
 from .pairing import (
     DEFAULT_PAIRING_TTL_SECONDS,
@@ -308,6 +309,7 @@ class LogosAdapter(BasePlatformAdapter):
         self.allowed_users = _string_set(os.getenv("LOGOS_ALLOWED_USERS")) | _string_set(extra.get("allowed_users")) | _string_set(extra.get("allowed_devices"))
         self.ws_server: LogosWebSocketServer | None = None
         self.store = LogosStore(self._store_path(extra))
+        self.store.interrupt_active_run_states(reason="adapter_restarted")
         self.tts = build_tts(extra)
         self.fast_model = build_fast_model(extra)
         final_audio_full_max_chars = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_CHARS")
@@ -653,6 +655,10 @@ class LogosAdapter(BasePlatformAdapter):
             return await self._handle_final_text(envelope)
         if envelope.type == "messages_get":
             return self._handle_messages_get(envelope)
+        if envelope.type == "commands_get":
+            return self._handle_commands_get(envelope)
+        if envelope.type == "commands_complete":
+            return self._handle_commands_complete(envelope)
         if envelope.type == "playback_audio":
             return await self._handle_playback_audio(envelope)
         if envelope.type == "list_projects":
@@ -692,6 +698,74 @@ class LogosAdapter(BasePlatformAdapter):
             device_id=envelope.device_id,
             project_key=envelope.project_key,
         )
+
+    def _handle_commands_get(self, envelope: Envelope) -> dict[str, Any]:
+        include_unavailable = bool(envelope.payload.get("include_unavailable", True))
+        try:
+            payload = command_catalog.build_command_catalog(
+                include_unavailable=include_unavailable,
+                config_extra=getattr(self.config, "extra", {}) or {},
+            )
+        except Exception:
+            logger.debug("Logos: command catalog build failed", exc_info=True)
+            payload = command_catalog.build_command_catalog(
+                include_unavailable=include_unavailable,
+                hermes_commands=None,
+                config_extra={},
+            )
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append("Command catalog failed; using fallback catalog.")
+        payload["request_id"] = envelope.request_id
+        return {
+            "type": "commands_list",
+            "request_id": envelope.request_id,
+            "device_id": envelope.device_id,
+            "project_key": envelope.project_key,
+            "payload": payload,
+        }
+
+    def _handle_commands_complete(self, envelope: Envelope) -> dict[str, Any]:
+        text = envelope.payload.get("text")
+        if not isinstance(text, str):
+            return error_frame(
+                "invalid_commands_complete",
+                "commands_complete requires text",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=envelope.project_key,
+            )
+        try:
+            catalog = command_catalog.build_command_catalog(
+                include_unavailable=True,
+                config_extra=getattr(self.config, "extra", {}) or {},
+            )
+            payload = command_catalog.complete_slash_command(text, catalog=catalog)
+        except command_catalog.CommandCompletionError as exc:
+            return error_frame(
+                "invalid_commands_complete",
+                str(exc),
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=envelope.project_key,
+            )
+        except Exception:
+            logger.debug("Logos: command completion failed", exc_info=True)
+            fallback_catalog = command_catalog.build_command_catalog(
+                include_unavailable=True,
+                hermes_commands=None,
+                config_extra={},
+            )
+            payload = command_catalog.complete_slash_command(text, catalog=fallback_catalog)
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append("Command completion failed; using fallback catalog.")
+        payload["request_id"] = envelope.request_id
+        return {
+            "type": "commands_complete_result",
+            "request_id": envelope.request_id,
+            "device_id": envelope.device_id,
+            "project_key": envelope.project_key,
+            "payload": payload,
+        }
 
     def _handle_register_device(self, envelope: Envelope) -> dict[str, Any]:
         device_id = str(envelope.device_id or envelope.payload.get("device_id") or "").strip()
@@ -1184,6 +1258,17 @@ class LogosAdapter(BasePlatformAdapter):
         )
 
     @staticmethod
+    def _gateway_lifecycle_interruption_reason(content: str) -> str | None:
+        text = str(content or "").strip().lower()
+        if not GATEWAY_LIFECYCLE_STATUS_RE.match(text):
+            return None
+        if "restarting" in text:
+            return "gateway_restarting"
+        if "shutting down" in text:
+            return "gateway_shutting_down"
+        return "gateway_interrupted"
+
+    @staticmethod
     def _looks_like_terminal_error_text(content: str) -> bool:
         text = str(content or "").strip()
         if not text:
@@ -1342,7 +1427,22 @@ class LogosAdapter(BasePlatformAdapter):
             content = explanation
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
-            return await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
+            sent = await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
+            lifecycle_reason = self._gateway_lifecycle_interruption_reason(content)
+            if lifecycle_reason is not None:
+                await self._broadcast_run_status(
+                    project_key=project_key,
+                    session_id=session_id,
+                    status="idle",
+                    request_id=str(metadata.get("request_id") or "") or None,
+                    device_id=str(metadata.get("device_id") or "") or None,
+                    payload={
+                        "interrupted": True,
+                        "final_status": "interrupted",
+                        "reason": lifecycle_reason,
+                    },
+                )
+            return sent
         final_metadata = dict(metadata)
         final_metadata["finalized"] = True
         final_metadata.setdefault("source", "hermes")
@@ -1388,6 +1488,7 @@ class LogosAdapter(BasePlatformAdapter):
                 project_key=project_key,
                 session_id=session_id,
                 status="idle",
+                request_id=str(final_metadata.get("request_id") or "") or None,
             )
         await self._send_private_notification(
             PrivateNotificationKind.FINISHED,
@@ -1567,6 +1668,7 @@ class LogosAdapter(BasePlatformAdapter):
                 project_key=project_key,
                 session_id=session_id,
                 status="idle",
+                request_id=root_request_id,
             )
         await self._send_private_notification(
             PrivateNotificationKind.FINISHED,
@@ -1695,10 +1797,12 @@ class LogosAdapter(BasePlatformAdapter):
         request_id: str | None = None,
         device_id: str | None = None,
         payload: dict[str, Any] | None = None,
+        server_seq: int | None = None,
+        updated_at: float | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "status": status,
-            "updated_at": time.time(),
+            "updated_at": time.time() if updated_at is None else updated_at,
         }
         if payload:
             body.update(payload)
@@ -1708,7 +1812,7 @@ class LogosAdapter(BasePlatformAdapter):
             "device_id": device_id,
             "project_key": project_key,
             "session_id": session_id,
-            "server_seq": self.store.next_server_seq(),
+            "server_seq": self.store.next_server_seq() if server_seq is None else int(server_seq),
             "payload": body,
         }
 
@@ -1722,6 +1826,16 @@ class LogosAdapter(BasePlatformAdapter):
         device_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        updated_at = time.time()
+        stored = self.store.upsert_run_state(
+            project_key=project_key,
+            session_id=session_id,
+            status=status,
+            request_id=request_id,
+            device_id=device_id,
+            payload=dict(payload or {}),
+            updated_at=updated_at,
+        )
         frame = self._run_status_frame(
             project_key=project_key,
             session_id=session_id,
@@ -1729,6 +1843,8 @@ class LogosAdapter(BasePlatformAdapter):
             request_id=request_id,
             device_id=device_id,
             payload=payload,
+            server_seq=stored.server_seq,
+            updated_at=updated_at,
         )
         if self.ws_server is not None:
             await self.ws_server.broadcast(frame, project_key=project_key)
@@ -2214,6 +2330,7 @@ class LogosAdapter(BasePlatformAdapter):
         has_more = len(messages) > limit
         messages = messages[:limit]
         pending_interactions = [item.to_protocol() for item in self.store.list_pending_interactions(project_key)]
+        run_state = self.store.latest_run_state(project_key)
         return {
             "type": "messages_batch",
             "request_id": envelope.request_id,
@@ -2223,6 +2340,7 @@ class LogosAdapter(BasePlatformAdapter):
             "payload": {
                 "messages": [message.to_protocol() for message in messages],
                 "pending_interactions": pending_interactions,
+                "run_status": run_state.to_protocol() if run_state is not None else None,
                 "has_more": has_more,
                 "after_server_seq": payload.get("after_server_seq", payload.get("last_seen_server_seq")),
                 "before_message_id": before_message_id,

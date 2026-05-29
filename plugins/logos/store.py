@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-LOGOS_STORE_SCHEMA_VERSION = 1
+LOGOS_STORE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -156,6 +156,30 @@ class LogosPendingInteraction:
         return data
 
 
+@dataclass(frozen=True)
+class LogosRunState:
+    project_key: str
+    session_id: str | None
+    status: str
+    request_id: str | None
+    device_id: str | None
+    payload: dict[str, Any]
+    server_seq: int
+    updated_at: float
+
+    def to_protocol(self) -> dict[str, Any]:
+        return {
+            "project_key": self.project_key,
+            "session_id": self.session_id,
+            "status": self.status,
+            "request_id": self.request_id,
+            "device_id": self.device_id,
+            "payload": self.payload,
+            "server_seq": self.server_seq,
+            "updated_at": self.updated_at,
+        }
+
+
 class LogosStore:
 
 
@@ -299,6 +323,23 @@ class LogosStore:
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logos_pending_project ON logos_pending_interactions(project_key, created_at DESC)"
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS logos_run_states (
+                    project_key TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    status TEXT NOT NULL,
+                    request_id TEXT,
+                    device_id TEXT,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    server_seq INTEGER NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logos_run_states_seq ON logos_run_states(server_seq)"
             )
             self._conn.execute(f"PRAGMA user_version = {LOGOS_STORE_SCHEMA_VERSION}")
 
@@ -530,6 +571,90 @@ class LogosStore:
     def resolve_pending_interactions_for_project(self, project_key: str) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM logos_pending_interactions WHERE project_key = ?", (str(project_key),))
+
+    def upsert_run_state(
+        self,
+        *,
+        project_key: str,
+        status: str,
+        session_id: str | None = None,
+        request_id: str | None = None,
+        device_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        updated_at: float | None = None,
+    ) -> LogosRunState:
+        project_key = str(project_key or "default")
+        status = str(status or "idle")
+        payload_json = json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True)
+        updated_at = time.time() if updated_at is None else float(updated_at)
+        with self._lock:
+            server_seq = self.next_server_seq()
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO logos_run_states (
+                        project_key, session_id, status, request_id, device_id,
+                        payload_json, server_seq, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_key) DO UPDATE SET
+                        session_id = excluded.session_id,
+                        status = excluded.status,
+                        request_id = excluded.request_id,
+                        device_id = excluded.device_id,
+                        payload_json = excluded.payload_json,
+                        server_seq = excluded.server_seq,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        project_key,
+                        session_id,
+                        status,
+                        request_id,
+                        device_id,
+                        payload_json,
+                        server_seq,
+                        updated_at,
+                    ),
+                )
+            stored = self.latest_run_state(project_key)
+            assert stored is not None
+            return stored
+
+    def latest_run_state(self, project_key: str) -> LogosRunState | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM logos_run_states WHERE project_key = ?",
+                (str(project_key or "default"),),
+            ).fetchone()
+        return self._row_to_run_state(row) if row else None
+
+    def interrupt_active_run_states(self, *, reason: str = "adapter_restarted") -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM logos_run_states
+                WHERE status IN ('running', 'queued')
+                """
+            ).fetchall()
+        for row in rows:
+            state = self._row_to_run_state(row)
+            payload = dict(state.payload)
+            payload.update(
+                {
+                    "interrupted": True,
+                    "final_status": "interrupted",
+                    "reason": reason,
+                }
+            )
+            self.upsert_run_state(
+                project_key=state.project_key,
+                session_id=state.session_id,
+                status="idle",
+                request_id=state.request_id,
+                device_id=state.device_id,
+                payload=payload,
+            )
+        return len(rows)
 
     def create_project(self, title: str) -> LogosProject:
         base_key = self.slugify_project_title(title)
@@ -962,6 +1087,26 @@ class LogosStore:
             payload=payload,
             server_seq=int(row["server_seq"]),
             created_at=float(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_run_state(row: sqlite3.Row) -> LogosRunState:
+        payload_raw = row["payload_json"] or "{}"
+        try:
+            payload = json.loads(payload_raw)
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return LogosRunState(
+            project_key=row["project_key"],
+            session_id=row["session_id"],
+            status=row["status"],
+            request_id=row["request_id"],
+            device_id=row["device_id"],
+            payload=payload,
+            server_seq=int(row["server_seq"]),
+            updated_at=float(row["updated_at"]),
         )
 
     @staticmethod

@@ -15,6 +15,8 @@ try:
     from gateway.config import PlatformConfig
     from gateway.platforms.base import MessageEvent
     from logos.adapter import LogosAdapter
+    from logos.commands import complete_slash_command
+    from logos.schema import Envelope, error_frame
     from logos.ws_server import LogosWebSocketServer
     from websockets.exceptions import ConnectionClosed
 except ModuleNotFoundError as exc:
@@ -23,7 +25,10 @@ except ModuleNotFoundError as exc:
     MessageEvent = Any  # type: ignore[assignment]
     LogosAdapter = object  # type: ignore[assignment]
     LogosWebSocketServer = object  # type: ignore[assignment]
+    Envelope = Any  # type: ignore[assignment]
     ConnectionClosed = Exception  # type: ignore[assignment]
+    complete_slash_command = None  # type: ignore[assignment]
+    error_frame = None  # type: ignore[assignment]
 else:
     RUNTIME_IMPORT_ERROR = None
 
@@ -49,6 +54,52 @@ TRAFFIC_SECRET_EXACT_KEYS = {
     "shared_secret_hash",
 }
 TRAFFIC_TEXT_KEYS = {"text", "content", "command_preview", "summary", "question"}
+
+
+def _stage_f_command(
+    name: str,
+    description: str,
+    *,
+    args_hint: str = "",
+    source: str = "stage_f_mock",
+    available: bool = True,
+    unavailable_reason: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": f"{source}:{name}",
+        "trigger": f"/{name}",
+        "canonical": f"/{name}",
+        "aliases": [],
+        "description": description,
+        "category": "Stage F" if source == "stage_f_mock" else "Session",
+        "args_hint": args_hint,
+        "subcommands": [],
+        "source": source,
+        "available": available,
+        "unavailable_reason": unavailable_reason,
+        "requires_args": args_hint.startswith("<"),
+        "adds_trailing_space": bool(args_hint),
+        "deprecated": False,
+    }
+
+
+STAGE_F_COMMAND_CATALOG: dict[str, Any] = {
+    "schema_version": 1,
+    "catalog_version": "stage-f-commands-v1",
+    "generated_at": "2026-05-27T00:00:00+00:00",
+    "fallback_used": False,
+    "warnings": [],
+    "commands": [
+        _stage_f_command("resume", "Resume a named session", args_hint="[name]", source="builtin"),
+        _stage_f_command("queue", "Queue a prompt", args_hint="<prompt>", source="builtin"),
+        _stage_f_command("stop", "Stop the active run", source="builtin"),
+        _stage_f_command("mock_approval", "Render the mock approval fixture"),
+        _stage_f_command("mock_clarify", "Render the mock clarification fixture"),
+        _stage_f_command("mock_delayed_thread_updates", "Send delayed thread updates"),
+        _stage_f_command("mock_gateway_restart", "Interrupt the current run and force reconnect"),
+        _stage_f_command("sessions", "Browse previous sessions", source="builtin", available=False, unavailable_reason="not available in the Stage F mock"),
+    ],
+}
 
 
 def _allow_transcript_logging() -> bool:
@@ -174,9 +225,63 @@ class StageFMockLogosAdapter(LogosAdapter):
         self._mark_connected()
         return True
 
+    async def handle_ws_envelope(self, envelope: Envelope) -> dict[str, Any] | None:  # type: ignore[override]
+        if envelope.type == "commands_get":
+            payload = dict(STAGE_F_COMMAND_CATALOG)
+            payload["commands"] = list(STAGE_F_COMMAND_CATALOG["commands"])
+            payload["request_id"] = envelope.request_id
+            return {
+                "type": "commands_list",
+                "request_id": envelope.request_id,
+                "device_id": envelope.device_id,
+                "project_key": envelope.project_key,
+                "payload": payload,
+            }
+        if envelope.type == "commands_complete":
+            if complete_slash_command is None:
+                return None
+            text = envelope.payload.get("text")
+            if not isinstance(text, str):
+                return error_frame(  # type: ignore[misc]
+                    "invalid_commands_complete",
+                    "commands_complete requires text",
+                    request_id=envelope.request_id,
+                    device_id=envelope.device_id,
+                    project_key=envelope.project_key,
+                )
+            payload = complete_slash_command(text, catalog=STAGE_F_COMMAND_CATALOG)
+            payload["request_id"] = envelope.request_id
+            return {
+                "type": "commands_complete_result",
+                "request_id": envelope.request_id,
+                "device_id": envelope.device_id,
+                "project_key": envelope.project_key,
+                "payload": payload,
+            }
+        return await super().handle_ws_envelope(envelope)
+
+    @staticmethod
+    def _request_id_for_event(event: MessageEvent, fallback: str) -> str:
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        request_id = raw_message.get("request_id")
+        return str(request_id or fallback)
+
     async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
         content = event.text.strip()
         chat_id = event.source.chat_id if event.source else "project:default"
+        if content == "/mock_gateway_restart":
+            request_id = self._request_id_for_event(event, "stage-f-gateway-restart")
+            await self.send(
+                chat_id=chat_id,
+                content=(
+                    "⚠️ Gateway restarting — Your current task will be interrupted. "
+                    "Send any message after restart and I'll try to resume where you left off."
+                ),
+                metadata={"request_id": request_id, "session_id": "stage-f-gateway-restart-session"},
+            )
+            await asyncio.sleep(0.2)
+            await self._close_mock_clients(code=1012, reason="gateway_restarting")
+            return
         if content == "/mock_approval":
             await self.send_exec_approval(
                 chat_id=chat_id,
@@ -265,7 +370,7 @@ class StageFMockLogosAdapter(LogosAdapter):
             )
             return
         if content == "/mock_run_control_shrink":
-            request_id = "stage-f-run-control-shrink"
+            request_id = self._request_id_for_event(event, "stage-f-run-control-shrink")
             await self._broadcast_progress_text(
                 chat_id=chat_id,
                 content="Run control shrink progress is visible before final response.",
@@ -325,6 +430,22 @@ class StageFMockLogosAdapter(LogosAdapter):
                 "session_id": session_id,
             },
         )
+
+    async def _close_mock_clients(self, *, code: int, reason: str) -> None:
+        if self.ws_server is None:
+            return
+        clients = []
+        lock = getattr(self.ws_server, "_lock", None)
+        if lock is not None:
+            async with lock:
+                clients = list(getattr(self.ws_server, "_clients", {}).keys())
+        else:
+            clients = list(getattr(self.ws_server, "_clients", {}).keys())
+        for websocket in clients:
+            try:
+                await websocket.close(code=code, reason=reason)
+            except Exception:
+                pass
 
 
 async def amain() -> int:
