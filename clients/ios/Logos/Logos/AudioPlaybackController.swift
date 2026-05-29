@@ -489,7 +489,11 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         spectrumSamplesByAudioID.removeValue(forKey: audioID)
     }
 
-    func waitForSpectrumDecodeForTesting(audioID: String, timeout: TimeInterval = 1.0) async -> Bool {
+    func waitForSpectrumDecodeForTesting(audioID: String, timeout: TimeInterval = 5.0) async -> Bool {
+        // The decode runs on a background utility queue; it normally completes in well under a
+        // second, and the loop returns the instant its token clears. The ceiling exists only to
+        // avoid hanging if the decode never runs — keep it generous so a loaded CI runner doesn't
+        // time out a decode that is merely slow to be scheduled (was 1.0s; flaked on CI).
         let deadline = Date().addingTimeInterval(timeout)
         while spectrumDecodeTokensByAudioID[audioID] != nil {
             if Date() >= deadline { return false }
