@@ -23,9 +23,14 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.logos.app
         PRODUCT_NAME: Logos
         INFOPLIST_FILE: Logos/Info.plist
+        # Debug/device builds use development (sandbox) APNS; see configs.Release below.
         CODE_SIGN_ENTITLEMENTS: Logos/Logos.entitlements
         CODE_SIGN_STYLE: Automatic
         ENABLE_TESTABILITY: YES
+      configs:
+        # Release/TestFlight builds register production APNS tokens.
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Logos/LogosRelease.entitlements
   LogosTests:
     type: bundle.unit-test
     platform: iOS

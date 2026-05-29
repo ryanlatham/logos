@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Release/TestFlight builds register APNS tokens against Apple's production servers.
+       Debug/device builds use Logos.entitlements (development / sandbox). The adapter records
+       each device's APNS environment, so sandbox and production devices can coexist. -->
+  <key>aps-environment</key>
+  <string>production</string>
+</dict>
+</plist>
