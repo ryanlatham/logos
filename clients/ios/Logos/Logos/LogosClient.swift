@@ -30,12 +30,6 @@ struct FastAckState: Equatable {
     }
 }
 
-private struct PendingNotificationRouteState {
-    var route: LogosNotificationRoute
-    var didRequestMessages: Bool = false
-}
-
-
 @MainActor
 final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published var settings = LogosSettings() {
@@ -63,7 +57,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
     @Published private(set) var messages: [LogosMessage] = []
     @Published private(set) var runStatus: LogosRunStatus = .idle
-    @Published private(set) var threadFocusRequest: ThreadFocusRequest?
     @Published var lastError: String?
     /// Bounded, source-tagged history of client errors (WS1 P7). `lastError` remains the
     /// transient single-error banner; `errorLog` is the persistent, dismissible record.
@@ -83,9 +76,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var progressCancellable: AnyCancellable?
     let interactionController: InteractionController
     private var interactionCancellable: AnyCancellable?
+    let notificationRouter: NotificationRouter
+    private var notificationCancellable: AnyCancellable?
     private var staleTimeoutInterval: TimeInterval
-    private var autoPlayedMessageKeys = Set<String>()
-    private var pendingAPNSToken: String?
     private let pairingExchanger: any PairingCredentialExchanging
     var isWebSocketOpen = false
     private var pendingMessages = PendingMessageBuffer()
@@ -104,18 +97,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var requiresScopedLiveResponse = false
     private var pendingProjectSwitchRequestID: String?
     private var pendingProjectSwitchTarget: String?
-    private var pendingNotificationRoute: PendingNotificationRouteState?
-    private var pendingFinalAutoPlayMessage: LogosMessage?
-    private var fulfilledNotificationRouteKeys = Set<String>()
-    private var notificationRouteAnchors: [String: LogosMessage] = [:]
-    private var threadFocusRequestSequence = 0
-    private var notificationPlaybackSceneActive = false
 
     private static let staleSilenceNoticeText = "Logos has not heard from Hermes in a while. The run may still be working; waiting for the next adapter update."
     private static let maxStaleTimeoutInterval: TimeInterval = 86_400
     private static let maxInboundFrameBytes = 2_000_000
-    private static let maxNotificationRouteAnchors = 8
-    private static let notificationReplayContextWindow = 25
 
     init(
         store: SQLiteMessageStore = SQLiteMessageStore(),
@@ -132,6 +117,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         self.audioCoordinator = AudioCoordinator(audioPlayback: audioPlayback)
         self.progressActivityManager = ProgressActivityManager()
         self.interactionController = InteractionController()
+        self.notificationRouter = NotificationRouter()
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
         self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
         self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
@@ -139,6 +125,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         audioCoordinator.host = self
         progressActivityManager.host = self
         interactionController.host = self
+        notificationRouter.host = self
         // Re-emit the coordinator's published audio-state changes as our own so SwiftUI views
         // observing `LogosClient` refresh when the (forwarded) overlay/status change.
         audioCancellable = audioCoordinator.objectWillChange.sink { [weak self] _ in
@@ -152,6 +139,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         // Re-emit the interaction controller's published changes so views reading the forwarded
         // `approvalCard`/`clarifyCard`/`pendingInteractionResponseID` refresh (WS1 P5).
         interactionCancellable = interactionController.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // Re-emit the notification router's published changes so views reading the forwarded
+        // `threadFocusRequest` refresh (WS1 P5, mirrors the audio/progress/interaction wiring).
+        notificationCancellable = notificationRouter.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
     }
@@ -177,7 +169,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func connect(isAutomaticRetry: Bool) {
-        LogosConnectionLog.logger.info("Connect requested url=\(LogosConnectionLog.urlDescription(self.settings.urlString), privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) has_secret=\(!self.settings.secret.isEmpty, privacy: .public) pending_apns_token=\(self.pendingAPNSToken != nil, privacy: .public)")
+        LogosConnectionLog.logger.info("Connect requested url=\(LogosConnectionLog.urlDescription(self.settings.urlString), privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) has_secret=\(!self.settings.secret.isEmpty, privacy: .public)")
         if isAutomaticRetry == false {
             progressActivityManager.clearConnectionRetryState()
         }
@@ -362,48 +354,15 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
 
 
     func registerDevice(apnsToken: String?) {
-        if let token = apnsToken, token.isEmpty == false {
-            pendingAPNSToken = token
-            LogosConnectionLog.logger.info("Stored pending APNS token for registration token_bytes=\(token.utf8.count, privacy: .public)")
-        }
-        guard isWebSocketOpen, connectionState == .connected else {
-            LogosConnectionLog.logger.info("Device registration deferred until signed hello is authenticated pending_apns_token=\(self.pendingAPNSToken != nil, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) has_task=\(self.task != nil, privacy: .public)")
-            return
-        }
-        var payload: [String: Any] = [
-            "display_name": UIDevice.current.name,
-            "apns_environment": LogosAPNSEnvironment.resolved(),
-            "capabilities": ["text", "speech", "projects", "approval", "clarification", "playback_audio", "notifications"]
-        ]
-        if let token = pendingAPNSToken, token.isEmpty == false {
-            payload["apns_token"] = token
-        }
-        let sent = sendFrame([
-            "type": "register_device",
-            "request_id": UUID().uuidString,
-            "device_id": settings.deviceID,
-            "project_key": activeProjectKey,
-            "payload": payload
-        ])
-        LogosConnectionLog.logger.info("Device registration send requested sent=\(sent, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) includes_apns_token=\(payload["apns_token"] != nil, privacy: .public)")
+        notificationRouter.registerDevice(apnsToken: apnsToken)
     }
 
     func handleNotificationRoute(_ route: LogosNotificationRoute) {
-        activeProjectKey = route.projectKey
-        pendingNotificationRoute = PendingNotificationRouteState(route: route)
-        if connectionState != .connected || task == nil || isWebSocketOpen == false {
-            connect()
-        } else {
-            processPendingNotificationRouteIfReady()
-        }
+        notificationRouter.handleNotificationRoute(route)
     }
 
     func updateSceneActivationForPlayback(isActive: Bool) {
-        let wasActive = notificationPlaybackSceneActive
-        notificationPlaybackSceneActive = isActive
-        guard isActive, wasActive == false else { return }
-        processPendingNotificationRouteIfReady()
-        processPendingFinalAutoPlayIfReady()
+        notificationRouter.updateSceneActivationForPlayback(isActive: isActive)
     }
 
     func applyPairingRoute(_ route: LogosPairingRoute) async {
@@ -481,178 +440,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         ])
     }
 
-    private func processPendingNotificationRouteIfReady() {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return }
-        guard var pending = pendingNotificationRoute else { return }
-        if pending.didRequestMessages == false {
-            requestMessages(afterServerSeq: notificationFetchAfterServerSeq(for: pending.route))
-            pending.didRequestMessages = true
-            pendingNotificationRoute = pending
-        }
-        if pending.route.kind.lowercased() == PrivateNotificationRouteKind.finished {
-            fulfillPendingFinishedNotificationRouteIfPossible()
-        } else {
-            pendingNotificationRoute = nil
-        }
-    }
-
-    private func notificationFetchAfterServerSeq(for route: LogosNotificationRoute) -> Int {
-        if let serverSeq = route.serverSeq {
-            return max(serverSeq - Self.notificationReplayContextWindow, 0)
-        }
-        return latestServerSeq(projectKey: route.projectKey)
-    }
-
-    private enum PrivateNotificationRouteKind {
-        static let finished = "finished"
-    }
-
-    private func notificationRouteKey(_ route: LogosNotificationRoute) -> String {
-        [
-            route.kind.lowercased(),
-            route.projectKey,
-            route.sessionID ?? "",
-            route.messageID ?? "",
-            route.requestID ?? "",
-            route.serverSeq.map(String.init) ?? ""
-        ].joined(separator: "|")
-    }
-
-    private func fulfillPendingFinishedNotificationRouteIfPossible() {
-        guard let pending = pendingNotificationRoute else { return }
-        let route = pending.route
-        guard route.kind.lowercased() == PrivateNotificationRouteKind.finished else { return }
-        let routeKey = notificationRouteKey(route)
-        guard fulfilledNotificationRouteKeys.contains(routeKey) == false else {
-            pendingNotificationRoute = nil
-            return
-        }
-        guard let message = notificationFinalMessage(for: route) else { return }
-        anchorNotificationRouteMessage(message, routeKey: routeKey)
-        guard notificationPlaybackSceneActive else { return }
-        guard requestNotificationPlayback(message, routeKey: routeKey) else { return }
-        pendingNotificationRoute = nil
-        fulfilledNotificationRouteKeys.insert(routeKey)
-    }
-
-    private func anchorNotificationRouteMessage(_ message: LogosMessage, routeKey: String) {
-        guard message.isProgressUpdate == false else { return }
-        notificationRouteAnchors[message.id] = message
-        trimNotificationRouteAnchors()
-        refreshMessages()
-        let isVisible = messages.contains { $0.id == message.id }
-        LogosConnectionLog.logger.info("Finished notification route anchored project_key=\(message.projectKey, privacy: .public) session_id=\(message.sessionID, privacy: .public) message_id=\(message.messageID, privacy: .public) server_seq=\(message.serverSeq, privacy: .public) route_key=\(routeKey, privacy: .public) visible=\(isVisible, privacy: .public)")
-        setThreadFocusRequest(
-            targetMessageID: message.id,
-            projectKey: message.projectKey,
-            reason: .finishedNotification,
-            routeKey: routeKey,
-            serverSeq: message.serverSeq,
-            isVisible: isVisible
-        )
-    }
-
-    private func setThreadFocusRequest(
-        targetMessageID: String,
-        projectKey: String,
-        reason: ThreadFocusReason,
-        routeKey: String,
-        serverSeq: Int,
-        isVisible: Bool
-    ) {
-        threadFocusRequestSequence += 1
-        let request = ThreadFocusRequest(
-            id: "thread-focus-\(threadFocusRequestSequence)",
-            projectKey: projectKey,
-            targetMessageID: targetMessageID,
-            reason: reason,
-            createdAt: Date().timeIntervalSince1970
-        )
-        threadFocusRequest = request
-        LogosConnectionLog.logger.info("Thread focus requested project_key=\(projectKey, privacy: .public) target_message_id=\(targetMessageID, privacy: .public) server_seq=\(serverSeq, privacy: .public) route_key=\(routeKey, privacy: .public) focus_id=\(request.id, privacy: .public) visible=\(isVisible, privacy: .public)")
-    }
-
     func completeThreadFocusRequest(id: String) {
-        guard threadFocusRequest?.id == id else { return }
-        LogosConnectionLog.logger.info("Thread focus completed focus_id=\(id, privacy: .public) target_message_id=\(self.threadFocusRequest?.targetMessageID ?? "<none>", privacy: .public)")
-        threadFocusRequest = nil
-    }
-
-    private func trimNotificationRouteAnchors() {
-        guard notificationRouteAnchors.count > Self.maxNotificationRouteAnchors else { return }
-        let removeCount = notificationRouteAnchors.count - Self.maxNotificationRouteAnchors
-        let oldestKeys = notificationRouteAnchors
-            .sorted { lhs, rhs in
-                if lhs.value.serverSeq != rhs.value.serverSeq {
-                    return lhs.value.serverSeq < rhs.value.serverSeq
-                }
-                if lhs.value.timestamp != rhs.value.timestamp {
-                    return lhs.value.timestamp < rhs.value.timestamp
-                }
-                return lhs.key < rhs.key
-            }
-            .prefix(removeCount)
-            .map(\.key)
-        for key in oldestKeys {
-            notificationRouteAnchors.removeValue(forKey: key)
-        }
-    }
-
-    @discardableResult
-    private func requestNotificationPlayback(_ message: LogosMessage, routeKey: String) -> Bool {
-        requestFinalAutoPlayback(message, notificationRouteKey: routeKey)
-    }
-
-    @discardableResult
-    private func requestFinalAutoPlayback(_ message: LogosMessage, notificationRouteKey: String? = nil) -> Bool {
-        let key = message.id
-        guard autoPlayedMessageKeys.contains(key) == false else {
-            if pendingFinalAutoPlayMessage?.id == key {
-                pendingFinalAutoPlayMessage = nil
-            }
-            return true
-        }
-        let sent = audioCoordinator.requestPlayback(message: message, mode: "final_auto", autoPlayKey: key, notificationRouteKey: notificationRouteKey)
-        if sent {
-            autoPlayedMessageKeys.insert(key)
-            if pendingFinalAutoPlayMessage?.id == key {
-                pendingFinalAutoPlayMessage = nil
-            }
-        }
-        return sent
-    }
-
-    private func processPendingFinalAutoPlayIfReady() {
-        guard notificationPlaybackSceneActive else { return }
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return }
-        guard let message = pendingFinalAutoPlayMessage else { return }
-        guard message.projectKey == activeProjectKey else { return }
-        _ = requestFinalAutoPlayback(message)
-    }
-
-    private func notificationFinalMessage(for route: LogosNotificationRoute) -> LogosMessage? {
-        if let messageID = route.messageID, messageID.isEmpty == false {
-            guard let message = store.message(projectKey: route.projectKey, sessionID: route.sessionID, messageID: messageID) else {
-                return nil
-            }
-            guard message.status == "persisted",
-                  message.role != "user",
-                  message.isFinal,
-                  message.hasFinalizedMetadata,
-                  message.isProgressUpdate == false
-            else {
-                return nil
-            }
-            if let serverSeq = route.serverSeq, message.serverSeq < serverSeq {
-                return nil
-            }
-            return message
-        }
-        guard let sessionID = route.sessionID, sessionID.isEmpty == false,
-              let serverSeq = route.serverSeq else {
-            return nil
-        }
-        return store.latestFinalMessage(projectKey: route.projectKey, sessionID: sessionID, atOrAfterServerSeq: serverSeq)
+        notificationRouter.completeThreadFocusRequest(id: id)
     }
 
     func approveCurrentRequest() {
@@ -1112,17 +901,17 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             applyClientConfig(from: root)
             markConnected()
             if task != nil {
-                registerDevice(apnsToken: pendingAPNSToken)
+                notificationRouter.registerDeviceWithPendingToken()
                 requestProjects()
-                processPendingNotificationRouteIfReady()
-                processPendingFinalAutoPlayIfReady()
+                notificationRouter.processPendingNotificationRouteIfReady()
+                notificationRouter.processPendingFinalAutoPlayIfReady()
             }
         case "registered":
             applyClientConfig(from: root)
             markConnected()
-            pendingAPNSToken = nil
-            processPendingNotificationRouteIfReady()
-            processPendingFinalAutoPlayIfReady()
+            notificationRouter.clearPendingAPNSToken()
+            notificationRouter.processPendingNotificationRouteIfReady()
+            notificationRouter.processPendingFinalAutoPlayIfReady()
         case "projects_list":
             handleProjectsList(root)
         case "commands_list":
@@ -1293,7 +1082,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             }
         }
         refreshMessages()
-        fulfillPendingFinishedNotificationRouteIfPossible()
+        notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
     }
 
     private func handleReplayedRunStatus(
@@ -1348,9 +1137,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
 
     private func clearRunScopedStateForProjectChange() {
         runStatus = .idle
-        if let request = threadFocusRequest, request.projectKey != activeProjectKey {
-            threadFocusRequest = nil
-        }
+        notificationRouter.clearThreadFocusRequestIfProjectChanged(activeProjectKey: activeProjectKey)
         pendingCancelRequestID = nil
         pendingReconnectReplayRequestID = nil
         pendingOutboundResponseRequestID = nil
@@ -1520,7 +1307,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             store.upsert(message)
             pendingMessages.reconcile(with: message)
             refreshMessages()
-            fulfillPendingFinishedNotificationRouteIfPossible()
+            notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
             if message.projectKey == activeProjectKey && message.role != "user" && (op == "message_appended" || op == "message_updated") && progressActivityManager.isSuppressedRunRequestID(messageRequestID) == false {
                 clearAck()
             }
@@ -1659,13 +1446,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             matchedActiveRun = true
         }
         if requiresScopedLiveResponse, matchedActiveRun == false { return }
-        let key = message.id
-        guard autoPlayedMessageKeys.contains(key) == false else { return }
-        guard notificationPlaybackSceneActive else {
-            pendingFinalAutoPlayMessage = message
-            return
-        }
-        _ = requestFinalAutoPlayback(message)
+        notificationRouter.autoPlayLiveAssistantMessageIfNeeded(message)
     }
 
     private func upsertProject(_ project: LogosProject) {
@@ -1742,7 +1523,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         for message in visibleMessages(from: store.loadMessages(projectKey: activeProjectKey)) {
             visibleByID[message.id] = message
         }
-        for message in notificationRouteAnchors.values where message.projectKey == activeProjectKey && message.isProgressUpdate == false {
+        for message in notificationRouter.anchoredMessages(forProjectKey: activeProjectKey) {
             visibleByID[message.id] = message
         }
         let persisted = visibleByID.values.sorted(by: messageDisplayPrecedes)
@@ -1807,11 +1588,11 @@ extension LogosClient: AudioCoordinatorHost {
     }
 
     func clearAutoPlayedMessageKey(_ key: String) {
-        autoPlayedMessageKeys.remove(key)
+        notificationRouter.clearAutoPlayedMessageKey(key)
     }
 
     func clearFulfilledNotificationRouteKey(_ key: String) {
-        fulfilledNotificationRouteKeys.remove(key)
+        notificationRouter.clearFulfilledNotificationRouteKey(key)
     }
 }
 
@@ -1975,6 +1756,63 @@ extension LogosClient: InteractionControllerHost {
 
     func clearInteractionAck(matchingID id: String, projectKey: String) {
         clearAck(matching: id, projectKey: projectKey)
+    }
+}
+
+// MARK: - Notification-router forwarding (WS1 P5)
+
+extension LogosClient {
+    /// Re-exposes the router's thread-focus request so existing views/tests reading
+    /// `client.threadFocusRequest` keep working (get-only, matching the original `@Published private(set)`).
+    var threadFocusRequest: ThreadFocusRequest? { notificationRouter.threadFocusRequest }
+}
+
+extension LogosClient: NotificationRouterHost {
+    var notificationActiveProjectKey: String {
+        get { activeProjectKey }
+        set { activeProjectKey = newValue }
+    }
+
+    var notificationDeviceID: String { settings.deviceID }
+
+    var notificationIsConnected: Bool { connectionState == .connected }
+
+    var notificationHasOpenSocket: Bool { task != nil && isWebSocketOpen }
+
+    func notificationConnect() {
+        connect()
+    }
+
+    @discardableResult
+    func sendNotificationFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+        sendFrame(frame, onCompletion: onCompletion)
+    }
+
+    func notificationRequestMessages(afterServerSeq: Int) {
+        requestMessages(afterServerSeq: afterServerSeq)
+    }
+
+    func notificationLatestServerSeq(projectKey: String) -> Int {
+        latestServerSeq(projectKey: projectKey)
+    }
+
+    func notificationStoredMessage(projectKey: String, sessionID: String?, messageID: String) -> LogosMessage? {
+        store.message(projectKey: projectKey, sessionID: sessionID, messageID: messageID)
+    }
+
+    func notificationLatestFinalMessage(projectKey: String, sessionID: String, atOrAfterServerSeq serverSeq: Int) -> LogosMessage? {
+        store.latestFinalMessage(projectKey: projectKey, sessionID: sessionID, atOrAfterServerSeq: serverSeq)
+    }
+
+    func notificationRefreshMessages() {
+        refreshMessages()
+    }
+
+    var notificationVisibleMessages: [LogosMessage] { messages }
+
+    @discardableResult
+    func requestAutoPlay(message: LogosMessage, autoPlayKey: String?, notificationRouteKey: String?) -> Bool {
+        audioCoordinator.requestPlayback(message: message, mode: "final_auto", autoPlayKey: autoPlayKey, notificationRouteKey: notificationRouteKey)
     }
 }
 
