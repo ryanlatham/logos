@@ -46,7 +46,7 @@ final class LogosClient: ObservableObject {
     @Published private(set) var projects: [LogosProject] = []
     @Published var activeProjectKey: String = "default" {
         didSet {
-            refreshMessages()
+            messageManager.refreshMessages()
             if oldValue != activeProjectKey {
                 clearRunScopedStateForProjectChange()
             } else {
@@ -54,7 +54,6 @@ final class LogosClient: ObservableObject {
             }
         }
     }
-    @Published private(set) var messages: [LogosMessage] = []
     @Published private(set) var runStatus: LogosRunStatus = .idle
     @Published var lastError: String?
     /// Bounded, source-tagged history of client errors (WS1 P7). `lastError` remains the
@@ -67,7 +66,8 @@ final class LogosClient: ObservableObject {
 
     let logosConnection: LogosConnection
     private var connectionCancellable: AnyCancellable?
-    private let store: SQLiteMessageStore
+    let messageManager: MessageManager
+    private var messageCancellable: AnyCancellable?
     let audioCoordinator: AudioCoordinator
     private var audioCancellable: AnyCancellable?
     let progressActivityManager: ProgressActivityManager
@@ -78,13 +78,10 @@ final class LogosClient: ObservableObject {
     private var notificationCancellable: AnyCancellable?
     private var staleTimeoutInterval: TimeInterval
     private let pairingExchanger: any PairingCredentialExchanging
-    private var pendingMessages = PendingMessageBuffer()
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
     private let staleTimeoutScheduler: any StaleTimeoutScheduling
     private let ackClearScheduler: any AckClearScheduling
-    private var localNoticeMessages: [LogosMessage] = []
-    private var localNoticeSequence = 0
     private var pendingCancelRequestID: String?
     var pendingCommandCatalogRequestID: String?
     var pendingCommandCompletionRequestID: String?
@@ -108,9 +105,9 @@ final class LogosClient: ObservableObject {
         staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil,
         ackClearScheduler: (any AckClearScheduling)? = nil
     ) {
-        self.store = store
         self.logosConnection = LogosConnection(socketFactory: socketFactory)
         self.pairingExchanger = pairingExchanger
+        self.messageManager = MessageManager(store: store)
         self.audioCoordinator = AudioCoordinator(audioPlayback: audioPlayback)
         self.progressActivityManager = ProgressActivityManager()
         self.interactionController = InteractionController()
@@ -118,8 +115,9 @@ final class LogosClient: ObservableObject {
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
         self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
         self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
-        messages = visibleMessages(from: store.loadMessages(projectKey: activeProjectKey))
         logosConnection.host = self
+        messageManager.host = self
+        messageManager.loadInitialMessages(projectKey: activeProjectKey)
         audioCoordinator.host = self
         progressActivityManager.host = self
         interactionController.host = self
@@ -127,6 +125,12 @@ final class LogosClient: ObservableObject {
         // Re-emit the connection's published `connectionState` changes as our own so SwiftUI views
         // observing `LogosClient` refresh when the (forwarded) connection state changes (WS1 P5).
         connectionCancellable = logosConnection.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // Re-emit the message manager's published `messages` changes as our own so SwiftUI views
+        // observing `LogosClient` refresh when the (forwarded) visible thread changes (WS1 P5,
+        // mirrors the audio/progress/interaction/notification wiring).
+        messageCancellable = messageManager.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         // Re-emit the coordinator's published audio-state changes as our own so SwiftUI views
@@ -206,7 +210,7 @@ final class LogosClient: ObservableObject {
             progressActivityManager.unsuppressRunRequestID(requestID)
             outstandingOutboundResponseRequestIDs.insert(requestID)
             pendingOutboundResponseRequestID = requestID
-            addPendingMessage(pending)
+            messageManager.addPendingMessage(pending)
             runStatus = .running
             scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
             if Self.shouldRefreshCommandCatalog(afterSending: trimmed) {
@@ -265,7 +269,7 @@ final class LogosClient: ObservableObject {
             progressActivityManager.unsuppressRunRequestID(requestID)
             outstandingOutboundResponseRequestIDs.insert(requestID)
             pendingOutboundResponseRequestID = requestID
-            addPendingMessage(pending)
+            messageManager.addPendingMessage(pending)
             runStatus = .running
             scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
         }
@@ -364,16 +368,7 @@ final class LogosClient: ObservableObject {
     }
 
     func requestMessages(afterServerSeq: Int) {
-        sendFrame([
-            "type": "messages_get",
-            "request_id": UUID().uuidString,
-            "device_id": settings.deviceID,
-            "project_key": activeProjectKey,
-            "payload": [
-                "after_server_seq": afterServerSeq,
-                "limit": 100
-            ]
-        ])
+        messageManager.requestMessages(afterServerSeq: afterServerSeq)
     }
 
     func completeThreadFocusRequest(id: String) {
@@ -505,17 +500,12 @@ final class LogosClient: ObservableObject {
         guard progressActivityManager.isActiveRunRequestID(requestID) else { return }
         let now = Date().timeIntervalSince1970
         progressActivityManager.appendStaleTimeoutEvent(requestID: requestID, projectKey: projectKey, now: now)
-        localNoticeSequence += 1
-        let notice = LogosMessage.localNotice(
+        messageManager.appendLocalStaleNotice(
             projectKey: projectKey,
             requestID: requestID,
-            sequence: localNoticeSequence,
             content: Self.staleSilenceNoticeText,
-            timestamp: now
+            now: now
         )
-        store.upsert(notice)
-        localNoticeMessages.append(notice)
-        refreshMessages()
         scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
     }
 
@@ -692,15 +682,15 @@ final class LogosClient: ObservableObject {
                     )
                 }
                 if progressActivityManager.shouldPersistProgressMessage(message) {
-                    store.upsert(message)
+                    messageManager.persist(message)
                     persistedMessages.append(message)
                 }
             } else {
-                store.upsert(message)
+                messageManager.persist(message)
                 persistedMessages.append(message)
             }
         }
-        pendingMessages.reconcile(with: persistedMessages)
+        messageManager.reconcilePending(with: persistedMessages)
         let pending = payload["pending_interactions"] as? [[String: Any]] ?? []
         for interaction in pending {
             interactionController.handlePendingInteraction(interaction)
@@ -716,7 +706,7 @@ final class LogosClient: ObservableObject {
             )
         }
         let completingFinalMessage = persistedMessages.first { message in
-            guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
+            guard message.projectKey == activeProjectKey, messageManager.isExplicitTerminalAssistantMessage(message) else { return false }
             let finalRequestID = message.metadataRequestID ?? batchRequestID
             guard progressActivity != nil else { return progressActivityManager.isActiveRunRequestID(finalRequestID) }
             return progressActivityManager.shouldClearProgressActivity(for: message, requestID: finalRequestID)
@@ -743,7 +733,7 @@ final class LogosClient: ObservableObject {
                 )
             }
         }
-        refreshMessages()
+        messageManager.refreshMessages()
         notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
     }
 
@@ -911,11 +901,6 @@ final class LogosClient: ObservableObject {
         return projectKey == activeProjectKey
     }
 
-    private func isExplicitTerminalAssistantMessage(_ message: LogosMessage) -> Bool {
-        guard message.role != "user", message.isProgressUpdate == false else { return false }
-        return message.hasFinalizedMetadata && message.isFinal
-    }
-
     private func clearOutstandingOutboundRequestID(_ requestID: String?) {
         guard let requestID, requestID.isEmpty == false else { return }
         outstandingOutboundResponseRequestIDs.remove(requestID)
@@ -956,8 +941,7 @@ final class LogosClient: ObservableObject {
                     eventID: message.messageID
                 )
                 if progressActivityManager.shouldPersistProgressMessage(message) {
-                    store.upsert(message)
-                    refreshMessages()
+                    messageManager.persistAndRefresh(message)
                 }
                 return
             }
@@ -966,9 +950,7 @@ final class LogosClient: ObservableObject {
                 progressActivityManager.completeProgressActivity(requestID: messageRequestID, finalMessage: message, finalStatus: progressActivityManager.progressFinalStatus(for: message), failureMessage: message.metadataIsError ? message.content : nil)
                 runStatus = .idle
             }
-            store.upsert(message)
-            pendingMessages.reconcile(with: message)
-            refreshMessages()
+            messageManager.applyPersistedMessage(message)
             notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
             if message.projectKey == activeProjectKey && message.role != "user" && (op == "message_appended" || op == "message_updated") && progressActivityManager.isSuppressedRunRequestID(messageRequestID) == false {
                 clearAck()
@@ -1119,24 +1101,15 @@ final class LogosClient: ObservableObject {
         }
     }
 
-    private func latestServerSeq(projectKey: String? = nil) -> Int {
-        store.latestServerSeq(projectKey: projectKey ?? activeProjectKey)
-    }
-
-    private func addPendingMessage(_ message: LogosMessage) {
-        pendingMessages.add(message, persisted: store.loadMessages(projectKey: message.projectKey))
-        refreshMessages()
-    }
-
     private func handlePendingTextSendFailure(messageID: String, projectKey: String, requestID: String, error _: Error) {
         clearOutstandingOutboundRequestID(requestID)
         progressActivityManager.clearProgressActivity(requestID: requestID)
         if outstandingOutboundResponseRequestIDs.isEmpty && pendingOutboundResponseRequestID == nil && progressActivity?.requestID != requestID {
             suspendStaleTimeout()
         }
-        pendingMessages.remove(messageID: messageID)
+        messageManager.removePendingMessage(messageID: messageID)
         if projectKey == activeProjectKey {
-            refreshMessages()
+            messageManager.refreshMessages()
         }
     }
 
@@ -1151,8 +1124,8 @@ final class LogosClient: ObservableObject {
         if outstandingOutboundResponseRequestIDs.isEmpty && pendingOutboundResponseRequestID == nil && progressActivity?.requestID != requestID {
             suspendStaleTimeout()
         }
-        pendingMessages.remove(messageID: draft.inputID)
-        refreshMessages()
+        messageManager.removePendingMessage(messageID: draft.inputID)
+        messageManager.refreshMessages()
         undeliveredSpeechDraft = UndeliveredSpeechDraft(
             inputID: draft.inputID,
             projectKey: draft.projectKey,
@@ -1166,10 +1139,10 @@ final class LogosClient: ObservableObject {
         guard inFlightFinalSpeechDrafts.isEmpty == false else { return }
         let drafts = inFlightFinalSpeechDrafts.values.sorted { $0.inputID < $1.inputID }
         for draft in drafts {
-            pendingMessages.remove(messageID: draft.inputID)
+            messageManager.removePendingMessage(messageID: draft.inputID)
         }
         inFlightFinalSpeechDrafts.removeAll()
-        refreshMessages()
+        messageManager.refreshMessages()
         if let draft = drafts.last {
             undeliveredSpeechDraft = UndeliveredSpeechDraft(
                 inputID: draft.inputID,
@@ -1179,35 +1152,28 @@ final class LogosClient: ObservableObject {
             )
         }
     }
+}
 
-    private func refreshMessages() {
-        var visibleByID: [String: LogosMessage] = [:]
-        for message in visibleMessages(from: store.loadMessages(projectKey: activeProjectKey)) {
-            visibleByID[message.id] = message
-        }
-        for message in notificationRouter.anchoredMessages(forProjectKey: activeProjectKey) {
-            visibleByID[message.id] = message
-        }
-        let persisted = visibleByID.values.sorted(by: messageDisplayPrecedes)
-        pendingMessages.reconcile(with: persisted)
-        let persistedIDs = Set(persisted.map(\.id))
-        let localNotices = localNoticeMessages.filter { $0.projectKey == activeProjectKey }
-            .filter { persistedIDs.contains($0.id) == false }
-        messages = (pendingMessages.merged(with: persisted, projectKey: activeProjectKey) + localNotices).sorted(by: messageDisplayPrecedes)
+// MARK: - Message-list forwarding (WS1 P5)
+
+extension LogosClient {
+    /// Re-exposes the manager's visible thread so existing views/tests reading `client.messages`
+    /// keep working (get-only, matching the original `@Published private(set)`).
+    var messages: [LogosMessage] { messageManager.messages }
+}
+
+extension LogosClient: MessageManagerHost {
+    var messageActiveProjectKey: String { activeProjectKey }
+
+    var messageDeviceID: String { settings.deviceID }
+
+    @discardableResult
+    func sendMessageFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+        sendFrame(frame, onCompletion: onCompletion)
     }
 
-    private func visibleMessages(from persisted: [LogosMessage]) -> [LogosMessage] {
-        persisted.filter { $0.isProgressUpdate == false }
-    }
-
-    private func messageDisplayPrecedes(_ lhs: LogosMessage, _ rhs: LogosMessage) -> Bool {
-        if lhs.serverSeq > 0, rhs.serverSeq > 0, lhs.serverSeq != rhs.serverSeq {
-            return lhs.serverSeq < rhs.serverSeq
-        }
-        if lhs.timestamp != rhs.timestamp {
-            return lhs.timestamp < rhs.timestamp
-        }
-        return lhs.id < rhs.id
+    func messageAnchoredMessages(forProjectKey projectKey: String) -> [LogosMessage] {
+        notificationRouter.anchoredMessages(forProjectKey: projectKey)
     }
 }
 
@@ -1307,12 +1273,11 @@ extension LogosClient: ProgressActivityManagerHost {
     }
 
     func persistProgressMessage(_ message: LogosMessage) {
-        store.upsert(message)
-        refreshMessages()
+        messageManager.persistAndRefresh(message)
     }
 
     func isProgressTerminalAssistantMessage(_ message: LogosMessage) -> Bool {
-        isExplicitTerminalAssistantMessage(message)
+        messageManager.isExplicitTerminalAssistantMessage(message)
     }
 
     func clearAckForProgress() {
@@ -1454,19 +1419,19 @@ extension LogosClient: NotificationRouterHost {
     }
 
     func notificationLatestServerSeq(projectKey: String) -> Int {
-        latestServerSeq(projectKey: projectKey)
+        messageManager.latestServerSeq(projectKey: projectKey)
     }
 
     func notificationStoredMessage(projectKey: String, sessionID: String?, messageID: String) -> LogosMessage? {
-        store.message(projectKey: projectKey, sessionID: sessionID, messageID: messageID)
+        messageManager.storedMessage(projectKey: projectKey, sessionID: sessionID, messageID: messageID)
     }
 
     func notificationLatestFinalMessage(projectKey: String, sessionID: String, atOrAfterServerSeq serverSeq: Int) -> LogosMessage? {
-        store.latestFinalMessage(projectKey: projectKey, sessionID: sessionID, atOrAfterServerSeq: serverSeq)
+        messageManager.latestFinalMessage(projectKey: projectKey, sessionID: sessionID, atOrAfterServerSeq: serverSeq)
     }
 
     func notificationRefreshMessages() {
-        refreshMessages()
+        messageManager.refreshMessages()
     }
 
     var notificationVisibleMessages: [LogosMessage] { messages }
@@ -1518,7 +1483,7 @@ extension LogosClient: LogosConnectionHost {
     }
 
     func connectionLatestServerSeq() -> Int {
-        latestServerSeq()
+        messageManager.latestServerSeq()
     }
 
     func connectionDidCompleteHello() {
