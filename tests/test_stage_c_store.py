@@ -49,6 +49,61 @@ def test_store_persists_seq_across_reopen(tmp_path):
     assert second.server_seq == 2
 
 
+def test_store_persists_latest_project_run_state_across_reopen(tmp_path):
+    path = tmp_path / "logos.db"
+    store = LogosStore(path)
+
+    state = store.upsert_run_state(
+        project_key="alpha",
+        session_id="sess-1",
+        status="running",
+        request_id="req-1",
+        device_id="iphone",
+        payload={"keepalive": True},
+    )
+    store.close()
+
+    reopened = LogosStore(path)
+    loaded = reopened.latest_run_state("alpha")
+
+    assert state.server_seq > 0
+    assert loaded is not None
+    assert loaded.project_key == "alpha"
+    assert loaded.session_id == "sess-1"
+    assert loaded.status == "running"
+    assert loaded.request_id == "req-1"
+    assert loaded.device_id == "iphone"
+    assert loaded.payload["keepalive"] is True
+    assert loaded.server_seq == state.server_seq
+
+
+def test_store_interrupts_active_run_states_on_startup(tmp_path):
+    path = tmp_path / "logos.db"
+    store = LogosStore(path)
+    store.upsert_run_state(project_key="alpha", session_id="sess-running", status="running", request_id="req-running")
+    store.upsert_run_state(project_key="beta", session_id="sess-queued", status="queued", request_id="req-queued")
+    store.upsert_run_state(project_key="gamma", session_id="sess-idle", status="idle", request_id="req-idle")
+
+    interrupted = store.interrupt_active_run_states(reason="adapter_restarted")
+
+    assert interrupted == 2
+    alpha = store.latest_run_state("alpha")
+    beta = store.latest_run_state("beta")
+    gamma = store.latest_run_state("gamma")
+    assert alpha is not None
+    assert alpha.status == "idle"
+    assert alpha.payload["interrupted"] is True
+    assert alpha.payload["final_status"] == "interrupted"
+    assert alpha.payload["reason"] == "adapter_restarted"
+    assert alpha.request_id == "req-running"
+    assert beta is not None
+    assert beta.status == "idle"
+    assert beta.payload["interrupted"] is True
+    assert gamma is not None
+    assert gamma.status == "idle"
+    assert gamma.payload.get("interrupted") is None
+
+
 def test_store_paginates_before_message_id_by_stable_sequence(tmp_path):
     store = LogosStore(tmp_path / "logos.db")
     for index in range(1, 5):

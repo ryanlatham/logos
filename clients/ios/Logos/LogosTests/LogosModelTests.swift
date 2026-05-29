@@ -2382,6 +2382,87 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
+    func testInterruptedRunStatusCompletesProgressAndAllowsRetry() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","interrupted":true,"final_status":"interrupted","reason":"gateway_restarting"}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .interrupted)
+        XCTAssertEqual(client.progressActivity?.failureMessage, "Hermes restarted before this run finished.")
+        XCTAssertTrue(client.retryProgressActivity())
+        let retryFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        XCTAssertEqual((retryFrame["payload"] as? [String: Any])?["text"] as? String, "/restart-hermes")
+    }
+
+    @MainActor
+    func testMessagesBatchRunStatusRunningKeepsActiveProgressWorking() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("/long-running"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"run_status":{"project_key":"default","session_id":"project:default","status":"running","request_id":"\(requestID)","payload":{"source":"typing"},"server_seq":10,"updated_at":123.0},"has_more":false,"after_server_seq":0}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .running)
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+    }
+
+    @MainActor
+    func testMessagesBatchInterruptedRunStatusClearsWorkingState() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"run_status":{"project_key":"default","session_id":"project:default","status":"idle","request_id":"\(requestID)","payload":{"interrupted":true,"final_status":"interrupted","reason":"gateway_restarting"},"server_seq":11,"updated_at":124.0},"has_more":false,"after_server_seq":0}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .interrupted)
+        XCTAssertEqual(client.progressActivity?.failureMessage, "Hermes restarted before this run finished.")
+    }
+
+    @MainActor
+    func testLegacyReconnectReplayWithoutRunStateInterruptsActiveProgress() async throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        socket.fail(message: "Gateway restarted")
+        await Task.yield()
+        client.connect()
+        socket.open()
+        await Task.yield()
+        let reconnectHello = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "hello" })
+        let reconnectHelloID = try XCTUnwrap(reconnectHello["request_id"] as? String)
+        client.handleFrameString(#"{"type":"hello","request_id":"hello-reconnected","payload":{"authenticated":true}}"#)
+        client.handleFrameString("""
+        {"type":"messages_batch","request_id":"\(reconnectHelloID)","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"has_more":false,"after_server_seq":0}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.requestID, requestID)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .interrupted)
+    }
+
     @MainActor
     func testLegacyGatewayStillWorkingMessageAggregatesOutsideMessagesAndNeverAutoplays() throws {
         let socket = RecordingWebSocketTask()

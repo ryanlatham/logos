@@ -629,7 +629,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
         guard runStatus == .idle else { return false }
         guard let activity = progressActivity,
-              activity.finalStatus == .failed,
+              activity.finalStatus == .failed || activity.finalStatus == .interrupted,
               let retryRequest = activity.retryRequest
         else { return false }
         switch retryRequest {
@@ -1629,7 +1629,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
                 activity.completedFinalMessageID = finalMessage.id
             }
         }
-        if finalStatus != .failed {
+        if finalStatus != .failed && finalStatus != .interrupted {
             activity.retryRequest = nil
         }
         progressActivity = activity
@@ -1754,6 +1754,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             nonce: nonce
         )
         let afterServerSeq = latestServerSeq()
+        pendingReconnectReplayRequestID = requestID
         LogosConnectionLog.logger.info("Sending hello request_id=\(requestID, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) after_server_seq=\(afterServerSeq, privacy: .public) timestamp_ms=\(timestampMilliseconds, privacy: .public)")
         let sent = sendFrame([
             "type": "hello",
@@ -2073,6 +2074,13 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if payload.keys.contains("pending_interactions") {
             reconcilePendingInteractionCards(pending, projectKey: root["project_key"] as? String ?? activeProjectKey)
         }
+        if let replayedRunStatus {
+            handleReplayedRunStatus(
+                replayedRunStatus,
+                fallbackProjectKey: frameProjectKey(root) ?? activeProjectKey,
+                fallbackSessionID: root["session_id"] as? String
+            )
+        }
         let completingFinalMessage = persistedMessages.first { message in
             guard message.projectKey == activeProjectKey, isExplicitTerminalAssistantMessage(message) else { return false }
             let finalRequestID = message.metadataRequestID ?? batchRequestID
@@ -2088,8 +2096,48 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             )
             runStatus = .idle
         }
+        if isReconnectReplay {
+            pendingReconnectReplayRequestID = nil
+            if replayedRunStatus == nil,
+               completingFinalMessage == nil,
+               pending.isEmpty,
+               progressActivity?.isComplete == false {
+                finishProgressRun(
+                    finalStatus: .interrupted,
+                    failureMessage: "Logos reconnected after Hermes restarted; this run may have been interrupted.",
+                    suppressLateFrames: true
+                )
+            }
+        }
         refreshMessages()
         fulfillPendingFinishedNotificationRouteIfPossible()
+    }
+
+    private func handleReplayedRunStatus(
+        _ runStatus: [String: Any],
+        fallbackProjectKey: String,
+        fallbackSessionID: String?
+    ) {
+        var payload = runStatus["payload"] as? [String: Any] ?? [:]
+        payload["status"] = runStatus["status"] as? String
+        if payload["updated_at"] == nil {
+            payload["updated_at"] = runStatus["updated_at"]
+        }
+        var root: [String: Any] = [
+            "type": "run_status",
+            "project_key": runStatus["project_key"] as? String ?? fallbackProjectKey,
+            "payload": payload
+        ]
+        if let requestID = runStatus["request_id"] as? String, requestID.isEmpty == false {
+            root["request_id"] = requestID
+        }
+        if let sessionID = runStatus["session_id"] as? String ?? fallbackSessionID {
+            root["session_id"] = sessionID
+        }
+        if let serverSeq = integerValue(runStatus["server_seq"]) {
+            root["server_seq"] = serverSeq
+        }
+        handleRunStatus(root)
     }
 
     private func reconcilePendingInteractionCards(_ pending: [[String: Any]], projectKey: String) {
@@ -2169,6 +2217,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             threadFocusRequest = nil
         }
         pendingCancelRequestID = nil
+        pendingReconnectReplayRequestID = nil
         pendingOutboundResponseRequestID = nil
         outstandingOutboundResponseRequestIDs.removeAll()
         suppressedRunRequestIDs.removeAll()
@@ -2183,6 +2232,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func clearRunScopedStateForSocketClosure(runStatus nextStatus: LogosRunStatus) {
         runStatus = nextStatus
         pendingCancelRequestID = nil
+        pendingReconnectReplayRequestID = nil
         pendingOutboundResponseRequestID = nil
         outstandingOutboundResponseRequestIDs.removeAll()
         clearInteractionStateForCancel()
@@ -2405,6 +2455,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if message.metadataFinalStatus == ProgressActivityFinalStatus.stopped.rawValue {
             return .stopped
         }
+        if message.metadataFinalStatus == ProgressActivityFinalStatus.interrupted.rawValue {
+            return .interrupted
+        }
         return .complete
     }
 
@@ -2554,6 +2607,16 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         let previous = runStatus
         let next = LogosRunStatus(rawValue: statusRaw) ?? .error
         let requestID = root["request_id"] as? String
+        if isInterruptedRunStatus(payload) {
+            guard activeRunInterruptionMatches(requestID) else { return }
+            finishProgressRun(
+                requestID: requestID,
+                finalStatus: .interrupted,
+                failureMessage: interruptionFailureMessage(reason: payload["reason"] as? String),
+                suppressLateFrames: true
+            )
+            return
+        }
         if previous == .cancelling {
             if isCurrentCancelTerminalRunStatus(root: root, payload: payload, status: next) {
                 finishProgressRun(finalStatus: .stopped, suppressLateFrames: true)
@@ -2620,6 +2683,30 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard let requestID, requestID.isEmpty == false else { return false }
         if let projectKey, projectKey != activity.projectKey { return false }
         return activity.requestID == requestID || isActiveRunRequestID(requestID)
+    }
+
+    private func isInterruptedRunStatus(_ payload: [String: Any]) -> Bool {
+        if boolValue(payload["interrupted"]) == true { return true }
+        return payload["final_status"] as? String == ProgressActivityFinalStatus.interrupted.rawValue
+    }
+
+    private func activeRunInterruptionMatches(_ requestID: String?) -> Bool {
+        guard progressActivity?.isComplete == false else {
+            return runStatus == .running || runStatus == .queued
+        }
+        guard let requestID, requestID.isEmpty == false else { return true }
+        return isActiveRunRequestID(requestID)
+    }
+
+    private func interruptionFailureMessage(reason: String?) -> String {
+        switch reason {
+        case "gateway_restarting":
+            return "Hermes restarted before this run finished."
+        case "gateway_shutting_down":
+            return "Hermes shut down before this run finished."
+        default:
+            return "Logos reconnected after Hermes restarted; this run may have been interrupted."
+        }
     }
 
     private func maybeAutoPlayLiveAssistantMessage(_ message: LogosMessage, op: String?, requestID: String?, matchedCurrentRun: Bool = false) {

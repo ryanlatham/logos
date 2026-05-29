@@ -295,16 +295,38 @@ The adapter responds:
   "type": "messages_batch",
   "request_id": "get-1",
   "project_key": "default",
+    "payload": {
+      "messages": [],
+      "run_status": null,
+      "has_more": false,
+      "after_server_seq": 981,
+      "before_message_id": null
+    }
+  }
+```
+
+Clients should compute `after_server_seq` from durable messages they have stored. Transient frames such as `run_status` keepalives and gateway-status `tool_progress` frames may carry event sequence values for ordering live activity, but they are not replayed as messages. The adapter replays the latest project run state separately in `messages_batch.payload.run_status`; clients should use that value to reconcile optimistic local run state after reconnect.
+
+When present, `run_status` has the latest project-level run state:
+
+```json
+{
+  "project_key": "default",
+  "session_id": "project:default",
+  "status": "idle",
+  "request_id": "text-request-id",
+  "device_id": "iphone-17-pro",
+  "server_seq": 1001,
+  "updated_at": 1780016878.824,
   "payload": {
-    "messages": [],
-    "has_more": false,
-    "after_server_seq": 981,
-    "before_message_id": null
+    "interrupted": true,
+    "final_status": "interrupted",
+    "reason": "gateway_restarting"
   }
 }
 ```
 
-Clients should compute `after_server_seq` from durable messages they have stored. Transient frames such as `run_status` keepalives and gateway-status `tool_progress` frames may carry event sequence values for ordering live activity, but they are not replayed as messages.
+`interrupted: true` means an in-flight run ended without a final assistant response, usually because Hermes restarted or shut down. Clients should clear active working status, keep a visible interrupted progress card when it matches the active request, and allow retry when the original request can be replayed.
 
 ## Older history pagination
 

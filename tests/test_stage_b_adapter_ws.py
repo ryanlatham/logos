@@ -656,6 +656,51 @@ async def test_send_typing_emits_throttled_scoped_keepalive_run_status(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_broadcast_run_status_persists_and_messages_get_replays_latest_state(tmp_path):
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+
+    frame = await adapter._broadcast_run_status(
+        project_key="archwright",
+        session_id="sess-run",
+        status="running",
+        request_id="req-run",
+        device_id="iphone",
+        payload={"source": "typing"},
+    )
+    response = adapter._handle_messages_get(
+        Envelope(type="messages_get", request_id="get", device_id="iphone", project_key="archwright", payload={"after_server_seq": 0})
+    )
+
+    assert fake_server.frames[-1]["frame"] == frame
+    stored = adapter.store.latest_run_state("archwright")
+    assert stored is not None
+    assert stored.status == "running"
+    assert stored.request_id == "req-run"
+    assert response["payload"]["run_status"]["status"] == "running"
+    assert response["payload"]["run_status"]["request_id"] == "req-run"
+    assert response["payload"]["run_status"]["session_id"] == "sess-run"
+    assert response["payload"]["run_status"]["payload"]["source"] == "typing"
+
+
+def test_adapter_startup_interrupts_stale_active_run_state(tmp_path):
+    path = tmp_path / "logos.db"
+    first = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(path)}))
+    first.store.upsert_run_state(project_key="archwright", session_id="sess-run", status="running", request_id="req-run")
+
+    restarted = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(path)}))
+
+    state = restarted.store.latest_run_state("archwright")
+    assert state is not None
+    assert state.status == "idle"
+    assert state.request_id == "req-run"
+    assert state.payload["interrupted"] is True
+    assert state.payload["final_status"] == "interrupted"
+    assert state.payload["reason"] == "adapter_restarted"
+
+
+@pytest.mark.asyncio
 async def test_gateway_still_working_send_broadcasts_transient_status_progress_without_idle(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
@@ -825,43 +870,62 @@ async def test_context_compaction_status_send_broadcasts_transient_status_progre
 
 
 @pytest.mark.asyncio
-async def test_gateway_restart_warning_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+async def test_gateway_restart_warning_send_broadcasts_transient_status_progress_then_interrupted_idle(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
     content = "⚠️ Gateway restarting — Your current task will be interrupted. Send any message after restart and I'll try to resume where you left off."
 
-    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress", "request_id": "req-restart"})
 
     assert sent.success is True
     assert str(sent.message_id).startswith("progress-")
     assert adapter.store.messages_after_server_seq("archwright", 0) == []
     frames = [item["frame"] for item in fake_server.frames]
-    assert [frame["type"] for frame in frames] == ["tool_progress"]
-    frame = frames[0]
-    assert frame["payload"]["kind"] == "gateway_status"
-    assert frame["payload"]["progress_kind"] == "gateway_status"
-    assert frame["payload"]["text"] == content
+    assert [frame["type"] for frame in frames] == ["tool_progress", "run_status"]
+    progress = frames[0]
+    assert progress["request_id"] == "req-restart"
+    assert progress["payload"]["kind"] == "gateway_status"
+    assert progress["payload"]["progress_kind"] == "gateway_status"
+    assert progress["payload"]["text"] == content
+    terminal = frames[1]
+    assert terminal["request_id"] == "req-restart"
+    assert terminal["payload"]["status"] == "idle"
+    assert terminal["payload"]["interrupted"] is True
+    assert terminal["payload"]["final_status"] == "interrupted"
+    assert terminal["payload"]["reason"] == "gateway_restarting"
+    stored = adapter.store.latest_run_state("archwright")
+    assert stored is not None
+    assert stored.status == "idle"
+    assert stored.payload["interrupted"] is True
+    assert stored.payload["reason"] == "gateway_restarting"
 
 
 @pytest.mark.asyncio
-async def test_gateway_shutdown_warning_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+async def test_gateway_shutdown_warning_send_broadcasts_transient_status_progress_then_interrupted_idle(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
     adapter.ws_server = fake_server  # type: ignore[assignment]
     content = "⚠️ Gateway shutting down — active work will stop until the gateway is back."
 
-    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress", "request_id": "req-shutdown"})
 
     assert sent.success is True
     assert str(sent.message_id).startswith("progress-")
     assert adapter.store.messages_after_server_seq("archwright", 0) == []
     frames = [item["frame"] for item in fake_server.frames]
-    assert [frame["type"] for frame in frames] == ["tool_progress"]
-    frame = frames[0]
-    assert frame["payload"]["kind"] == "gateway_status"
-    assert frame["payload"]["progress_kind"] == "gateway_status"
-    assert frame["payload"]["text"] == content
+    assert [frame["type"] for frame in frames] == ["tool_progress", "run_status"]
+    progress = frames[0]
+    assert progress["request_id"] == "req-shutdown"
+    assert progress["payload"]["kind"] == "gateway_status"
+    assert progress["payload"]["progress_kind"] == "gateway_status"
+    assert progress["payload"]["text"] == content
+    terminal = frames[1]
+    assert terminal["request_id"] == "req-shutdown"
+    assert terminal["payload"]["status"] == "idle"
+    assert terminal["payload"]["interrupted"] is True
+    assert terminal["payload"]["final_status"] == "interrupted"
+    assert terminal["payload"]["reason"] == "gateway_shutting_down"
 
 
 @pytest.mark.asyncio

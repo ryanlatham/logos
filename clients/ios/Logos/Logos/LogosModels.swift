@@ -751,6 +751,7 @@ enum ProgressActivityFinalStatus: String, Hashable {
     case complete
     case failed
     case stopped
+    case interrupted
 }
 
 enum ProgressRetryRequest: Hashable {

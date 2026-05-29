@@ -2378,7 +2378,7 @@ struct ContentView: View {
     private var canRetryProgressRun: Bool {
         guard client.connectionState == .connected, client.runStatus == .idle else { return false }
         guard let progress = client.progressActivity else { return false }
-        return progress.finalStatus == .failed && progress.retryRequest != nil
+        return (progress.finalStatus == .failed || progress.finalStatus == .interrupted) && progress.retryRequest != nil
     }
 
     private var hasComposerDraft: Bool {
@@ -2762,13 +2762,15 @@ private struct ProgressActivityCard: View {
         case .complete: return "Complete"
         case .failed: return "Failed"
         case .stopped: return "Stopped"
-        case nil: return "Working"
+        case .interrupted: return "Interrupted"
+        case nil: return "Running"
         }
     }
 
     private var accentColor: Color {
         if activity.timedOut || activity.finalStatus == .failed { return .logosRed }
         if activity.finalStatus == .complete { return .logosGreen }
+        if activity.finalStatus == .interrupted { return .logosAmber }
         if activity.finalStatus == .stopped { return .logosLabel3 }
         return .logosAmber
     }
@@ -2829,7 +2831,7 @@ private struct ProgressActivityCard: View {
                         ProgressElapsedTimeLabel(activity: activity)
                     }
                     .frame(minWidth: 92, alignment: .trailing)
-                case .failed:
+                case .failed, .interrupted:
                     ProgressElapsedTimeLabel(activity: activity)
                         .frame(minWidth: 58)
 
@@ -2867,6 +2869,13 @@ private struct ProgressActivityCard: View {
             }
             .animation(firstUpdateAnimation, value: hasAdapterUpdates)
 
+            if let failureMessage = activity.failureMessage, failureMessage.isEmpty == false {
+                Text(failureMessage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.logosLabel2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if activity.isExpanded && hasAdapterUpdates {
                 VStack(alignment: .leading, spacing: 7) {
                     ForEach(activity.events) { event in
@@ -2895,7 +2904,6 @@ private struct ProgressActivityCard: View {
         .padding(.vertical, 10)
         .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(accentColor.opacity(0.24), lineWidth: 0.5))
-        .accessibilityIdentifier("progressActivityCard")
     }
 }
 
