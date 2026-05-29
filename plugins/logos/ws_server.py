@@ -98,12 +98,16 @@ class LogosWebSocketServer:
         port: int,
         device_secret: str,
         enc_mode: str = ENC_MODE_NEGOTIATE,
+        ssl_context: "ssl.SSLContext | None" = None,
     ) -> None:
         self.adapter = adapter
         self.host = host
         self.port = int(port)
         self.device_secret = device_secret
         self.enc_mode = enc_mode if enc_mode in (ENC_MODE_NEGOTIATE, ENC_MODE_REQUIRED, ENC_MODE_OFF) else ENC_MODE_NEGOTIATE
+        # WS3 S4: when present, serve WSS directly (direct-WSS transport) instead of relying on a
+        # TLS-terminating front like Tailscale Serve. App-layer AEAD applies either way.
+        self._ssl_context = ssl_context
         self._server: Any = None
         self._clients: dict[Any, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
@@ -163,10 +167,13 @@ class LogosWebSocketServer:
 
     @property
     def url(self) -> str:
-        return f"ws://{self.host}:{self.actual_port}"
+        scheme = "wss" if self._ssl_context is not None else "ws"
+        return f"{scheme}://{self.host}:{self.actual_port}"
 
     async def start(self) -> None:
-        self._server = await websockets.serve(self._handle_connection, self.host, self.port)
+        self._server = await websockets.serve(
+            self._handle_connection, self.host, self.port, ssl=self._ssl_context
+        )
 
     async def stop(self) -> None:
         clients = list(self._clients.keys())
