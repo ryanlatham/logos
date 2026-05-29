@@ -60,16 +60,22 @@ struct LogosSettings: Equatable {
     }
 }
 enum LogosAuthentication {
-    static func signHello(secret: String, deviceID: String, requestID: String, projectKey: String?, timestampMilliseconds: Int64, nonce: String) -> String {
+    static func signHello(secret: String, deviceID: String, requestID: String, projectKey: String?, timestampMilliseconds: Int64, nonce: String, encClientNonce: String? = nil) -> String {
         let normalizedSecret = LogosSettings.normalizedSecret(secret)
-        let message = [
-            "logos-v1",
+        // v1 (encClientNonce == nil) is unchanged for back-compat; v2 appends the base64 enc nonce
+        // so it is authenticated by the HMAC. Must match plugins/logos/ws_server.py canonical_hello_message.
+        var fields = [
+            encClientNonce == nil ? "logos-v1" : "logos-v2",
             deviceID,
             requestID,
             projectKey ?? "",
             String(timestampMilliseconds),
             nonce
-        ].joined(separator: "\n")
+        ]
+        if let encClientNonce {
+            fields.append(encClientNonce)
+        }
+        let message = fields.joined(separator: "\n")
         let key = SymmetricKey(data: Data(normalizedSecret.utf8))
         let digest = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
         return digest.map { String(format: "%02x", $0) }.joined()

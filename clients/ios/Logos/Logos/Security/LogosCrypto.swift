@@ -73,6 +73,11 @@ final class LogosSessionCrypto {
         }
     }
 
+    /// Cryptographically-random nonce bytes for handshake negotiation (CryptoKit CSPRNG).
+    static func randomNonce(byteCount: Int = 32) -> Data {
+        SymmetricKey(size: SymmetricKeySize(bitCount: byteCount * 8)).withUnsafeBytes { Data($0) }
+    }
+
     /// Pure key derivation — the KAT anchor. Returns raw (c2s, s2c) key bytes.
     static func deriveSessionKeys(deviceSecret: String, clientNonce: Data, serverNonce: Data) throws -> (c2s: Data, s2c: Data) {
         let ikmData = Data(deviceSecret.trimmingCharacters(in: .whitespacesAndNewlines).utf8)

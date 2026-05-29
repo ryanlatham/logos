@@ -507,11 +507,17 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         LogosConnectionLog.logger.info("Disconnect complete state=\(self.connectionState.rawValue, privacy: .public)")
     }
 
+    // App-layer encryption session (negotiated during hello); nil = cleartext / not negotiated.
+    private var sessionCrypto: LogosSessionCrypto?
+    private var pendingEncClientNonce: Data?
+
     private func cancelCurrentSocket() {
         let oldTask = task
         LogosConnectionLog.logger.info("Cancelling current socket has_task=\(oldTask != nil, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) in_flight_final_speech=\(self.inFlightFinalSpeechDrafts.count, privacy: .public)")
         task = nil
         isWebSocketOpen = false
+        sessionCrypto = nil
+        pendingEncClientNonce = nil
         connectionLifecycle.invalidate()
         restoreInFlightFinalSpeechDrafts(reason: "The socket closed before Logos confirmed the final speech frame was sent.")
         oldTask?.cancel(with: .goingAway, reason: nil)
@@ -1807,13 +1813,19 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         let requestID = UUID().uuidString
         let timestampMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
         let nonce = UUID().uuidString
+        // Offer app-layer encryption: send a fresh client nonce (bound into the signed v2
+        // canonical) and the AEADs we support. The adapter chooses whether to negotiate.
+        let encClientNonce = LogosSessionCrypto.randomNonce()
+        let encClientNonceB64 = encClientNonce.base64EncodedString()
+        pendingEncClientNonce = encClientNonce
         let signature = LogosAuthentication.signHello(
             secret: LogosSettings.normalizedSecret(settings.secret),
             deviceID: settings.deviceID,
             requestID: requestID,
             projectKey: activeProjectKey,
             timestampMilliseconds: timestampMilliseconds,
-            nonce: nonce
+            nonce: nonce,
+            encClientNonce: encClientNonceB64
         )
         let afterServerSeq = latestServerSeq()
         pendingReconnectReplayRequestID = requestID
@@ -1828,10 +1840,44 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
                 "nonce": nonce,
                 "signature": signature,
                 "after_server_seq": afterServerSeq,
-                "capabilities": ["text", "speech", "projects", "approval", "clarification", "playback_audio"]
+                "capabilities": ["text", "speech", "projects", "approval", "clarification", "playback_audio"],
+                "enc_supported": ["chacha20-poly1305", "aes-256-gcm"],
+                "enc_client_nonce": encClientNonceB64
             ]
         ], requiresAuthentication: false)
         LogosConnectionLog.logger.info("Hello send requested sent=\(sent, privacy: .public) request_id=\(requestID, privacy: .public)")
+    }
+
+    /// Derive the per-connection encryption session from the adapter's hello `enc` block, if it
+    /// negotiated one. Absent `enc` (older adapter or LOGOS_ENC_MODE=off) keeps the session cleartext.
+    private func setupSessionCrypto(from root: [String: Any]) {
+        guard
+            let payload = root["payload"] as? [String: Any],
+            let enc = payload["enc"] as? [String: Any],
+            let aeadName = enc["aead"] as? String,
+            let aead = LogosAEAD(rawValue: aeadName),
+            let serverNonceB64 = enc["enc_server_nonce"] as? String,
+            let serverNonce = Data(base64Encoded: serverNonceB64),
+            let clientNonce = pendingEncClientNonce
+        else {
+            sessionCrypto = nil
+            pendingEncClientNonce = nil
+            return
+        }
+        do {
+            sessionCrypto = try LogosSessionCrypto.deriveSession(
+                deviceSecret: LogosSettings.normalizedSecret(settings.secret),
+                clientNonce: clientNonce,
+                serverNonce: serverNonce,
+                role: .client,
+                aead: aead
+            )
+            LogosConnectionLog.logger.info("Logos session encryption negotiated aead=\(aeadName, privacy: .public)")
+        } catch {
+            sessionCrypto = nil
+            LogosConnectionLog.logger.error("Failed to derive Logos session crypto")
+        }
+        pendingEncClientNonce = nil
     }
 
     @discardableResult
@@ -1854,8 +1900,19 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             return false
         }
         let connectionID = connectionLifecycle.activeConnectionID
+        var workingFrame = frame
+        if requiresAuthentication, let crypto = sessionCrypto, let payload = workingFrame["payload"] as? [String: Any] {
+            // Seal the payload; routing fields stay cleartext for the adapter to route on.
+            let header = workingFrame.filter { $0.key != "payload" }
+            do {
+                workingFrame["payload"] = try crypto.seal(header: header, payload: payload)
+            } catch {
+                LogosConnectionLog.logger.error("Failed to seal outbound Logos frame \(summary, privacy: .public)")
+                return false
+            }
+        }
         do {
-            let data = try JSONSerialization.data(withJSONObject: frame, options: [])
+            let data = try JSONSerialization.data(withJSONObject: workingFrame, options: [])
             let string = String(decoding: data, as: UTF8.self)
             LogosConnectionLog.logger.info("Frame send queued \(summary, privacy: .public) bytes=\(data.count, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
             task.send(.string(string)) { [weak self, weak task] error in
@@ -1959,18 +2016,31 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         guard
             let data = string.data(using: .utf8),
-            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = root["type"] as? String
+            let parsedRoot = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = parsedRoot["type"] as? String
         else {
             LogosConnectionLog.logger.error("Inbound frame parse failed bytes=\(string.utf8.count, privacy: .public)")
             return
         }
+        var root = parsedRoot
         LogosConnectionLog.logger.info("Inbound frame parsed \(LogosConnectionLog.inboundFrameSummary(root), privacy: .public) bytes=\(string.utf8.count, privacy: .public)")
         if type != "error" {
             lastError = nil
         }
+        if let crypto = sessionCrypto,
+           let payload = root["payload"] as? [String: Any],
+           payload["enc"] as? Int == 1 {
+            // Sealed frame: decrypt using the cleartext routing fields as the AAD header.
+            do {
+                root["payload"] = try crypto.open(header: root, encPayload: payload)
+            } catch {
+                LogosConnectionLog.logger.error("Failed to open encrypted Logos frame type=\(type, privacy: .public)")
+                return
+            }
+        }
         switch type {
         case "hello":
+            setupSessionCrypto(from: root)
             applyClientConfig(from: root)
             markConnected()
             if task != nil {
