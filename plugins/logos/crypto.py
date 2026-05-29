@@ -130,12 +130,21 @@ class LogosSessionCrypto:
 
     @staticmethod
     def _aad(header: Mapping[str, Any], counter: int) -> bytes:
-        parts = [ENC_VERSION]
+        # Length-prefixed encoding (4-byte big-endian length + UTF-8 bytes per field) so the
+        # AAD is injective: routing fields are free-form strings (may contain any byte incl.
+        # newlines), and a naive separator-join would let two distinct header tuples collide,
+        # allowing a sealed payload to be relocated to a different route with a valid tag.
+        fields = [ENC_VERSION]
         for field in _HEADER_FIELDS:
             value = header.get(field)
-            parts.append("" if value is None else str(value))
-        parts.append(str(counter))
-        return "\n".join(parts).encode("utf-8")
+            fields.append("" if value is None else str(value))
+        fields.append(str(counter))
+        out = bytearray()
+        for field in fields:
+            encoded = field.encode("utf-8")
+            out += len(encoded).to_bytes(4, "big")
+            out += encoded
+        return bytes(out)
 
     def seal_payload(self, header: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
         """Encrypt `payload`, returning the replacement `{enc, n, ct}` payload object."""

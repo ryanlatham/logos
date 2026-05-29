@@ -175,16 +175,27 @@ final class LogosSessionCrypto {
     }
 
     private static func makeAAD(header: [String: Any], counter: UInt64) -> Data {
-        var parts = [encVersion]
+        // Length-prefixed (UInt32 big-endian length + UTF-8 bytes per field) so the AAD is
+        // injective — must match plugins/logos/crypto.py `_aad`. A separator-join would let
+        // distinct header tuples collide (routing fields are free-form), enabling ciphertext
+        // relocation to a different route with a valid tag.
+        var fields = [encVersion]
         for field in headerFields {
             if let value = header[field], !(value is NSNull) {
-                parts.append(stringify(value))
+                fields.append(stringify(value))
             } else {
-                parts.append("")
+                fields.append("")
             }
         }
-        parts.append(String(counter))
-        return Data(parts.joined(separator: "\n").utf8)
+        fields.append(String(counter))
+        var data = Data()
+        for field in fields {
+            let encoded = Data(field.utf8)
+            var length = UInt32(encoded.count).bigEndian
+            withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+            data.append(encoded)
+        }
+        return data
     }
 
     private static func stringify(_ value: Any) -> String {
@@ -205,12 +216,21 @@ final class LogosSessionCrypto {
         for (key, item) in value {
             if secretMarkers.contains(where: { key.lowercased().contains($0) }) {
                 result[key] = "[REDACTED]"
-            } else if let nested = item as? [String: Any] {
-                result[key] = redactSecrets(nested)
             } else {
-                result[key] = item
+                result[key] = redactValue(item)
             }
         }
         return result
+    }
+
+    // Recurse into nested objects AND arrays, matching Python `schema.redact_secrets`.
+    private static func redactValue(_ item: Any) -> Any {
+        if let nested = item as? [String: Any] {
+            return redactSecrets(nested)
+        }
+        if let array = item as? [Any] {
+            return array.map { redactValue($0) }
+        }
+        return item
     }
 }

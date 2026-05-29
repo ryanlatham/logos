@@ -17,7 +17,7 @@ final class LogosCryptoTests: XCTestCase {
     ]
     // The exact plaintext bytes Python sealed (compact JSON, insertion order).
     private let katPlaintext = Data(#"{"text":"deploy staging","is_final":true}"#.utf8)
-    private let katSealCtB64 = "KhQpY27pF/oEtm8ZvX2XExqDZ0yeT48Gw0ORUDQNsjXBFtJK7ff50uC/cBz4ZDHJ7uceTMC/RQ3O"
+    private let katSealCtB64 = "KhQpY27pF/oEtm8ZvX2XExqDZ0yeT48Gw0ORUDQNsjXBFtJK7ff50uDQLb1mKjEt0O4zNMnWobIJ"
 
     private func client(aead: LogosAEAD = .chaCha20Poly1305) throws -> LogosSessionCrypto {
         try LogosSessionCrypto.deriveSession(deviceSecret: deviceSecret, clientNonce: clientNonce, serverNonce: serverNonce, role: .client, aead: aead)
@@ -100,6 +100,27 @@ final class LogosCryptoTests: XCTestCase {
         let s = try server(aead: .aes256GCM)
         let sealed = try c.seal(header: katHeader, plaintext: Data("gcm".utf8))
         XCTAssertEqual(try s.openToData(header: katHeader, encPayload: sealed), Data("gcm".utf8))
+    }
+
+    func testAADInjectiveNewlineHeaderDoesNotRelocate() throws {
+        // Under a naive "\n".join AAD, project_key "a" + session_id "b" collides with
+        // project_key "a\nb" — the length-prefixed AAD must keep them distinct.
+        let c = try client()
+        let s = try server()
+        let headerA: [String: Any] = ["type": "text_input", "request_id": "r", "device_id": "d", "project_key": "a", "session_id": "b"]
+        let headerB: [String: Any] = ["type": "text_input", "request_id": "r", "device_id": "d", "project_key": "a\nb"]
+        let sealed = try c.seal(header: headerA, plaintext: Data("x".utf8))
+        XCTAssertThrowsError(try s.openToData(header: headerB, encPayload: sealed))
+    }
+
+    func testSecretsRedactedInsideArrays() throws {
+        let c = try client()
+        let s = try server()
+        let sealed = try c.seal(header: katHeader, payload: ["items": [["api_key": "SENSITIVE"]], "auth_token": "T"])
+        let opened = try s.open(header: katHeader, encPayload: sealed)
+        let items = opened["items"] as? [[String: Any]]
+        XCTAssertEqual(items?.first?["api_key"] as? String, "[REDACTED]")
+        XCTAssertEqual(opened["auth_token"] as? String, "[REDACTED]")
     }
 }
 

@@ -29,7 +29,7 @@ KAT_C2S_KEY_HEX = "b3cdc50921850a9fa40b205f750381a8578ab9e933ea6a889d97ebead1244
 KAT_S2C_KEY_HEX = "b1f1f071774e7aa39b52b3d10bfba534b918bf8be5123fc5e3dfd2a468c55c80"
 KAT_HEADER = {"type": "text_input", "request_id": "kat-req", "device_id": "kat-device", "project_key": "default"}
 KAT_PAYLOAD = {"text": "deploy staging", "is_final": True}
-KAT_SEAL_CT_B64 = "KhQpY27pF/oEtm8ZvX2XExqDZ0yeT48Gw0ORUDQNsjXBFtJK7ff50uC/cBz4ZDHJ7uceTMC/RQ3O"
+KAT_SEAL_CT_B64 = "KhQpY27pF/oEtm8ZvX2XExqDZ0yeT48Gw0ORUDQNsjXBFtJK7ff50uDQLb1mKjEt0O4zNMnWobIJ"
 
 
 def _client_server(aead: str = AEAD_CHACHA20_POLY1305):
@@ -119,6 +119,27 @@ def test_aes_256_gcm_round_trips():
     client, server = _client_server(aead=AEAD_AES_256_GCM)
     sealed = client.seal_payload(KAT_HEADER, {"text": "gcm"})
     assert server.open_payload(KAT_HEADER, sealed) == {"text": "gcm"}
+
+
+def test_aad_is_injective_newline_header_does_not_relocate():
+    # Under a naive "\n".join AAD these two distinct headers collide
+    # (project_key "a" + session_id "b"  vs  project_key "a\nb"), which would let a sealed
+    # payload be relocated across routes. The length-prefixed AAD must reject the move.
+    client, server = _client_server()
+    header_a = {"type": "text_input", "request_id": "r", "device_id": "d", "project_key": "a", "session_id": "b"}
+    header_b = {"type": "text_input", "request_id": "r", "device_id": "d", "project_key": "a\nb"}
+    assert LogosSessionCrypto._aad(header_a, 0) != LogosSessionCrypto._aad(header_b, 0)
+    sealed = client.seal_payload(header_a, {"text": "x"})
+    with pytest.raises(CryptoError):
+        server.open_payload(header_b, sealed)
+
+
+def test_secrets_redacted_inside_arrays():
+    client, server = _client_server()
+    sealed = client.seal_payload(KAT_HEADER, {"items": [{"api_key": "SENSITIVE"}], "auth_token": "T"})
+    opened = server.open_payload(KAT_HEADER, sealed)
+    assert opened["items"][0]["api_key"] == "[REDACTED]"
+    assert opened["auth_token"] == "[REDACTED]"
 
 
 def test_missing_or_invalid_fields_raise():
