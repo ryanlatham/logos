@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 import hashlib
 import inspect
 import ipaddress
@@ -59,6 +58,7 @@ from .config import (
     _validate_config,
 )
 from .progress_analysis import ProgressAnalyzer
+from .request_context import current_request_context, request_scope
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
 from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
@@ -67,11 +67,6 @@ from .ws_server import LogosWebSocketServer
 logger = logging.getLogger(__name__)
 
 APNS_STALE_DEVICE_REASONS = {"BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"}
-
-_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
-    "logos_request_context",
-    default=None,
-)
 
 
 PROGRESS_MESSAGE_ID_PREFIX = "progress-"
@@ -705,20 +700,12 @@ class LogosAdapter(BasePlatformAdapter):
         return {"project_key": project_key, "session_id": session_id, "request_id": request_id}
 
     async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
-        context = self._request_context_for_event(event)
-        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
-        try:
+        with request_scope(self._request_context_for_event(event)):
             await super().handle_message(event)
-        finally:
-            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:  # type: ignore[override]
-        context = self._request_context_for_event(event)
-        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
-        try:
+        with request_scope(self._request_context_for_event(event)):
             await super()._process_message_background(event, session_key)
-        finally:
-            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
 
     def _metadata_with_current_request_id(
         self,
@@ -730,7 +717,7 @@ class LogosAdapter(BasePlatformAdapter):
         metadata = dict(metadata or {})
         if metadata.get("request_id"):
             return metadata
-        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        context = current_request_context()
         if not context or context.get("project_key") != project_key:
             return metadata
         context_session = context.get("session_id")
@@ -756,7 +743,7 @@ class LogosAdapter(BasePlatformAdapter):
             return
         metadata = dict(metadata or {})
         project_key = self._project_key_from_chat_id(chat_id)
-        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        context = current_request_context()
         context_matches_project = bool(context and context.get("project_key") == project_key)
         session_id = str(
             metadata.get("session_id")
