@@ -1,0 +1,101 @@
+name: ios
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build + unit tests
+    # The app uses iOS 26 SDK APIs (e.g. .glassEffect), so it must build with Xcode 26.
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: clients/ios/Logos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Pick an available iPhone simulator
+        run: |
+          xcodebuild -version
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          cands = [d for rt, arr in devices.items() if "iOS" in rt
+                   for d in arr if d.get("isAvailable") and d["name"].startswith("iPhone")]
+          print(cands[0]["udid"] if cands else "")
+          ')
+          test -n "$UDID" || { echo "No available iPhone simulator on this runner"; xcrun simctl list devices available; exit 1; }
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices available | grep -iE "iphone" | head
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build
+        run: |
+          xcodebuild -project Logos.xcodeproj -scheme Logos \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Unit tests
+        run: |
+          xcodebuild -project Logos.xcodeproj -scheme Logos \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -only-testing:LogosTests \
+            CODE_SIGNING_ALLOWED=NO test
+
+  # LogosUITests need the deterministic mock adapter on 127.0.0.1:8766
+  # (scripts/run_stage_f_mock_adapter.py). Opt-in to keep the default lane fast.
+  ui-tests:
+    name: UI tests (mock adapter)
+    runs-on: macos-26
+    if: ${{ vars.ENABLE_IOS_UI_TESTS == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select latest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          brew install xcodegen
+          pip install websockets "qrcode[pil]" PyYAML
+      - name: Pick an available iPhone simulator
+        run: |
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          cands = [d for rt, arr in devices.items() if "iOS" in rt
+                   for d in arr if d.get("isAvailable") and d["name"].startswith("iPhone")]
+          print(cands[0]["udid"] if cands else "")
+          ')
+          test -n "$UDID" || { echo "No available iPhone simulator on this runner"; exit 1; }
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+      - name: Start mock adapter
+        run: |
+          python scripts/run_stage_f_mock_adapter.py \
+            --host 127.0.0.1 --port 8766 --secret stage-f-secret \
+            --store "$RUNNER_TEMP/logos-ui-tests.db" &
+          echo "MOCK_PID=$!" >> "$GITHUB_ENV"
+      - name: Generate project
+        working-directory: clients/ios/Logos
+        run: xcodegen generate --spec project.yml
+      - name: UI tests
+        working-directory: clients/ios/Logos
+        env:
+          LOGOS_UI_TEST_WS_URL: ws://127.0.0.1:8766
+          LOGOS_UI_TEST_DEVICE_SECRET: stage-f-secret
+        run: |
+          xcodebuild -project Logos.xcodeproj -scheme Logos \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -only-testing:LogosUITests \
+            CODE_SIGNING_ALLOWED=NO test

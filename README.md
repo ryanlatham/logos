@@ -705,6 +705,33 @@ set +a
   'Say hello from Logos.'
 ```
 
+## Continuous integration and pre-commit
+
+CI runs on every push and pull request via GitHub Actions:
+
+- `.github/workflows/python.yml` — compiles `plugins/logos`, `scripts`, and `tests`, then runs
+  the Hermes-free unit tests (schema, store, protocol, CLI, crypto). The full adapter suite
+  needs Hermes; enable it by setting repo variables `ENABLE_HERMES_TESTS=true`, `HERMES_REPO`,
+  and optionally `HERMES_REF`, plus a `HERMES_REPO_TOKEN` secret if the Hermes repo is private.
+- `.github/workflows/ios.yml` — runs `xcodegen generate` and builds + runs `LogosTests` on a
+  macOS runner with code signing disabled. UI tests (which need the mock adapter) are opt-in
+  via the `ENABLE_IOS_UI_TESTS=true` repo variable.
+- `.github/workflows/secret-scan.yml` — runs `gitleaks` over the full history.
+
+The test suite is Hermes-optional: `tests/conftest.py` skips the gateway-dependent modules when
+the `gateway` package is unavailable, so the Hermes-free units run in CI without a Hermes checkout.
+
+Install the local pre-commit hooks once:
+
+```bash
+pip install pre-commit        # or: brew install pre-commit
+pre-commit install
+pre-commit run --all-files    # optional one-time sweep
+```
+
+The hooks run `gitleaks` and block committing secrets, keys, databases, `.env` files, QR images,
+and the generated `Logos.xcodeproj`. Known test fixtures are allowlisted in `.gitleaks.toml`.
+
 ## APNS setup
 
 APNS is optional for foreground development. It is required only for live push notifications when the app is backgrounded or suspended.
