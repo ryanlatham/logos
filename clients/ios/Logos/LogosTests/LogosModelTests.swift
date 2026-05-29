@@ -4882,23 +4882,38 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckTTLExpiresWithoutClearingNewerAckEarly() async throws {
-        let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
+    func testFastAckTTLExpiresWithoutClearingNewerAckEarly() throws {
+        let scheduler = ManualAckClearScheduler()
+        let client = LogosClient(
+            store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
+            ackClearScheduler: scheduler
+        )
 
         client.handleFrameString(#"""
         {"type":"state_update","request_id":"old-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"Old ack.","transient":true,"ttl_ms":40}}
         """#)
         XCTAssertEqual(client.ackText, "Old ack.")
+        // The shorter-lived ack armed a clear at its 40ms TTL.
+        XCTAssertEqual(try XCTUnwrap(scheduler.lastInterval), 0.040, accuracy: 0.0001)
+        let staleClear = try XCTUnwrap(scheduler.pendingClear)
+        let scheduleCountAfterOld = scheduler.scheduleCount
 
         client.handleFrameString(#"""
         {"type":"state_update","request_id":"new-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"New ack.","transient":true,"ttl_ms":220}}
         """#)
         XCTAssertEqual(client.ackText, "New ack.")
+        // The newer ack supersedes the pending clear with its own 220ms timer, so
+        // the stale 40ms timer no longer governs the visible ack.
+        XCTAssertGreaterThan(scheduler.scheduleCount, scheduleCountAfterOld)
+        XCTAssertEqual(try XCTUnwrap(scheduler.lastInterval), 0.220, accuracy: 0.0001)
 
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // Even if the superseded 40ms timer fires late, the id guard keeps the
+        // newer ack visible — it must not be cleared early.
+        staleClear()
         XCTAssertEqual(client.ackText, "New ack.")
 
-        try await Task.sleep(nanoseconds: 220_000_000)
+        // The newer ack clears only when its own TTL fires.
+        XCTAssertTrue(scheduler.fireAckClear())
         XCTAssertNil(client.ackText)
     }
 
@@ -5588,6 +5603,38 @@ final class ManualStaleTimeoutScheduler: StaleTimeoutScheduling {
     func fireStaleTimeout() -> Bool {
         guard let fire = pendingFire else { return false }
         pendingFire = nil
+        fire()
+        return true
+    }
+}
+
+/// Test double for `AckClearScheduling` that records scheduling activity and
+/// fires the pending fast-ack clear synchronously, so TTL-expiry behavior can be
+/// asserted deterministically without sleeping against a real timer.
+@MainActor
+final class ManualAckClearScheduler: AckClearScheduling {
+    private(set) var scheduleCount = 0
+    private(set) var lastInterval: TimeInterval?
+    /// The currently-armed clear, exposed so a test can fire a superseded timer
+    /// late and verify the id guard keeps a newer ack visible.
+    private(set) var pendingClear: (@MainActor () -> Void)?
+
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void) {
+        scheduleCount += 1
+        lastInterval = interval
+        pendingClear = fire
+    }
+
+    func cancel() {
+        pendingClear = nil
+    }
+
+    /// Synchronously invoke the currently-armed clear, mimicking the real timer
+    /// firing once the TTL elapses. Returns whether a clear was armed.
+    @discardableResult
+    func fireAckClear() -> Bool {
+        guard let fire = pendingClear else { return false }
+        pendingClear = nil
         fire()
         return true
     }
