@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 import hashlib
 import inspect
 import ipaddress
@@ -31,240 +30,52 @@ from .pairing import (
     pairing_token_hash,
     render_qr_png,
 )
+from .config import (
+    DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS,
+    DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
+    DEFAULT_HOST,
+    DEFAULT_LOGOS_HOME_CHANNEL,
+    DEFAULT_LOGOS_HOME_CHANNEL_NAME,
+    DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS,
+    DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS,
+    DEFAULT_PORT,
+    LOGOS_HOME_CHANNEL_ENV,
+    LOGOS_HOME_CHANNEL_NAME_ENV,
+    LOGOS_TIMEOUT_SECONDS_ENV,
+    MAX_LOGOS_STALE_TIMEOUT_SECONDS,
+    _configured_home_channel,
+    _configured_positive_int,
+    _ensure_home_channel_env,
+    _is_loopback_adapter_url,
+    _is_plaintext_non_loopback_adapter_url,
+    _nonnegative_int,
+    _optional_nonempty_str,
+    _positive_int_or_none,
+    _project_chat_id,
+    _safe_filename_component,
+    _string_set,
+    _truthy,
+    _validate_config,
+)
+from .notifications import APNS_STALE_DEVICE_REASONS, PrivateNotifier
+from .progress_analysis import ProgressAnalyzer
+from .providers import FastLLMProvider, TTSProvider
+from .audio import AudioMixin
+from .dispatch import DispatchMixin
+from .fast_routing import FastRoutingMixin
+from .interactions import InteractionsMixin
+from .message_state import MessageStateMixin
+from .request_context import current_request_context, request_scope
+from .run_state import RunStateMixin
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
+from .telemetry import TelemetryLog
 from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
 
-APNS_STALE_DEVICE_REASONS = {"BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"}
 
-_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
-    "logos_request_context",
-    default=None,
-)
-
-
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
-DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS = 600
-DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS = 100
-DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS = 15 * 60
-MAX_LOGOS_STALE_TIMEOUT_SECONDS = 24 * 60 * 60
-DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS = 10.0
-LOGOS_TIMEOUT_SECONDS_ENV = "LOGOS_TIMEOUT_SECONDS"
-LOGOS_HOME_CHANNEL_ENV = "LOGOS_HOME_CHANNEL"
-LOGOS_HOME_CHANNEL_NAME_ENV = "LOGOS_HOME_CHANNEL_NAME"
-DEFAULT_LOGOS_HOME_CHANNEL = "project:default"
-DEFAULT_LOGOS_HOME_CHANNEL_NAME = "Logos"
-PROGRESS_MESSAGE_ID_PREFIX = "progress-"
-GATEWAY_STILL_WORKING_RE = re.compile(r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE)
-GATEWAY_RETRY_STATUS_RE = re.compile(r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE)
-GATEWAY_NON_RETRYABLE_STATUS_RE = re.compile(
-    r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*Non-retryable error\s+\(HTTP\s+[^)]*\)"
-    r"(?:\s*[—-]\s*trying fallback(?:\.\.\.|…)?|:\s+.+)\s*$",
-    re.IGNORECASE,
-)
-GATEWAY_PROVIDER_STATUS_RE = re.compile(
-    r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*No response from provider for\s+.*?\bAborting call\.?\s*$",
-    re.IGNORECASE,
-)
-GATEWAY_CONTEXT_STATUS_RE = re.compile(
-    r"^\s*(?:⏳\s*)?(?:"
-    r"(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:"
-    r"(?:started|starting|running|complete|completed|in progress)(?:\.\.\.|[.!…])?\s*$"
-    r"|(?:compact(?:ing)?|compress(?:ing)?)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?)\s*$"
-    r"|context(?:\.\.\.|[.!…])?\s*$"
-    r")"
-    r"|(?:compact|compacting|compressing)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?|\s*)$"
-    r")",
-    re.IGNORECASE,
-)
-GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
-RAW_TERMINAL_ERROR_RE = re.compile(
-    r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*(?:"
-    r"'[^']+'\s+object\s+(?:is\s+not\s+\w+|has\s+no\s+attribute\s+'[^']+')"
-    r"|(?:[A-Za-z_][A-Za-z0-9_.]*Error|Exception|TimeoutError|RuntimeError|TypeError|ValueError):\s+.+"
-    r")\s*$",
-    re.IGNORECASE,
-)
-PROGRESS_TOOL_NAMES = {
-    "airtable",
-    "browser_click",
-    "browser_navigate",
-    "browser_scroll",
-    "browser_snapshot",
-    "browser_type",
-    "browser_vision",
-    "clarify",
-    "computer_use",
-    "cronjob",
-    "delegate_task",
-    "execute_code",
-    "ha_call_service",
-    "ha_get_state",
-    "ha_list_entities",
-    "ha_list_services",
-    "image_generate",
-    "memory",
-    "patch",
-    "process",
-    "read_file",
-    "search_files",
-    "send_message",
-    "skill_manage",
-    "skill_view",
-    "skills_list",
-    "terminal",
-    "text_to_speech",
-    "todo",
-    "vision_analyze",
-    "web_extract",
-    "web_search",
-    "write_file",
-}
-PROGRESS_LINE_RE = re.compile(r"^\W+\s+(?P<tool>[A-Za-z_][A-Za-z0-9_.-]*)(?:\(|:|…|\.\.\.|\s|$)")
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value or "").strip().lower()
-    return text in {"1", "true", "yes", "on"}
-
-
-def _safe_filename_component(value: Any) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or "").strip())
-    return cleaned.strip(".-_") or "device"
-
-
-def _is_loopback_adapter_url(value: str) -> bool:
-    try:
-        parsed = urlparse(str(value or ""))
-    except Exception:
-        return False
-    host = (parsed.hostname or "").strip().lower()
-    if host in {"localhost", "ip6-localhost"}:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _is_plaintext_non_loopback_adapter_url(value: str) -> bool:
-    try:
-        parsed = urlparse(str(value or ""))
-    except Exception:
-        return False
-    return parsed.scheme == "ws" and not _is_loopback_adapter_url(value)
-
-
-def _string_set(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        raw_items = [value]
-    return {str(item).strip() for item in raw_items if str(item).strip()}
-
-
-def _optional_nonempty_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _nonnegative_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return int(default)
-    if parsed < 0:
-        return int(default)
-    return parsed
-
-
-def _positive_int_or_none(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed <= 0:
-        return None
-    return parsed
-
-
-def _configured_positive_int(*values: Any, default: int, max_value: int | None = None) -> int:
-    for value in values:
-        parsed = _positive_int_or_none(value)
-        if parsed is not None:
-            return min(parsed, int(max_value)) if max_value is not None else parsed
-    fallback = int(default)
-    return min(fallback, int(max_value)) if max_value is not None else fallback
-
-
-def _validate_config(config: PlatformConfig) -> bool:
-    extra = getattr(config, "extra", {}) or {}
-    return bool(os.getenv("LOGOS_DEVICE_SECRET") or _optional_nonempty_str(extra.get("device_secret")))
-
-
-def _project_chat_id(project_key: Any) -> str | None:
-    text = _optional_nonempty_str(project_key)
-    if not text:
-        return None
-    return text if text.startswith("project:") else f"project:{text}"
-
-
-def _configured_home_channel(config: PlatformConfig, extra: dict[str, Any]) -> tuple[str, str]:
-    """Resolve Logos' process-local home channel.
-
-    Hermes emits a first-message onboarding notice for any platform with no
-    home target env var. Logos' chats are per-project, so leaving this unset
-    causes that generic notice to repeat in every new project. A stable default
-    project gives Logos the same one-home-channel shape as Telegram/Discord
-    without requiring Hermes core special-casing.
-    """
-    explicit_env = _optional_nonempty_str(os.getenv(LOGOS_HOME_CHANNEL_ENV))
-    explicit_name = _optional_nonempty_str(os.getenv(LOGOS_HOME_CHANNEL_NAME_ENV))
-    if explicit_env:
-        return explicit_env, explicit_name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
-
-    home = getattr(config, "home_channel", None)
-    home_chat_id = _optional_nonempty_str(getattr(home, "chat_id", None)) if home is not None else None
-    home_name = _optional_nonempty_str(getattr(home, "name", None)) if home is not None else None
-    if home_chat_id:
-        return home_chat_id, home_name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
-
-    configured = extra.get("home_channel")
-    if isinstance(configured, dict):
-        chat_id = _optional_nonempty_str(configured.get("chat_id")) or _project_chat_id(configured.get("project_key"))
-        name = _optional_nonempty_str(configured.get("name"))
-        if chat_id:
-            return chat_id, name or DEFAULT_LOGOS_HOME_CHANNEL_NAME
-    else:
-        chat_id = _optional_nonempty_str(configured)
-        if chat_id:
-            return chat_id, _optional_nonempty_str(extra.get("home_channel_name")) or DEFAULT_LOGOS_HOME_CHANNEL_NAME
-
-    chat_id = _optional_nonempty_str(extra.get("home_chat_id")) or _project_chat_id(extra.get("home_project_key"))
-    if chat_id:
-        return chat_id, _optional_nonempty_str(extra.get("home_channel_name")) or DEFAULT_LOGOS_HOME_CHANNEL_NAME
-
-    return DEFAULT_LOGOS_HOME_CHANNEL, DEFAULT_LOGOS_HOME_CHANNEL_NAME
-
-
-def _ensure_home_channel_env(config: PlatformConfig, extra: dict[str, Any]) -> None:
-    chat_id, name = _configured_home_channel(config, extra)
-    os.environ.setdefault(LOGOS_HOME_CHANNEL_ENV, chat_id)
-    os.environ.setdefault(LOGOS_HOME_CHANNEL_NAME_ENV, name)
 
 
 def _platform() -> Platform:
@@ -291,7 +102,15 @@ def _platform() -> Platform:
         return Platform("logos")
 
 
-class LogosAdapter(BasePlatformAdapter):
+class LogosAdapter(
+    RunStateMixin,
+    DispatchMixin,
+    MessageStateMixin,
+    InteractionsMixin,
+    FastRoutingMixin,
+    AudioMixin,
+    BasePlatformAdapter,
+):
     """Hermes platform adapter for the Logos iPhone WebSocket bridge."""
 
     def __init__(self, config: PlatformConfig, **_: Any) -> None:
@@ -310,8 +129,9 @@ class LogosAdapter(BasePlatformAdapter):
         self.ws_server: LogosWebSocketServer | None = None
         self.store = LogosStore(self._store_path(extra))
         self.store.interrupt_active_run_states(reason="adapter_restarted")
-        self.tts = build_tts(extra)
-        self.fast_model = build_fast_model(extra)
+        self.tts: TTSProvider = build_tts(extra)
+        self.fast_model: FastLLMProvider = build_fast_model(extra)
+        self._progress = ProgressAnalyzer()
         final_audio_full_max_chars = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_CHARS")
         final_audio_full_max_words = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_WORDS")
         self.final_audio_full_max_chars = _nonnegative_int(
@@ -333,6 +153,8 @@ class LogosAdapter(BasePlatformAdapter):
             max(1.0, float(self.stale_timeout_seconds) / 3.0),
         )
         self.apns = APNSClient.from_env()
+        self._notifier = PrivateNotifier()
+        self._telemetry = TelemetryLog()
         self.latest_pairing_invite: PairingInvite | None = None
         self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_keepalive_sent_at: dict[tuple[str, str], float] = {}
@@ -640,199 +462,6 @@ class LogosAdapter(BasePlatformAdapter):
                 await result
         self._mark_disconnected()
 
-    async def handle_ws_envelope(self, envelope: Envelope) -> dict[str, Any] | None:
-        if envelope.type in {"text_input", "text_message"}:
-            return await self._handle_final_text(envelope)
-        if envelope.type == "speech":
-            if not bool(envelope.payload.get("is_final", False)):
-                return self._state_update(
-                    op="speech_partial_received",
-                    envelope=envelope,
-                    payload={
-                        "client_msg_id": envelope.payload.get("client_msg_id"),
-                        "partial_seq": envelope.payload.get("partial_seq"),
-                    },
-                )
-            return await self._handle_final_text(envelope)
-        if envelope.type == "messages_get":
-            return self._handle_messages_get(envelope)
-        if envelope.type == "commands_get":
-            return self._handle_commands_get(envelope)
-        if envelope.type == "commands_complete":
-            return self._handle_commands_complete(envelope)
-        if envelope.type == "playback_audio":
-            return await self._handle_playback_audio(envelope)
-        if envelope.type == "list_projects":
-            return self._handle_list_projects(envelope)
-        if envelope.type == "new_project":
-            return self._handle_new_project(envelope)
-        if envelope.type == "switch_project":
-            return self._handle_switch_project(envelope)
-        if envelope.type == "rename_project":
-            return self._handle_rename_project(envelope)
-        if envelope.type == "run_cancel":
-            return await self._handle_run_cancel(envelope)
-        if envelope.type == "approval_response":
-            return await self._handle_approval_response(envelope)
-        if envelope.type == "clarify_response":
-            return await self._handle_clarify_response(envelope)
-        if envelope.type == "hello":
-            return {
-                "type": "hello",
-                "request_id": envelope.request_id,
-                "device_id": envelope.device_id,
-                "project_key": envelope.project_key,
-                "payload": {"authenticated": True, "server": "logos", "client_config": self.client_config_payload()},
-            }
-        if envelope.type == "register_device":
-            return self._handle_register_device(envelope)
-        if envelope.type == "app_focus_change":
-            return self._state_update(
-                op="app_focus_changed",
-                envelope=envelope,
-                payload={"focus": envelope.payload.get("focus") or envelope.payload.get("state")},
-            )
-        return error_frame(
-            "unsupported_type",
-            f"unsupported Logos frame type: {envelope.type}",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-            project_key=envelope.project_key,
-        )
-
-    def _handle_commands_get(self, envelope: Envelope) -> dict[str, Any]:
-        include_unavailable = bool(envelope.payload.get("include_unavailable", True))
-        try:
-            payload = command_catalog.build_command_catalog(
-                include_unavailable=include_unavailable,
-                config_extra=getattr(self.config, "extra", {}) or {},
-            )
-        except Exception:
-            logger.debug("Logos: command catalog build failed", exc_info=True)
-            payload = command_catalog.build_command_catalog(
-                include_unavailable=include_unavailable,
-                hermes_commands=None,
-                config_extra={},
-            )
-            payload["fallback_used"] = True
-            payload.setdefault("warnings", []).append("Command catalog failed; using fallback catalog.")
-        payload["request_id"] = envelope.request_id
-        return {
-            "type": "commands_list",
-            "request_id": envelope.request_id,
-            "device_id": envelope.device_id,
-            "project_key": envelope.project_key,
-            "payload": payload,
-        }
-
-    def _handle_commands_complete(self, envelope: Envelope) -> dict[str, Any]:
-        text = envelope.payload.get("text")
-        if not isinstance(text, str):
-            return error_frame(
-                "invalid_commands_complete",
-                "commands_complete requires text",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=envelope.project_key,
-            )
-        try:
-            catalog = command_catalog.build_command_catalog(
-                include_unavailable=True,
-                config_extra=getattr(self.config, "extra", {}) or {},
-            )
-            payload = command_catalog.complete_slash_command(text, catalog=catalog)
-        except command_catalog.CommandCompletionError as exc:
-            return error_frame(
-                "invalid_commands_complete",
-                str(exc),
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=envelope.project_key,
-            )
-        except Exception:
-            logger.debug("Logos: command completion failed", exc_info=True)
-            fallback_catalog = command_catalog.build_command_catalog(
-                include_unavailable=True,
-                hermes_commands=None,
-                config_extra={},
-            )
-            payload = command_catalog.complete_slash_command(text, catalog=fallback_catalog)
-            payload["fallback_used"] = True
-            payload.setdefault("warnings", []).append("Command completion failed; using fallback catalog.")
-        payload["request_id"] = envelope.request_id
-        return {
-            "type": "commands_complete_result",
-            "request_id": envelope.request_id,
-            "device_id": envelope.device_id,
-            "project_key": envelope.project_key,
-            "payload": payload,
-        }
-
-    def _handle_register_device(self, envelope: Envelope) -> dict[str, Any]:
-        device_id = str(envelope.device_id or envelope.payload.get("device_id") or "").strip()
-        if not device_id:
-            return error_frame(
-                "invalid_device",
-                "register_device requires device_id",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=envelope.project_key,
-            )
-        capabilities_raw = envelope.payload.get("capabilities") or []
-        capabilities = [str(item) for item in capabilities_raw] if isinstance(capabilities_raw, list) else []
-        shared_hash = None
-        device = self.store.upsert_device(
-            device_id=device_id,
-            display_name=_optional_nonempty_str(envelope.payload.get("display_name")),
-            shared_secret_hash=shared_hash,
-            apns_token=_optional_nonempty_str(envelope.payload.get("apns_token")),
-            apns_environment=_optional_nonempty_str(envelope.payload.get("apns_environment")),
-            capabilities=capabilities,
-        )
-        self._approve_gateway_pairing_for_device(device_id, device.display_name)
-        return {
-            "type": "registered",
-            "request_id": envelope.request_id,
-            "device_id": device_id,
-            "project_key": envelope.project_key,
-            "payload": {
-                "device": device.to_protocol(),
-                "server_capabilities": [
-                    "text",
-                    "speech",
-                    "projects",
-                    "approval",
-                    "clarification",
-                    "playback_audio",
-                    "private_notifications",
-                ],
-                "apns_configured": self.apns.config.configured,
-                "private_payloads": True,
-                "client_config": self.client_config_payload(),
-            },
-        }
-
-    async def _handle_final_text(self, envelope: Envelope) -> None:
-        project_key = self._project_key_for(envelope)
-        text = envelope.payload.get("text")
-        text_value = text if isinstance(text, str) else ""
-        session_id = self._client_session_id_for(envelope, project_key)
-        fast_result = self.fast_model.analyze_input(text_value)
-        if await self._handle_fast_direct_response(envelope, fast_result):
-            return None
-        await self._emit_fast_ack(envelope, fast_result)
-        routed = await self._route_fast_intent(envelope, fast_result)
-        if routed:
-            return None
-        await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="running",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-        )
-        await self._dispatch_gateway_text(envelope)
-        return None
 
     async def _mirror_user_message(
         self,
@@ -892,20 +521,12 @@ class LogosAdapter(BasePlatformAdapter):
         return {"project_key": project_key, "session_id": session_id, "request_id": request_id}
 
     async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
-        context = self._request_context_for_event(event)
-        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
-        try:
+        with request_scope(self._request_context_for_event(event)):
             await super().handle_message(event)
-        finally:
-            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:  # type: ignore[override]
-        context = self._request_context_for_event(event)
-        token = _CURRENT_LOGOS_REQUEST_CONTEXT.set(context)
-        try:
+        with request_scope(self._request_context_for_event(event)):
             await super()._process_message_background(event, session_key)
-        finally:
-            _CURRENT_LOGOS_REQUEST_CONTEXT.reset(token)
 
     def _metadata_with_current_request_id(
         self,
@@ -917,7 +538,7 @@ class LogosAdapter(BasePlatformAdapter):
         metadata = dict(metadata or {})
         if metadata.get("request_id"):
             return metadata
-        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
+        context = current_request_context()
         if not context or context.get("project_key") != project_key:
             return metadata
         context_session = context.get("session_id")
@@ -936,207 +557,6 @@ class LogosAdapter(BasePlatformAdapter):
             metadata["request_id"] = request_id
         return metadata
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:  # type: ignore[override]
-        """Surface Hermes' typing loop as a Logos run keepalive."""
-
-        if self.ws_server is None:
-            return
-        metadata = dict(metadata or {})
-        project_key = self._project_key_from_chat_id(chat_id)
-        context = _CURRENT_LOGOS_REQUEST_CONTEXT.get()
-        context_matches_project = bool(context and context.get("project_key") == project_key)
-        session_id = str(
-            metadata.get("session_id")
-            or metadata.get("session")
-            or (context.get("session_id") if context_matches_project else None)
-            or chat_id
-        )
-        request_id = _optional_nonempty_str(
-            metadata.get("request_id") or (context.get("request_id") if context_matches_project else None)
-        )
-        device_id = _optional_nonempty_str(metadata.get("device_id"))
-        throttle_key = (project_key, request_id or session_id)
-        now = time.monotonic()
-        last_sent = self._last_keepalive_sent_at.get(throttle_key)
-        if last_sent is not None and now - last_sent < self._keepalive_throttle_seconds:
-            return
-        self._last_keepalive_sent_at[throttle_key] = now
-        await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="running",
-            request_id=request_id,
-            device_id=device_id,
-            payload={
-                "keepalive": True,
-                "source": "typing",
-                "transient": True,
-                "stale_timeout_seconds": self.stale_timeout_seconds,
-            },
-        )
-
-    def _clear_request_bookkeeping(self, *, project_key: str, session_id: str | None, request_id: str | None) -> None:
-        if request_id:
-            self._last_keepalive_sent_at.pop((project_key, request_id), None)
-        if session_id:
-            self._last_keepalive_sent_at.pop((project_key, session_id), None)
-        if len(self._last_keepalive_sent_at) > 1000:
-            for key in list(self._last_keepalive_sent_at)[:500]:
-                self._last_keepalive_sent_at.pop(key, None)
-
-    async def _handle_fast_direct_response(self, envelope: Envelope, result: FastModelResult) -> bool:
-        response_text = result.direct_response_text
-        response_kind = result.direct_response_kind
-        text = envelope.payload.get("text")
-        if any([result.switch_intent, result.create_intent, result.resume_intent, result.cancel_intent, result.approval_decision]):
-            return False
-        if not response_text or not response_kind or not isinstance(text, str) or not text.strip():
-            return False
-        if not is_safe_direct_response_for_request(text, response_kind, response_text):
-            return False
-        project_key = self._project_key_for(envelope)
-        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
-        client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
-        session_id = self._client_session_id_for(envelope, project_key)
-        await self._mirror_user_message(
-            envelope,
-            text,
-            project=project,
-            project_key=project_key,
-            session_id=session_id,
-            client_msg_id=client_msg_id,
-        )
-        assistant_message_id = f"fast-{envelope.request_id or uuid.uuid4()}"
-        stored_assistant = self.store.append_message(
-            project_key=project_key,
-            session_id=session_id,
-            message_id=assistant_message_id,
-            role="assistant",
-            content=response_text,
-            metadata={
-                "source": "fast_response",
-                "finalized": True,
-                "fast_response_kind": response_kind,
-                "fast_model": result.to_protocol(),
-                "request_id": envelope.request_id,
-            },
-        )
-        existing_project = self.store.get_project(project_key)
-        self.store.upsert_project(
-            project_key=project_key,
-            title=existing_project.title if existing_project else project.title,
-            current_session_id=session_id,
-            lineage_root_session_id=session_id,
-            last_seen_message_id=stored_assistant.message_id,
-            last_seen_server_seq=stored_assistant.server_seq,
-            last_preview=response_text[:240],
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(self._message_state_update(stored_assistant), project_key=project_key)
-        return True
-
-    async def _emit_fast_ack(self, envelope: Envelope, result: FastModelResult) -> dict[str, Any] | None:
-        if not result.ack or not result.ack_text:
-            return None
-        project_key = self._project_key_for(envelope)
-        session_id = self._client_session_id_for(envelope, project_key)
-        audio_id = f"ack-{envelope.request_id or uuid.uuid4()}"
-        frame = self._state_update(
-            op="fast_ack",
-            envelope=envelope,
-            payload={
-                "ack_text": result.ack_text,
-                "fast_model": result.to_protocol(),
-                "audio_id": audio_id,
-                "transient": True,
-                "ttl_ms": 5000,
-                "clear_on": ["assistant_message", "run_terminal", "project_change", "interaction_resolved"],
-            },
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-        if bool(envelope.payload.get("ack_audio")) or envelope.type == "speech":
-            await self._stream_tts_audio(
-                text=result.ack_text,
-                audio_id=audio_id,
-                project_key=project_key,
-                session_id=session_id,
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                message_id=None,
-                mode="ack",
-                source=getattr(self.tts, "source_name", "tts"),
-            )
-        return frame
-
-    async def _route_fast_intent(self, envelope: Envelope, result: FastModelResult) -> bool:
-        if result.cancel_intent:
-            await self._mirror_control_intent_message(envelope)
-            await self._handle_run_cancel(envelope)
-            return True
-        if result.approval_decision:
-            project_key = self._project_key_for(envelope)
-            pending = self._latest_pending_interaction(project_key=project_key, kind="approval")
-            if pending is None:
-                return False
-            response = Envelope(
-                type="approval_response",
-                request_id=pending.request_id,
-                device_id=envelope.device_id,
-                project_key=project_key,
-                session_id=pending.session_id,
-                payload={"decision": result.approval_decision, "approval_id": pending.request_id},
-            )
-            await self._handle_approval_response(response)
-            return True
-        if result.create_intent:
-            title = result.create_intent.get("title", "").strip()
-            if title:
-                project = self.store.create_project(title)
-                if envelope.device_id:
-                    self.store.set_active_project(device_id=envelope.device_id, project_key=project.project_key)
-                frame = self._project_state_update("project_created", envelope, project)
-                if self.ws_server is not None:
-                    await self.ws_server.broadcast(frame, project_key=project.project_key)
-                return True
-        if result.switch_intent:
-            title = result.switch_intent.get("project_title", "").strip()
-            project = self._find_project_by_title(title) if title else None
-            if project is not None:
-                active = self.store.set_active_project(device_id=envelope.device_id or "logos-device", project_key=project.project_key)
-                frame = self._project_state_update("active_project_changed", envelope, active)
-                if self.ws_server is not None:
-                    await self.ws_server.broadcast(frame, project_key=active.project_key)
-                return True
-        if result.resume_intent:
-            target = result.resume_intent.get("target", "").strip()
-            if target:
-                await self._broadcast_run_status(
-                    project_key=self._project_key_for(envelope),
-                    session_id=envelope.session_id or f"project:{self._project_key_for(envelope)}",
-                    status="running",
-                    request_id=envelope.request_id,
-                    device_id=envelope.device_id,
-                    payload={"intent": "resume"},
-                )
-                await self._dispatch_gateway_text(envelope, f"/resume {target}")
-                return True
-        return False
-
-    async def _mirror_control_intent_message(self, envelope: Envelope) -> None:
-        text = envelope.payload.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return
-        project_key = self._project_key_for(envelope)
-        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
-        await self._mirror_user_message(
-            envelope,
-            text.strip(),
-            project=project,
-            project_key=project_key,
-            session_id=self._client_session_id_for(envelope, project_key),
-            client_msg_id=str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()),
-        )
 
     def _find_project_by_title(self, title: str) -> LogosProject | None:
         normalized = str(title or "").strip().lower()
@@ -1230,60 +650,22 @@ class LogosAdapter(BasePlatformAdapter):
         )
         return summary, "regenerated" if existing is not None else "generated"
 
-    @staticmethod
-    def _looks_like_tool_progress_text(content: str) -> bool:
-        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
-        if not lines:
-            return False
-        for line in lines:
-            match = PROGRESS_LINE_RE.match(line)
-            if not match:
-                return False
-            tool = match.group("tool").strip(" .:()[]{}")
-            if tool not in PROGRESS_TOOL_NAMES and "_" not in tool and "." not in tool:
-                return False
-        return True
 
-    @staticmethod
-    def _looks_like_gateway_status_text(content: str) -> bool:
-        text = str(content or "").strip()
-        if not text:
-            return False
-        return bool(
-            GATEWAY_STILL_WORKING_RE.match(text)
-            or GATEWAY_RETRY_STATUS_RE.match(text)
-            or GATEWAY_NON_RETRYABLE_STATUS_RE.match(text)
-            or GATEWAY_PROVIDER_STATUS_RE.match(text)
-            or GATEWAY_CONTEXT_STATUS_RE.search(text)
-            or GATEWAY_LIFECYCLE_STATUS_RE.match(text)
-        )
+    # Progress/gateway-status classification delegates to ProgressAnalyzer (progress_analysis.py).
+    def _looks_like_tool_progress_text(self, content: str) -> bool:
+        return self._progress._looks_like_tool_progress_text(content)
 
-    @staticmethod
-    def _gateway_lifecycle_interruption_reason(content: str) -> str | None:
-        text = str(content or "").strip().lower()
-        if not GATEWAY_LIFECYCLE_STATUS_RE.match(text):
-            return None
-        if "restarting" in text:
-            return "gateway_restarting"
-        if "shutting down" in text:
-            return "gateway_shutting_down"
-        return "gateway_interrupted"
+    def _looks_like_gateway_status_text(self, content: str) -> bool:
+        return self._progress._looks_like_gateway_status_text(content)
 
-    @staticmethod
-    def _looks_like_terminal_error_text(content: str) -> bool:
-        text = str(content or "").strip()
-        if not text:
-            return False
-        if GATEWAY_NON_RETRYABLE_STATUS_RE.match(text):
-            return False
-        return bool(RAW_TERMINAL_ERROR_RE.match(text))
+    def _gateway_lifecycle_interruption_reason(self, content: str) -> str | None:
+        return self._progress._gateway_lifecycle_interruption_reason(content)
+
+    def _looks_like_terminal_error_text(self, content: str) -> bool:
+        return self._progress._looks_like_terminal_error_text(content)
 
     def _progress_kind_for_text(self, content: str) -> str | None:
-        if self._looks_like_tool_progress_text(content):
-            return "tool_progress"
-        if self._looks_like_gateway_status_text(content):
-            return "gateway_status"
-        return None
+        return self._progress._progress_kind_for_text(content)
 
     def _human_readable_error_response(self, content: str) -> tuple[str, dict[str, Any]]:
         explain_error = getattr(self.fast_model, "explain_error", None)
@@ -1303,416 +685,6 @@ class LogosAdapter(BasePlatformAdapter):
             {},
         )
 
-    async def _broadcast_progress_text(
-        self,
-        *,
-        chat_id: str,
-        content: str,
-        metadata: dict[str, Any] | None = None,
-        request_id: str | None = None,
-        kind: str = "tool_progress",
-    ) -> SendResult:
-        metadata = dict(metadata or {})
-        project_key = self._project_key_from_chat_id(chat_id)
-        provided_progress_id = request_id or metadata.get("message_id")
-        context_key = (project_key, str(provided_progress_id)) if provided_progress_id is not None else None
-        previous_context = self._transient_progress_context.get(context_key, {}) if context_key is not None else {}
-        previous_metadata = dict(previous_context.get("metadata") or {})
-        session_id = str(metadata.get("session_id") or metadata.get("session") or previous_context.get("session_id") or chat_id)
-        if provided_progress_id is None and kind == "gateway_status":
-            provided_progress_id = f"{PROGRESS_MESSAGE_ID_PREFIX}gateway-status-{_safe_filename_component(session_id)}"
-        progress_id = str(provided_progress_id or f"{PROGRESS_MESSAGE_ID_PREFIX}{uuid.uuid4()}")
-        progress_metadata = {**previous_metadata, **metadata}
-        root_request_id = str(progress_metadata.get("request_id") or progress_id)
-        durable = kind != "gateway_status"
-        progress_kind = str(progress_metadata.get("progress_kind") or kind)
-        if durable:
-            progress_metadata.update(
-                {
-                    "source": "tool_progress",
-                    "kind": kind,
-                    "progress_kind": progress_kind,
-                    "finalized": False,
-                    "request_id": root_request_id,
-                    "transient": False,
-                }
-            )
-        self._transient_progress_context[(project_key, progress_id)] = {
-            "session_id": session_id,
-            "metadata": progress_metadata,
-            "kind": kind,
-        }
-        if len(self._transient_progress_context) > 1000:
-            for stale_key in list(self._transient_progress_context)[:500]:
-                self._transient_progress_context.pop(stale_key, None)
-        stored_progress: LogosMessage | None = None
-        server_seq: int
-        if durable:
-            existing = self.store.get_message(session_id, progress_id)
-            if existing is None:
-                stored_progress = self.store.append_message(
-                    project_key=project_key,
-                    session_id=session_id,
-                    message_id=progress_id,
-                    role="assistant",
-                    content=content,
-                    metadata=progress_metadata,
-                )
-            else:
-                stored_progress = self.store.update_message(
-                    session_id=session_id,
-                    message_id=progress_id,
-                    content=content,
-                    metadata=progress_metadata,
-                )
-            if stored_progress is None:
-                return SendResult(success=False, message_id=progress_id, error="progress message not found")
-            existing_project = self.store.get_project(project_key)
-            self.store.upsert_project(
-                project_key=project_key,
-                title=existing_project.title if existing_project else project_key,
-                current_session_id=session_id,
-                lineage_root_session_id=str(progress_metadata.get("lineage_root_session_id") or progress_metadata.get("root_session_id") or session_id),
-            )
-            server_seq = stored_progress.server_seq
-        else:
-            server_seq = self.store.next_server_seq()
-        frame = {
-            "type": "tool_progress",
-            "request_id": root_request_id,
-            "project_key": project_key,
-            "session_id": session_id,
-            "server_seq": server_seq,
-            "payload": {
-                "kind": kind,
-                "progress_kind": progress_kind,
-                "message_id": progress_id,
-                "text": content,
-                "transient": not durable,
-            },
-        }
-        if stored_progress is not None:
-            frame["payload"]["message"] = stored_progress.to_protocol()
-            frame["payload"]["finalized"] = False
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-        return SendResult(success=True, message_id=progress_id, raw_response=frame)
-
-    async def send(
-        self,
-        chat_id: str,
-        content: str,
-        reply_to: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> SendResult:
-        metadata = dict(metadata or {})
-        project_key = self._project_key_from_chat_id(chat_id)
-        session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
-        metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
-        session_id = str(metadata.get("session_id") or metadata.get("session") or session_id)
-        if self._looks_like_terminal_error_text(content):
-            await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind="gateway_status")
-            explanation, explanation_protocol = self._human_readable_error_response(content)
-            metadata = dict(metadata)
-            metadata.update(
-                {
-                    "source": "hermes_error",
-                    "finalized": True,
-                    "final_status": "failed",
-                    "error": True,
-                    "raw_error_hash": self._source_hash(content),
-                }
-            )
-            if explanation_protocol:
-                metadata["fast_error_explanation"] = explanation_protocol
-            content = explanation
-        progress_kind = self._progress_kind_for_text(content)
-        if progress_kind is not None:
-            sent = await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
-            lifecycle_reason = self._gateway_lifecycle_interruption_reason(content)
-            if lifecycle_reason is not None:
-                await self._broadcast_run_status(
-                    project_key=project_key,
-                    session_id=session_id,
-                    status="idle",
-                    request_id=str(metadata.get("request_id") or "") or None,
-                    device_id=str(metadata.get("device_id") or "") or None,
-                    payload={
-                        "interrupted": True,
-                        "final_status": "interrupted",
-                        "reason": lifecycle_reason,
-                    },
-                )
-            return sent
-        final_metadata = dict(metadata)
-        final_metadata["finalized"] = True
-        final_metadata.setdefault("source", "hermes")
-        if reply_to:
-            final_metadata["reply_to"] = reply_to
-        hermes_message_id = metadata.get("message_id") or metadata.get("hermes_message_id")
-        if hermes_message_id is not None:
-            existing = self.store.get_message(session_id, str(hermes_message_id))
-            if existing is not None and self._is_progress_message(existing):
-                return await self._append_final_message_for_transient_edit(
-                    chat_id=chat_id,
-                    project_key=project_key,
-                    message_id=str(hermes_message_id),
-                    content=content,
-                    progress_message=existing,
-                    final_metadata=final_metadata,
-                )
-        stored = self.store.append_message(
-            project_key=project_key,
-            session_id=session_id,
-            message_id=hermes_message_id,
-            role="assistant",
-            content=content,
-            metadata=final_metadata,
-        )
-        frame = self._message_state_update(stored)
-        summary, _summary_status = self._summary_for_message(stored)
-        summary_frame = self._summary_ready_update(stored, summary.to_protocol())
-        existing_project = self.store.get_project(project_key)
-        self.store.upsert_project(
-            project_key=project_key,
-            title=existing_project.title if existing_project else project_key,
-            current_session_id=session_id,
-            lineage_root_session_id=str(final_metadata.get("lineage_root_session_id") or final_metadata.get("root_session_id") or session_id),
-            last_seen_message_id=stored.message_id,
-            last_seen_server_seq=stored.server_seq,
-            last_preview=content[:240],
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-            await self.ws_server.broadcast(summary_frame, project_key=project_key)
-            await self._broadcast_run_status(
-                project_key=project_key,
-                session_id=session_id,
-                status="idle",
-                request_id=str(final_metadata.get("request_id") or "") or None,
-            )
-        await self._send_private_notification(
-            PrivateNotificationKind.FINISHED,
-            project_key=project_key,
-            session_id=session_id,
-            message_id=stored.message_id,
-            server_seq=stored.server_seq,
-            request_id=str(final_metadata.get("request_id") or "") or None,
-            sensitive_context={"content": content, "summary": summary.summary_text},
-        )
-        self._clear_request_bookkeeping(
-            project_key=project_key,
-            session_id=session_id,
-            request_id=str(final_metadata.get("request_id") or "") or None,
-        )
-        return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
-
-    async def edit_message(
-        self,
-        chat_id: str,
-        message_id: str,
-        content: str,
-        *,
-        finalize: bool = False,
-    ) -> SendResult:
-        project_key = self._project_key_from_chat_id(chat_id)
-        message_id_str = str(message_id)
-        progress_kind = self._progress_kind_for_text(content)
-        existing = self.store.get_message_by_project(project_key, message_id_str)
-        if not finalize and (progress_kind is not None or message_id_str.startswith(PROGRESS_MESSAGE_ID_PREFIX)):
-            progress_metadata: dict[str, Any] = {}
-            if existing is not None:
-                progress_metadata.update(existing.metadata)
-                progress_metadata["session_id"] = existing.session_id
-            return await self._broadcast_progress_text(
-                chat_id=chat_id,
-                content=content,
-                metadata=progress_metadata,
-                request_id=message_id_str,
-                kind=progress_kind or "tool_progress",
-            )
-        if existing is None:
-            if not finalize:
-                return SendResult(success=False, message_id=None, error="message not found")
-            return await self._append_final_message_for_transient_edit(
-                chat_id=chat_id,
-                project_key=project_key,
-                message_id=message_id_str,
-                content=content,
-            )
-        if finalize and self._is_progress_message(existing):
-            return await self._append_final_message_for_transient_edit(
-                chat_id=chat_id,
-                project_key=project_key,
-                message_id=message_id_str,
-                content=content,
-                progress_message=existing,
-            )
-        updated_metadata = dict(existing.metadata or {})
-        updated_metadata.update({"edited_at": time.time(), "finalized": bool(finalize)})
-        if finalize:
-            updated_metadata.setdefault("source", "hermes")
-        updated = self.store.update_message(
-            session_id=existing.session_id,
-            message_id=existing.message_id,
-            content=content,
-            metadata=updated_metadata,
-        )
-        if updated is None:
-            return SendResult(success=False, message_id=message_id, error="message not found")
-        existing_project = self.store.get_project(project_key)
-        self.store.upsert_project(
-            project_key=project_key,
-            title=existing_project.title if existing_project else project_key,
-            current_session_id=updated.session_id,
-            last_seen_message_id=updated.message_id,
-            last_seen_server_seq=updated.server_seq,
-            last_preview=content[:240],
-        )
-        frame = {
-            "type": "state_update",
-            "request_id": str(updated.metadata.get("request_id") or updated.message_id),
-            "project_key": project_key,
-            "session_id": updated.session_id,
-            "server_seq": updated.server_seq,
-            "payload": {
-                "op": "message_updated",
-                "message": updated.to_protocol(),
-            },
-        }
-        summary_frame: dict[str, Any] | None = None
-        if finalize:
-            summary, _summary_status = self._summary_for_message(updated)
-            summary_frame = self._summary_ready_update(updated, summary.to_protocol())
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-            if summary_frame is not None:
-                await self.ws_server.broadcast(summary_frame, project_key=project_key)
-                await self._broadcast_run_status(
-                    project_key=project_key,
-                    session_id=updated.session_id,
-                    status="idle",
-                )
-        if finalize and summary_frame is not None:
-            await self._send_private_notification(
-                PrivateNotificationKind.FINISHED,
-                project_key=project_key,
-                session_id=updated.session_id,
-                message_id=updated.message_id,
-                server_seq=updated.server_seq,
-                request_id=str(updated.metadata.get("request_id") or "") or None,
-                sensitive_context={"content": content, "summary": summary.summary_text},
-            )
-            self._clear_request_bookkeeping(
-                project_key=project_key,
-                session_id=updated.session_id,
-                request_id=str(updated.metadata.get("request_id") or "") or None,
-            )
-        return SendResult(success=True, message_id=updated.message_id, raw_response=frame)
-
-    @staticmethod
-    def _is_progress_message(message: LogosMessage) -> bool:
-        metadata = dict(message.metadata or {})
-        source = str(metadata.get("source") or "")
-        if source in {"tool_progress", "progress"}:
-            return True
-        return bool(metadata.get("progress_kind") and metadata.get("finalized") is False)
-
-    async def _append_final_message_for_transient_edit(
-        self,
-        *,
-        chat_id: str,
-        project_key: str,
-        message_id: str,
-        content: str,
-        progress_message: LogosMessage | None = None,
-        final_metadata: dict[str, Any] | None = None,
-    ) -> SendResult:
-        context = self._transient_progress_context.pop((project_key, message_id), {})
-        session_id = str((progress_message.session_id if progress_message is not None else None) or context.get("session_id") or chat_id)
-        metadata = dict((progress_message.metadata if progress_message is not None else None) or context.get("metadata") or {})
-        if final_metadata:
-            metadata.update(dict(final_metadata))
-        root_request_id = str(metadata.get("request_id") or message_id)
-        for progress_key in ("progress_kind", "kind", "transient", "message_id", "hermes_message_id"):
-            metadata.pop(progress_key, None)
-        if metadata.get("source") in {"tool_progress", "progress"}:
-            metadata.pop("source", None)
-        metadata.update({"edited_at": time.time(), "finalized": True, "request_id": root_request_id})
-        metadata.setdefault("source", "hermes")
-        final_message_id = str(metadata.pop("final_message_id", "") or f"{message_id}-final")
-        stored = self.store.append_message(
-            project_key=project_key,
-            session_id=session_id,
-            message_id=final_message_id,
-            role="assistant",
-            content=content,
-            metadata=metadata,
-        )
-        frame = self._message_state_update(stored)
-        summary, _summary_status = self._summary_for_message(stored)
-        summary_frame = self._summary_ready_update(stored, summary.to_protocol())
-        existing_project = self.store.get_project(project_key)
-        self.store.upsert_project(
-            project_key=project_key,
-            title=existing_project.title if existing_project else project_key,
-            current_session_id=session_id,
-            lineage_root_session_id=str(metadata.get("lineage_root_session_id") or metadata.get("root_session_id") or session_id),
-            last_seen_message_id=stored.message_id,
-            last_seen_server_seq=stored.server_seq,
-            last_preview=content[:240],
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-            await self.ws_server.broadcast(summary_frame, project_key=project_key)
-            await self._broadcast_run_status(
-                project_key=project_key,
-                session_id=session_id,
-                status="idle",
-                request_id=root_request_id,
-            )
-        await self._send_private_notification(
-            PrivateNotificationKind.FINISHED,
-            project_key=project_key,
-            session_id=session_id,
-            message_id=stored.message_id,
-            server_seq=stored.server_seq,
-            request_id=root_request_id,
-            sensitive_context={"content": content, "summary": summary.summary_text},
-        )
-        self._clear_request_bookkeeping(
-            project_key=project_key,
-            session_id=session_id,
-            request_id=root_request_id,
-        )
-        return SendResult(success=True, message_id=stored.message_id, raw_response=frame)
-
-    def _message_state_update(self, message: LogosMessage) -> dict[str, Any]:
-        return {
-            "type": "state_update",
-            "request_id": str(message.metadata.get("request_id") or message.message_id),
-            "project_key": message.project_key,
-            "session_id": message.session_id,
-            "server_seq": message.server_seq,
-            "payload": {
-                "op": "message_appended",
-                "message": message.to_protocol(),
-            },
-        }
-
-    def _summary_ready_update(self, message: LogosMessage, summary: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "type": "state_update",
-            "project_key": message.project_key,
-            "session_id": message.session_id,
-            "server_seq": message.server_seq,
-            "payload": {
-                "op": "summary_ready",
-                "message_id": message.message_id,
-                "summary": summary,
-                "transient": False,
-            },
-        }
 
     async def _send_private_notification(
         self,
@@ -1725,7 +697,9 @@ class LogosAdapter(BasePlatformAdapter):
         request_id: str | None = None,
         sensitive_context: dict[str, Any] | None = None,
     ) -> None:
-        payload = build_private_apns_payload(
+        await self._notifier.send(
+            self.store,
+            self.apns,
             kind,
             project_key=project_key,
             session_id=session_id,
@@ -1734,361 +708,8 @@ class LogosAdapter(BasePlatformAdapter):
             request_id=request_id,
             sensitive_context=sensitive_context,
         )
-        for device in self.store.list_devices(active_only=True):
-            if not device.apns_token:
-                continue
-            if "notifications" not in {str(item).lower() for item in device.capabilities}:
-                continue
-            environment = (
-                str(device.apns_environment or self.apns.config.environment or "").strip().lower() or None
-            )
-            try:
-                result_or_awaitable = self.apns.send(device.apns_token, payload, environment=environment)
-                result = await result_or_awaitable if inspect.isawaitable(result_or_awaitable) else result_or_awaitable
-            except Exception as exc:  # pragma: no cover - exercised with injected clients
-                logger.warning(
-                    "Logos APNS send raised for device_id=%s environment=%s error_type=%s",
-                    device.device_id,
-                    environment,
-                    type(exc).__name__,
-                )
-                continue
-            if not result.success and not result.skipped:
-                reason = str(result.reason or "")
-                if reason in APNS_STALE_DEVICE_REASONS or result.status == 410:
-                    self.store.clear_device_apns_registration(device.device_id)
-                logger.warning(
-                    "Logos APNS send failed for device_id=%s environment=%s status=%s reason=%s apns_id=%s temporary=%s",
-                    device.device_id,
-                    result.environment or environment,
-                    result.status,
-                    result.reason,
-                    result.apns_id,
-                    result.temporary_failure,
-                )
 
-    def _state_update(
-        self,
-        *,
-        op: str,
-        envelope: Envelope,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        server_seq = self.store.next_server_seq()
-        body = {"op": op}
-        if payload:
-            body.update(payload)
-        project_key = self._project_key_for(envelope)
-        return {
-            "type": "state_update",
-            "request_id": envelope.request_id,
-            "device_id": envelope.device_id,
-            "project_key": project_key,
-            "session_id": self._client_session_id_for(envelope, project_key),
-            "server_seq": server_seq,
-            "payload": body,
-        }
 
-    def _run_status_frame(
-        self,
-        *,
-        project_key: str,
-        session_id: str | None,
-        status: str,
-        request_id: str | None = None,
-        device_id: str | None = None,
-        payload: dict[str, Any] | None = None,
-        server_seq: int | None = None,
-        updated_at: float | None = None,
-    ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "status": status,
-            "updated_at": time.time() if updated_at is None else updated_at,
-        }
-        if payload:
-            body.update(payload)
-        return {
-            "type": "run_status",
-            "request_id": request_id,
-            "device_id": device_id,
-            "project_key": project_key,
-            "session_id": session_id,
-            "server_seq": self.store.next_server_seq() if server_seq is None else int(server_seq),
-            "payload": body,
-        }
-
-    async def _broadcast_run_status(
-        self,
-        *,
-        project_key: str,
-        session_id: str | None,
-        status: str,
-        request_id: str | None = None,
-        device_id: str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        updated_at = time.time()
-        stored = self.store.upsert_run_state(
-            project_key=project_key,
-            session_id=session_id,
-            status=status,
-            request_id=request_id,
-            device_id=device_id,
-            payload=dict(payload or {}),
-            updated_at=updated_at,
-        )
-        frame = self._run_status_frame(
-            project_key=project_key,
-            session_id=session_id,
-            status=status,
-            request_id=request_id,
-            device_id=device_id,
-            payload=payload,
-            server_seq=stored.server_seq,
-            updated_at=updated_at,
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-        return frame
-
-    async def _handle_run_cancel(self, envelope: Envelope) -> dict[str, Any]:
-        project_key = self._project_key_for(envelope)
-        session_id = envelope.session_id or f"project:{project_key}"
-        await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="cancelling",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-        )
-        dispatch_failed = False
-        try:
-            await self._dispatch_gateway_text(envelope, "/stop", mirror_user=False)
-        except Exception:
-            dispatch_failed = True
-            logger.warning("Logos: failed to dispatch /stop for run_cancel", exc_info=True)
-        if not dispatch_failed:
-            self.store.resolve_pending_interactions_for_project(project_key)
-        terminal_frame = await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="error" if dispatch_failed else "idle",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-            payload={"cancelled": not dispatch_failed, "reason": "stop_dispatch_failed"} if dispatch_failed else {"cancelled": True},
-        )
-        return terminal_frame
-
-    async def _handle_approval_response(self, envelope: Envelope) -> dict[str, Any]:
-        decision = str(envelope.payload.get("decision") or "").strip().lower()
-        if decision in {"approve", "allow", "yes", "y"}:
-            command = "/approve"
-            normalized_decision = "approve"
-        elif decision in {"deny", "reject", "cancel", "no", "n"}:
-            command = "/deny"
-            normalized_decision = "deny"
-        else:
-            return error_frame(
-                "invalid_approval_decision",
-                "approval_response decision must be approve or deny",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=envelope.project_key,
-            )
-        project_key = self._project_key_for(envelope)
-        request_id = str(envelope.request_id or envelope.payload.get("approval_id") or "")
-        pending = self.store.get_pending_interaction(request_id) if request_id else None
-        if pending is None or pending.kind != "approval" or pending.project_key != project_key:
-            return error_frame(
-                "approval_not_pending",
-                "approval_response requires a matching pending approval for this project",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=project_key,
-            )
-        resolved_directly = False
-        session_key = str(pending.payload.get("session_key") or "").strip()
-        if session_key:
-            try:
-                from tools.approval import resolve_gateway_approval
-
-                approval_choice = "once" if normalized_decision == "approve" else "deny"
-                resolved_directly = bool(resolve_gateway_approval(session_key, approval_choice))
-            except Exception:
-                resolved_directly = False
-        if not resolved_directly:
-            project_key = await self._dispatch_gateway_text(envelope, command, mirror_user=False)
-        self.store.resolve_pending_interaction(request_id)
-        return await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=envelope.session_id or f"project:{project_key}",
-            status="running",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-            payload={"approval_decision": normalized_decision},
-        )
-
-    async def _handle_clarify_response(self, envelope: Envelope) -> dict[str, Any]:
-        text = envelope.payload.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return error_frame(
-                "invalid_clarify_response",
-                "clarify_response requires payload.text",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=envelope.project_key,
-            )
-        clarify_id = str(envelope.payload.get("clarify_id") or envelope.request_id or "")
-        project_key = self._project_key_for(envelope)
-        pending = self.store.get_pending_interaction(clarify_id) if clarify_id else None
-        if pending is not None and (pending.kind != "clarification" or pending.project_key != project_key):
-            return error_frame(
-                "clarify_not_pending",
-                "clarify_response requires a matching pending clarification for this project",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=project_key,
-            )
-        resolved = False
-        if pending is not None:
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-
-                resolved = bool(resolve_gateway_clarify(clarify_id, text))
-            except Exception:
-                resolved = False
-        if not resolved:
-            project_key = await self._dispatch_gateway_text(envelope, text)
-        if pending is not None and resolved:
-            self.store.resolve_pending_interaction(clarify_id)
-        return await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=envelope.session_id or f"project:{project_key}",
-            status="running",
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-            payload={"clarify_resolved": resolved, "clarify_id": clarify_id or None},
-        )
-
-    async def send_clarify(
-        self,
-        chat_id: str,
-        question: str,
-        choices: list[Any] | None,
-        clarify_id: str,
-        session_key: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> SendResult:
-        metadata = dict(metadata or {})
-        project_key = self._project_key_from_chat_id(chat_id)
-        session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
-        private_payload = {
-            "clarify_id": clarify_id,
-            "question": question,
-            "choices": list(choices or []),
-            "allow_free_text": True,
-            "session_key": session_key,
-        }
-        public_payload = dict(private_payload)
-        public_payload.pop("session_key", None)
-        frame = {
-            "type": "clarify_request",
-            "request_id": clarify_id,
-            "project_key": project_key,
-            "session_id": session_id,
-            "server_seq": self.store.next_server_seq(),
-            "payload": public_payload,
-        }
-        self.store.upsert_pending_interaction(
-            request_id=clarify_id,
-            kind="clarification",
-            project_key=project_key,
-            session_id=session_id,
-            frame_type="clarify_request",
-            payload=private_payload,
-            server_seq=int(frame["server_seq"]),
-        )
-        try:
-            from tools.clarify_gateway import mark_awaiting_text
-
-            mark_awaiting_text(clarify_id)
-        except Exception:
-            pass
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-        await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="awaiting_clarification",
-            payload={"clarify_id": clarify_id},
-        )
-        await self._send_private_notification(
-            PrivateNotificationKind.CLARIFICATION,
-            project_key=project_key,
-            session_id=session_id,
-            request_id=clarify_id,
-            server_seq=int(frame["server_seq"]),
-            sensitive_context={"question": question, "choices": list(choices or [])},
-        )
-        return SendResult(success=True, message_id=clarify_id, raw_response=frame)
-
-    async def send_exec_approval(
-        self,
-        chat_id: str,
-        command: str,
-        session_key: str,
-        description: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> SendResult:
-        metadata = dict(metadata or {})
-        project_key = self._project_key_from_chat_id(chat_id)
-        session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
-        server_seq = self.store.next_server_seq()
-        approval_id = str(metadata.get("approval_id") or f"appr-{server_seq}")
-        private_payload = {
-            "approval_id": approval_id,
-            "title": "Approve shell command?",
-            "summary": description,
-            "command_preview": command,
-            "risk": str(metadata.get("risk") or description),
-            "session_key": session_key,
-        }
-        public_payload = dict(private_payload)
-        public_payload.pop("session_key", None)
-        frame = {
-            "type": "approval_request",
-            "request_id": approval_id,
-            "project_key": project_key,
-            "session_id": session_id,
-            "server_seq": server_seq,
-            "payload": public_payload,
-        }
-        self.store.upsert_pending_interaction(
-            request_id=approval_id,
-            kind="approval",
-            project_key=project_key,
-            session_id=session_id,
-            frame_type="approval_request",
-            payload=private_payload,
-            server_seq=server_seq,
-        )
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(frame, project_key=project_key)
-        await self._broadcast_run_status(
-            project_key=project_key,
-            session_id=session_id,
-            status="awaiting_approval",
-            payload={"approval_id": approval_id},
-        )
-        await self._send_private_notification(
-            PrivateNotificationKind.APPROVAL,
-            project_key=project_key,
-            session_id=session_id,
-            request_id=approval_id,
-            server_seq=server_seq,
-            sensitive_context={"command": command, "description": description, "metadata": metadata},
-        )
-        return SendResult(success=True, message_id=approval_id, raw_response=frame)
 
     def _handle_list_projects(self, envelope: Envelope) -> dict[str, Any]:
         limit = self._bounded_limit(envelope.payload.get("limit", 50))
@@ -2155,166 +776,6 @@ class LogosAdapter(BasePlatformAdapter):
             )
         )
 
-    async def _handle_playback_audio(self, envelope: Envelope) -> dict[str, Any] | None:
-        project_key = self._project_key_for(envelope)
-        payload = envelope.payload
-        session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
-        message_id = payload.get("message_id")
-        requested_mode = str(payload.get("mode") or "summary").strip().lower() or "summary"
-        selected_mode = requested_mode
-        selection_reason = f"requested_{requested_mode}"
-        text = None
-        if message_id:
-            message = self.store.get_message(session_id, str(message_id))
-            if message is None:
-                return error_frame(
-                    "message_not_found",
-                    f"no Logos message found for {session_id}/{message_id}",
-                    request_id=envelope.request_id,
-                    device_id=envelope.device_id,
-                    project_key=project_key,
-                )
-            if message.project_key != project_key:
-                return error_frame(
-                    "message_project_mismatch",
-                    "playback_audio message does not belong to the requested project",
-                    request_id=envelope.request_id,
-                    device_id=envelope.device_id,
-                    project_key=project_key,
-                )
-            if requested_mode == "final_auto":
-                if self._is_short_final_audio_text(message.content):
-                    selected_mode = "full"
-                    selection_reason = "short_final_full"
-                    text = message.content
-                else:
-                    summary, summary_status = self._summary_for_message(message)
-                    selected_mode = "summary"
-                    selection_reason = f"long_final_summary_{summary_status}"
-                    text = summary.summary_text
-            elif requested_mode == "summary":
-                summary, summary_status = self._summary_for_message(message)
-                selected_mode = "summary"
-                selection_reason = f"requested_summary_{summary_status}"
-                text = summary.summary_text
-            else:
-                selected_mode = requested_mode
-                selection_reason = "requested_full" if requested_mode == "full" else f"requested_{requested_mode}"
-                text = message.content
-        else:
-            text = payload.get("text") or payload.get("summary_text")
-            if requested_mode == "final_auto":
-                selected_mode = "full"
-                selection_reason = "payload_text_full"
-        if not isinstance(text, str) or not text.strip():
-            return error_frame(
-                "missing_audio_source",
-                "playback_audio requires payload.text or payload.message_id",
-                request_id=envelope.request_id,
-                device_id=envelope.device_id,
-                project_key=project_key,
-            )
-        audio_id = str(payload.get("audio_id") or f"audio-{uuid.uuid4()}")
-        return await self._stream_tts_audio(
-            text=text,
-            audio_id=audio_id,
-            project_key=project_key,
-            session_id=session_id,
-            request_id=envelope.request_id,
-            device_id=envelope.device_id,
-            message_id=str(message_id) if message_id else None,
-            mode=selected_mode,
-            requested_mode=requested_mode,
-            selection_reason=selection_reason,
-            source=getattr(self.tts, "source_name", "tts"),
-        )
-
-    async def _stream_tts_audio(
-        self,
-        *,
-        text: str,
-        audio_id: str,
-        project_key: str,
-        session_id: str,
-        request_id: str | None,
-        device_id: str | None,
-        message_id: str | None,
-        mode: str,
-        source: str,
-        requested_mode: str | None = None,
-        selection_reason: str | None = None,
-    ) -> dict[str, Any] | None:
-        requested_mode = requested_mode or mode
-        selection_reason = selection_reason or f"requested_{requested_mode}"
-        try:
-            chunks = self.tts.iter_chunks(text=text, audio_id=audio_id)
-        except Exception as exc:
-            error_type = exc.__class__.__name__
-            logger.warning(
-                "Logos TTS failed for audio_id=%s provider=%s error_type=%s",
-                audio_id,
-                source,
-                error_type,
-            )
-            return error_frame(
-                "tts_failed",
-                f"TTS failed for provider {source} ({error_type})",
-                request_id=request_id,
-                device_id=device_id,
-                project_key=project_key,
-            )
-        if not chunks:
-            return error_frame(
-                "tts_empty_audio",
-                "TTS produced no audio chunks",
-                request_id=request_id,
-                device_id=device_id,
-                project_key=project_key,
-            )
-        for chunk in chunks:
-            frame = {
-                "type": "audio_chunk",
-                "request_id": request_id,
-                "device_id": device_id,
-                "project_key": project_key,
-                "session_id": session_id,
-                "server_seq": self.store.next_server_seq(),
-                "payload": {
-                    "audio_id": audio_id,
-                    "message_id": message_id,
-                    "chunk_index": chunk.index,
-                    "mime_type": chunk.mime_type,
-                    "encoding": chunk.encoding,
-                    "mode": mode,
-                    "requested_mode": requested_mode,
-                    "selection_reason": selection_reason,
-                    "data": chunk.data_b64,
-                },
-            }
-            if self.ws_server is not None:
-                await self.ws_server.broadcast(frame, project_key=project_key)
-        end_frame = {
-            "type": "audio_end",
-            "request_id": request_id,
-            "device_id": device_id,
-            "project_key": project_key,
-            "session_id": session_id,
-            "server_seq": self.store.next_server_seq(),
-            "payload": {
-                "audio_id": audio_id,
-                "message_id": message_id,
-                "chunk_count": len(chunks),
-                "mime_type": chunks[0].mime_type,
-                "mode": mode,
-                "requested_mode": requested_mode,
-                "selection_reason": selection_reason,
-                "source": source,
-            },
-        }
-        if self.ws_server is not None:
-            await self.ws_server.broadcast(end_frame, project_key=project_key)
-            return None
-        return end_frame
 
     def _handle_messages_get(self, envelope: Envelope) -> dict[str, Any]:
         project_key = self._project_key_for(envelope)
