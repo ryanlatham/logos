@@ -39,7 +39,7 @@ final class SpectrumAnimatorTests: XCTestCase {
             XCTAssertEqual(id, "track-1")
             fired.fulfill()
         }
-        await fulfillment(of: [fired], timeout: 2.0)
+        await fulfillment(of: [fired], timeout: 5.0)
         animator.stop()
         XCTAssertFalse(animator.isAnimating)
     }

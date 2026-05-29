@@ -121,8 +121,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var notificationPlaybackSceneActive = false
     private var playbackAutoPlayKeysByAudioID: [String: String] = [:]
     private var playbackNotificationRouteKeysByAudioID: [String: String] = [:]
-    private var audioPlaybackStreamTimeoutAudioID: String?
-    private var audioPlaybackStreamTimeoutTask: Task<Void, Never>?
+    private let streamTimeout = PlaybackStreamTimeout()
 
     private static let staleSilenceNoticeText = "Logos has not heard from Hermes in a while. The run may still be working; waiting for the next adapter update."
     private static let maxStaleTimeoutInterval: TimeInterval = 86_400
@@ -131,7 +130,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private static let maxConnectionRetryEvents = 8
     private static let maxNotificationRouteAnchors = 8
     private static let notificationReplayContextWindow = 25
-    private static let audioPlaybackStreamTimeoutNanoseconds: UInt64 = 60_000_000_000
 
     init(
         store: SQLiteMessageStore = SQLiteMessageStore(),
@@ -1089,33 +1087,26 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func scheduleAudioPlaybackStreamTimeout(audioID: String) {
-        audioPlaybackStreamTimeoutTask?.cancel()
-        audioPlaybackStreamTimeoutAudioID = audioID
-        audioPlaybackStreamTimeoutTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: Self.audioPlaybackStreamTimeoutNanoseconds)
-            } catch {
-                return
-            }
-            guard let self,
-                  self.audioPlaybackStreamTimeoutAudioID == audioID,
-                  self.requestedAudioIDs.contains(audioID),
-                  self.audioPlaybackOverlay?.audioID == audioID
-            else { return }
-            switch self.audioPlaybackOverlay?.phase {
-            case .requesting, .receiving:
-                self.failAudioPlayback(audioID: audioID, message: "Audio stream timed out.")
-            default:
-                break
-            }
+        streamTimeout.schedule(audioID: audioID) { [weak self] id in
+            self?.handleStreamTimeoutFired(audioID: id)
         }
     }
 
     private func cancelAudioPlaybackStreamTimeout(audioID: String? = nil) {
-        guard audioID == nil || audioPlaybackStreamTimeoutAudioID == audioID else { return }
-        audioPlaybackStreamTimeoutTask?.cancel()
-        audioPlaybackStreamTimeoutTask = nil
-        audioPlaybackStreamTimeoutAudioID = nil
+        streamTimeout.cancel(audioID: audioID)
+    }
+
+    /// Watchdog fired: fail the stream only if it's still mid-request/receive for this id.
+    private func handleStreamTimeoutFired(audioID: String) {
+        guard requestedAudioIDs.contains(audioID),
+              audioPlaybackOverlay?.audioID == audioID
+        else { return }
+        switch audioPlaybackOverlay?.phase {
+        case .requesting, .receiving:
+            failAudioPlayback(audioID: audioID, message: "Audio stream timed out.")
+        default:
+            break
+        }
     }
 
     /// Single funnel for surfacing a client error: records it in the persistent, source-tagged
