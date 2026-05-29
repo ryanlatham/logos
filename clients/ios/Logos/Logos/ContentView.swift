@@ -119,6 +119,9 @@ struct ThreadTimelineSnapshot: Equatable {
     let connectionState: String
     let runStatus: String
     let focusRequest: FocusRequest?
+    let slashCommandMenuState: String
+    let slashCommandCatalogFingerprint: String
+    let slashCommandMenuHeight: CGFloat
 
     var messageFingerprint: String {
         [
@@ -200,6 +203,7 @@ struct ContentView: View {
     @State private var draft = ""
     @State private var clarifyAnswer = ""
     @StateObject private var voiceInput = VoiceInputController()
+    @AppStorage("logos.slashCommandRecents") private var slashCommandRecentsStorage = ""
 
     @State private var composerMode: ComposerMode = .paused
     @State private var showProjectSwitcher = false
@@ -238,6 +242,7 @@ struct ContentView: View {
     @State private var lastFollowedThreadContentFingerprint = ""
     @State private var lastForceFollowedThreadContentFingerprint: String?
     @State private var lastHandledThreadFocusRequestID: String?
+    @State private var slashCommandDismissedDraft: String?
     @State private var suppressNextThreadContentChangeForFocusClear = false
     @State private var hasInitializedThreadScroll = false
     @State private var threadScrollProximityScheduler = ThreadScrollProximityScheduler()
@@ -254,6 +259,7 @@ struct ContentView: View {
     @ScaledMetric(relativeTo: .body) private var recordDotSize: CGFloat = 10
     @ScaledMetric(relativeTo: .body) private var recordDotHaloSize: CGFloat = 16
     private let composerBottomSpacing: CGFloat = 8
+    private var composerTopSpacing: CGFloat { isSlashCommandMenuVisible ? 14 : 8 }
 
     @FocusState private var focusedField: FocusedField?
 
@@ -316,13 +322,20 @@ struct ContentView: View {
             if newPhase == .active {
                 client.resumeAudioForSceneActive()
                 client.connectIfAutoConnectEnabled()
+                client.requestCommandCatalog()
             } else if newPhase == .inactive || newPhase == .background {
                 client.pauseAudioForSceneBackground()
             }
         }
         .onChange(of: client.connectionState) { _, newState in
             voiceInput.updateTransportAvailable(newState == .connected)
-            if newState == .connected { pushEnabled = notifications.authorizationStatus.contains("allowed") }
+            if newState == .connected {
+                pushEnabled = notifications.authorizationStatus.contains("allowed")
+                client.requestCommandCatalog()
+            }
+        }
+        .onChange(of: draft) { _, newValue in
+            handleDraftChangedForSlashCommands(newValue)
         }
         .onChange(of: client.undeliveredSpeechDraft?.id) { _, _ in
             restoreUndeliveredSpeechDraft()
@@ -546,7 +559,9 @@ struct ContentView: View {
             .onChange(of: client.activeProjectKey) { _, _ in
                 resetThreadScrollForProjectChange()
             }
-            .onChange(of: threadTimelineSnapshot) { _, _ in handleThreadContentChanged() }
+            .onChange(of: threadTimelineSnapshot) { oldValue, newValue in
+                handleThreadTimelineSnapshotChanged(from: oldValue, to: newValue)
+            }
 
             if shouldShowThreadNewUpdatesButton {
                 threadNewUpdatesButton
@@ -561,6 +576,14 @@ struct ContentView: View {
             messages: client.messages,
             completedFinalMessageID: client.progressActivity?.completedFinalMessageID
         )
+    }
+
+    private func handleThreadTimelineSnapshotChanged(
+        from oldValue: ThreadTimelineSnapshot,
+        to newValue: ThreadTimelineSnapshot
+    ) {
+        guard oldValue.contentFingerprint != newValue.contentFingerprint else { return }
+        handleThreadContentChanged()
     }
 
     private var threadMessagesBeforeProgress: [LogosMessage] {
@@ -602,6 +625,59 @@ struct ContentView: View {
     private var voiceDraftText: String? {
         guard voiceInput.isRecording || voiceInput.isFinalizingTranscript else { return nil }
         return voiceInput.partialTranscript.isEmpty ? "Listening…" : voiceInput.partialTranscript
+    }
+
+    private var slashCommandDraftToken: String {
+        guard draft.hasPrefix("/") else { return "" }
+        return String(draft.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+    }
+
+    private var slashCommandRecents: [String] {
+        slashCommandRecentsStorage
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { $0.hasPrefix("/") }
+    }
+
+    private var slashCommandMatches: [SlashCommandSpec] {
+        client.slashCommandCatalog.rankedCommands(for: slashCommandDraftToken.isEmpty ? draft : slashCommandDraftToken, recents: slashCommandRecents)
+    }
+
+    private var slashCompletionItems: [SlashCommandCompletionItem] {
+        guard draft.contains(" ") else { return [] }
+        guard client.slashCommandCompletion.catalogVersion == client.slashCommandCatalog.catalogVersion else { return [] }
+        return client.slashCommandCompletion.items
+    }
+
+    private var selectedSlashCommand: SlashCommandSpec? {
+        guard slashCommandDraftToken.isEmpty == false else { return nil }
+        return client.slashCommandCatalog.command(canonical: slashCommandDraftToken)
+            ?? slashCommandMatches.first
+    }
+
+    private var slashCommandMenuState: SlashCommandMenuState {
+        guard draft.hasPrefix("/"), composerMode == .text else { return .inactive }
+        if slashCommandDismissedDraft == draft { return .dismissed }
+        if client.slashCommandCatalog.commands.isEmpty { return .loadingCatalog }
+        if let selectedSlashCommand, slashCommandDraftToken == selectedSlashCommand.canonical {
+            return selectedSlashCommand.argsHint.isEmpty ? .browsing : .argumentHelp
+        }
+        if slashCommandMatches.isEmpty { return .emptyResults }
+        if client.slashCommandCatalog.fallbackUsed { return .errorFallback }
+        return .browsing
+    }
+
+    private var isSlashCommandMenuVisible: Bool {
+        switch slashCommandMenuState {
+        case .inactive, .dismissed:
+            return false
+        case .loadingCatalog, .browsing, .argumentHelp, .emptyResults, .errorFallback:
+            return true
+        }
+    }
+
+    private var slashCommandMenuHeight: CGFloat {
+        isSlashCommandMenuVisible ? 236 : 0
     }
 
     private var threadTimelineSnapshot: ThreadTimelineSnapshot {
@@ -651,7 +727,10 @@ struct ContentView: View {
             runStatus: client.runStatus.rawValue,
             focusRequest: client.threadFocusRequest.map {
                 ThreadTimelineSnapshot.FocusRequest(id: $0.id, targetMessageID: $0.targetMessageID)
-            }
+            },
+            slashCommandMenuState: slashCommandMenuState.rawValue,
+            slashCommandCatalogFingerprint: client.slashCommandCatalog.catalogVersion,
+            slashCommandMenuHeight: slashCommandMenuHeight
         )
     }
 
@@ -764,18 +843,28 @@ struct ContentView: View {
     }
 
     private var composerBar: some View {
-        Group {
-            if #available(iOS 26.0, *) {
-                GlassEffectContainer(spacing: 8) {
-                    composerPillRow
-                }
-            } else {
-                composerPillRow
+        VStack(alignment: .leading, spacing: isSlashCommandMenuVisible ? 8 : 0) {
+            if isSlashCommandMenuVisible {
+                slashCommandMenu
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            composerPillSurface
         }
         .padding(.horizontal, 12)
-        .padding(.top, 14)
+        .padding(.top, composerTopSpacing)
         .padding(.bottom, composerBottomSpacing)
+        .animation(.snappy(duration: 0.2), value: isSlashCommandMenuVisible)
+    }
+
+    @ViewBuilder
+    private var composerPillSurface: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 8) {
+                composerPillRow
+            }
+        } else {
+            composerPillRow
+        }
     }
 
     private var composerPillRow: some View {
@@ -879,6 +968,110 @@ struct ContentView: View {
         .onTapGesture {
             focusedField = .composer
         }
+    }
+
+    private var slashCommandMenu: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            slashCommandMenuHeader
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: 4) {
+                    switch slashCommandMenuState {
+                    case .loadingCatalog:
+                        slashCommandStatusRow(icon: "clock", title: "Loading commands", detail: "Using local fallback until Hermes responds")
+                    case .emptyResults:
+                        slashCommandStatusRow(icon: "magnifyingglass", title: "No matches", detail: "Send anyway to let Hermes handle this slash command")
+                    case .argumentHelp:
+                        if let selectedSlashCommand {
+                            SlashCommandRow(command: selectedSlashCommand, isSelected: true) {
+                                applySlashCommand(selectedSlashCommand)
+                            }
+                        }
+                    case .errorFallback:
+                        slashCommandStatusRow(icon: "wifi.exclamationmark", title: "Fallback commands", detail: "Hermes catalog is unavailable; slash text still sends normally")
+                        slashCommandRows
+                    case .browsing:
+                        if slashCompletionItems.isEmpty {
+                            slashCommandRows
+                        } else {
+                            slashCompletionRows
+                        }
+                    case .inactive, .dismissed:
+                        EmptyView()
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 168)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.logosGlass)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.34), radius: 18, x: 0, y: 10)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("slashCommandMenu")
+    }
+
+    private var slashCommandMenuHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "terminal")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.logosAmber)
+            Text("Commands")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.logosLabel2)
+            Spacer()
+            if client.slashCommandCatalog.fallbackUsed {
+                Text("Fallback")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel3)
+            }
+        }
+        .padding(.horizontal, 4)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var slashCommandRows: some View {
+        ForEach(Array(slashCommandMatches.prefix(8))) { command in
+            SlashCommandRow(command: command, isSelected: command.canonical == selectedSlashCommand?.canonical) {
+                applySlashCommand(command)
+            }
+            .disabled(command.available == false)
+        }
+    }
+
+    private var slashCompletionRows: some View {
+        ForEach(Array(slashCompletionItems.prefix(8))) { item in
+            SlashCommandCompletionRow(item: item) {
+                applySlashCompletion(item)
+            }
+        }
+    }
+
+    private func slashCommandStatusRow(icon: String, title: String, detail: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.logosLabel3)
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.logosLabel)
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.logosLabel3)
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(Color.logosBG2.opacity(0.68), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 
     private func recordPill(isRecording: Bool) -> some View {
@@ -1108,7 +1301,18 @@ struct ContentView: View {
                     AttachRow(icon: "photo.on.rectangle", title: "Photo Library", detail: "Stubbed until attachments ship")
                     AttachRow(icon: "camera", title: "Take Photo", detail: "Stubbed until camera capture ships")
                     AttachRow(icon: "doc", title: "Files", detail: "Stubbed until file upload ships")
-                    AttachRow(icon: "terminal", title: "Paste code", detail: "Stubbed until rich snippets ship", isLast: true)
+                    Button {
+                        showAttachSheet = false
+                        composerMode = .text
+                        draft = "/"
+                        slashCommandDismissedDraft = nil
+                        focusedField = .composer
+                    } label: {
+                        AttachRow(icon: "terminal", title: "Commands", detail: "Browse Hermes slash commands")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("commandsAttachRow")
+                    AttachRow(icon: "curlybraces", title: "Paste code", detail: "Stubbed until rich snippets ship", isLast: true)
                 }
                 .background(Color.logosBG2, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
@@ -2009,10 +2213,60 @@ struct ContentView: View {
 
     private func submitDraft() {
         if client.sendText(draft) {
+            rememberSlashCommandIfNeeded(draft)
             draft = ""
             focusedField = nil
+            slashCommandDismissedDraft = nil
             handleThreadContentChanged(forceFollow: true)
         }
+    }
+
+    private func handleDraftChangedForSlashCommands(_ value: String) {
+        if value.isEmpty || value.hasPrefix("/") == false {
+            slashCommandDismissedDraft = nil
+            return
+        }
+        if slashCommandDismissedDraft != nil, slashCommandDismissedDraft != value {
+            slashCommandDismissedDraft = nil
+        }
+        if value.contains(" ") {
+            client.requestSlashCommandCompletion(text: value)
+        }
+    }
+
+    private func applySlashCommand(_ command: SlashCommandSpec) {
+        guard command.available else { return }
+        draft = client.slashCommandCatalog.replacementText(for: command)
+        rememberSlashCommand(command.canonical)
+        slashCommandDismissedDraft = nil
+        focusedField = .composer
+    }
+
+    private func applySlashCompletion(_ item: SlashCommandCompletionItem) {
+        guard item.replacementStart >= 0,
+              item.replacementEnd >= item.replacementStart,
+              item.replacementEnd <= draft.count,
+              let start = draft.index(draft.startIndex, offsetBy: item.replacementStart, limitedBy: draft.endIndex),
+              let end = draft.index(draft.startIndex, offsetBy: item.replacementEnd, limitedBy: draft.endIndex)
+        else { return }
+        draft.replaceSubrange(start..<end, with: item.replacementText)
+        rememberSlashCommand(item.canonical)
+        focusedField = .composer
+    }
+
+    private func rememberSlashCommandIfNeeded(_ text: String) {
+        guard text.hasPrefix("/") else { return }
+        let token = String(text.split(whereSeparator: \.isWhitespace).first ?? "")
+        if let command = client.slashCommandCatalog.command(canonical: token) {
+            rememberSlashCommand(command.canonical)
+        }
+    }
+
+    private func rememberSlashCommand(_ canonical: String) {
+        guard canonical.hasPrefix("/") else { return }
+        var recents = slashCommandRecents.filter { $0 != canonical }
+        recents.insert(canonical, at: 0)
+        slashCommandRecentsStorage = recents.prefix(8).joined(separator: "\n")
     }
 
     private func submitClarificationAnswer() {
@@ -2093,6 +2347,9 @@ struct ContentView: View {
     private func closeTransientOverlays(exceptProjectSwitcher: Bool = false, exceptAttachSheet: Bool = false) {
         if !exceptProjectSwitcher { showProjectSwitcher = false }
         if !exceptAttachSheet { showAttachSheet = false }
+        if draft.hasPrefix("/") {
+            slashCommandDismissedDraft = draft
+        }
     }
 
     private var shouldShowRunControl: Bool {
@@ -2349,6 +2606,16 @@ private enum FocusedField: Hashable {
     case adapterURL
     case deviceKey
     case clarifyAnswer
+}
+
+private enum SlashCommandMenuState: String {
+    case inactive
+    case loadingCatalog
+    case browsing
+    case argumentHelp
+    case emptyResults
+    case dismissed
+    case errorFallback
 }
 
 enum ComposerMode: Equatable {
@@ -3122,6 +3389,92 @@ private struct AttachRow: View {
                 Rectangle().fill(Color.logosHairline).frame(height: 0.5).padding(.leading, 44)
             }
         }
+    }
+}
+
+private struct SlashCommandRow: View {
+    let command: SlashCommandSpec
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: command.available ? "terminal" : "lock.slash")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(command.available ? Color.logosAmber : Color.logosLabel3)
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(command.canonical)
+                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(command.available ? Color.logosLabel : Color.logosLabel3)
+                            .lineLimit(1)
+                        Text(command.description)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.logosLabel2)
+                            .lineLimit(1)
+                    }
+                    Text(secondaryText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(command.available ? Color.logosLabel3 : Color.logosAmber)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.logosAmberSoft2 : Color.logosBG2.opacity(0.58), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(isSelected ? Color.logosAmber.opacity(0.5) : Color.logosHairline, lineWidth: 0.6))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("slashCommandRow.\(command.canonical)")
+        .accessibilityLabel("\(command.canonical), \(command.description)")
+        .accessibilityHint(command.available ? "Completes this slash command" : command.unavailableReason)
+    }
+
+    private var secondaryText: String {
+        if command.available == false, command.unavailableReason.isEmpty == false {
+            return command.unavailableReason
+        }
+        let usage = command.argsHint.isEmpty ? command.category : "\(command.argsHint) · \(command.category)"
+        let aliases = command.aliases.isEmpty ? "" : " · \(command.aliases.joined(separator: ", "))"
+        return "\(usage) · \(command.source)\(aliases)"
+    }
+}
+
+private struct SlashCommandCompletionRow: View {
+    let item: SlashCommandCompletionItem
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.logosAmber)
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.display)
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.logosLabel)
+                        .lineLimit(1)
+                    Text(item.detail.isEmpty ? item.canonical : item.detail)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.logosLabel3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.logosBG2.opacity(0.58), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.logosHairline, lineWidth: 0.6))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("slashCompletionRow.\(item.display)")
+        .accessibilityLabel(item.display)
+        .accessibilityHint("Completes this slash command argument")
     }
 }
 

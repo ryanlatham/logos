@@ -58,6 +58,8 @@ Python source of truth:
 - `speech`
 - `text_input`
 - `text_message`
+- `commands_get`
+- `commands_complete`
 - `switch_project`
 - `list_projects`
 - `new_project`
@@ -74,6 +76,8 @@ Python source of truth:
 - `hello`
 - `registered`
 - `projects_list`
+- `commands_list`
+- `commands_complete_result`
 - `messages_batch`
 - `state_update`
 - `run_status`
@@ -85,6 +89,46 @@ Python source of truth:
 - `tool_progress`
 - `error`
 - `heartbeat_ack`
+
+## Slash command discovery
+
+Slash commands remain plain text execution inputs: the iOS app sends `/...` through `text_input` and Hermes decides what the command does. Logos only exposes read-only discovery and completion frames.
+
+`commands_get` requests a bounded catalog:
+
+```json
+{
+  "type": "commands_get",
+  "request_id": "uuid",
+  "payload": { "include_unavailable": true }
+}
+```
+
+`commands_list.payload` contains:
+
+- `schema_version`
+- `catalog_version`
+- `generated_at`
+- `fallback_used`
+- `warnings`
+- `commands`
+
+Each command has `id`, `trigger`, `canonical`, `aliases`, `description`, `category`, `args_hint`, `subcommands`, `source`, `available`, `unavailable_reason`, `requires_args`, `adds_trailing_space`, and `deprecated`.
+
+`commands_complete` is read-only and accepts a leading-slash draft fragment:
+
+```json
+{
+  "type": "commands_complete",
+  "request_id": "uuid",
+  "payload": {
+    "catalog_version": "fingerprint",
+    "text": "/model o"
+  }
+}
+```
+
+`commands_complete_result.payload.items` use absolute replacement offsets: `canonical`, `replacement_text`, `replacement_start`, `replacement_end`, `display`, `detail`, `kind`, and `adds_trailing_space`.
 
 ## Handshake client config
 

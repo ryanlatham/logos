@@ -21,6 +21,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 from .apns import APNSClient, PrivateNotificationKind, build_private_apns_payload
+from . import commands as command_catalog
 from .fast_llm import FastModelResult, build_fast_model, is_safe_direct_response_for_request
 from .pairing import (
     DEFAULT_PAIRING_TTL_SECONDS,
@@ -653,6 +654,10 @@ class LogosAdapter(BasePlatformAdapter):
             return await self._handle_final_text(envelope)
         if envelope.type == "messages_get":
             return self._handle_messages_get(envelope)
+        if envelope.type == "commands_get":
+            return self._handle_commands_get(envelope)
+        if envelope.type == "commands_complete":
+            return self._handle_commands_complete(envelope)
         if envelope.type == "playback_audio":
             return await self._handle_playback_audio(envelope)
         if envelope.type == "list_projects":
@@ -692,6 +697,74 @@ class LogosAdapter(BasePlatformAdapter):
             device_id=envelope.device_id,
             project_key=envelope.project_key,
         )
+
+    def _handle_commands_get(self, envelope: Envelope) -> dict[str, Any]:
+        include_unavailable = bool(envelope.payload.get("include_unavailable", True))
+        try:
+            payload = command_catalog.build_command_catalog(
+                include_unavailable=include_unavailable,
+                config_extra=getattr(self.config, "extra", {}) or {},
+            )
+        except Exception:
+            logger.debug("Logos: command catalog build failed", exc_info=True)
+            payload = command_catalog.build_command_catalog(
+                include_unavailable=include_unavailable,
+                hermes_commands=None,
+                config_extra={},
+            )
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append("Command catalog failed; using fallback catalog.")
+        payload["request_id"] = envelope.request_id
+        return {
+            "type": "commands_list",
+            "request_id": envelope.request_id,
+            "device_id": envelope.device_id,
+            "project_key": envelope.project_key,
+            "payload": payload,
+        }
+
+    def _handle_commands_complete(self, envelope: Envelope) -> dict[str, Any]:
+        text = envelope.payload.get("text")
+        if not isinstance(text, str):
+            return error_frame(
+                "invalid_commands_complete",
+                "commands_complete requires text",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=envelope.project_key,
+            )
+        try:
+            catalog = command_catalog.build_command_catalog(
+                include_unavailable=True,
+                config_extra=getattr(self.config, "extra", {}) or {},
+            )
+            payload = command_catalog.complete_slash_command(text, catalog=catalog)
+        except command_catalog.CommandCompletionError as exc:
+            return error_frame(
+                "invalid_commands_complete",
+                str(exc),
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=envelope.project_key,
+            )
+        except Exception:
+            logger.debug("Logos: command completion failed", exc_info=True)
+            fallback_catalog = command_catalog.build_command_catalog(
+                include_unavailable=True,
+                hermes_commands=None,
+                config_extra={},
+            )
+            payload = command_catalog.complete_slash_command(text, catalog=fallback_catalog)
+            payload["fallback_used"] = True
+            payload.setdefault("warnings", []).append("Command completion failed; using fallback catalog.")
+        payload["request_id"] = envelope.request_id
+        return {
+            "type": "commands_complete_result",
+            "request_id": envelope.request_id,
+            "device_id": envelope.device_id,
+            "project_key": envelope.project_key,
+            "payload": payload,
+        }
 
     def _handle_register_device(self, envelope: Envelope) -> dict[str, Any]:
         device_id = str(envelope.device_id or envelope.payload.get("device_id") or "").strip()

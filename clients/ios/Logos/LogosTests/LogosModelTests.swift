@@ -14,6 +14,100 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(ThreadAutoFollowPolicy.shouldApplyFollow(force: true, shouldFollowThread: false, isThreadUserDetached: true))
     }
 
+    func testSlashCommandCatalogDecodesRanksAndReplacesCommands() throws {
+        let catalog = try XCTUnwrap(SlashCommandCatalog.from(dictionary: [
+            "schema_version": 1,
+            "catalog_version": "v-test",
+            "generated_at": "2026-05-27T00:00:00Z",
+            "fallback_used": false,
+            "warnings": [],
+            "commands": [
+                [
+                    "id": "builtin:resume",
+                    "trigger": "/resume",
+                    "canonical": "/resume",
+                    "aliases": [],
+                    "description": "Resume a named session",
+                    "category": "Session",
+                    "args_hint": "[name]",
+                    "subcommands": [],
+                    "source": "builtin",
+                    "available": true,
+                    "unavailable_reason": "",
+                    "requires_args": false,
+                    "adds_trailing_space": true,
+                    "deprecated": false
+                ],
+                [
+                    "id": "builtin:queue",
+                    "trigger": "/queue",
+                    "canonical": "/queue",
+                    "aliases": ["/q"],
+                    "description": "Queue a prompt",
+                    "category": "Session",
+                    "args_hint": "<prompt>",
+                    "subcommands": [],
+                    "source": "builtin",
+                    "available": true,
+                    "unavailable_reason": "",
+                    "requires_args": true,
+                    "adds_trailing_space": true,
+                    "deprecated": false
+                ],
+                [
+                    "id": "builtin:sessions",
+                    "trigger": "/sessions",
+                    "canonical": "/sessions",
+                    "aliases": [],
+                    "description": "Browse sessions",
+                    "category": "Session",
+                    "args_hint": "",
+                    "subcommands": [],
+                    "source": "builtin",
+                    "available": false,
+                    "unavailable_reason": "not available in Logos",
+                    "requires_args": false,
+                    "adds_trailing_space": false,
+                    "deprecated": false
+                ]
+            ]
+        ]))
+
+        XCTAssertEqual(catalog.catalogVersion, "v-test")
+        XCTAssertEqual(catalog.commands.count, 3)
+        XCTAssertEqual(catalog.rankedCommands(for: "/res", recents: []).first?.canonical, "/resume")
+        XCTAssertEqual(catalog.rankedCommands(for: "/q", recents: []).first?.canonical, "/queue")
+        XCTAssertEqual(catalog.rankedCommands(for: "/", recents: ["/queue"]).first?.canonical, "/queue")
+        XCTAssertEqual(catalog.replacementText(for: try XCTUnwrap(catalog.command(canonical: "/resume"))), "/resume ")
+        XCTAssertEqual(catalog.replacementText(for: try XCTUnwrap(catalog.command(canonical: "/sessions"))), "/sessions")
+        XCTAssertEqual(catalog.rankedCommands(for: "/zzz", recents: []).count, 0)
+    }
+
+    func testSlashCommandCompletionResultDecodesAbsoluteReplacement() throws {
+        let result = try XCTUnwrap(SlashCommandCompletionResult.from(dictionary: [
+            "catalog_version": "v-test",
+            "fallback_used": false,
+            "warnings": [],
+            "items": [
+                [
+                    "canonical": "/resume",
+                    "replacement_text": "/resume ",
+                    "replacement_start": 0,
+                    "replacement_end": 4,
+                    "display": "/resume",
+                    "detail": "[name]",
+                    "kind": "command",
+                    "adds_trailing_space": true
+                ]
+            ]
+        ]))
+
+        XCTAssertEqual(result.catalogVersion, "v-test")
+        XCTAssertEqual(result.items.first?.replacementText, "/resume ")
+        XCTAssertEqual(result.items.first?.replacementStart, 0)
+        XCTAssertEqual(result.items.first?.replacementEnd, 4)
+    }
+
     func testThreadTimelineSnapshotChangesForEveryVisibleThreadSignal() {
         let base = makeThreadTimelineSnapshot()
 
@@ -39,6 +133,17 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(connectionState: "disconnected"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(runStatus: "cancelling"))
         XCTAssertNotEqual(base, makeThreadTimelineSnapshot(focusRequest: .init(id: "focus-1", targetMessageID: "session:final")))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(slashCommandMenuState: "browsing"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(slashCommandCatalogFingerprint: "commands-v2"))
+        XCTAssertNotEqual(base, makeThreadTimelineSnapshot(slashCommandMenuHeight: 236))
+    }
+
+    func testSlashCommandMenuChromeDoesNotChangeThreadContentFingerprint() {
+        let base = makeThreadTimelineSnapshot()
+
+        XCTAssertEqual(base.contentFingerprint, makeThreadTimelineSnapshot(slashCommandMenuState: "browsing").contentFingerprint)
+        XCTAssertEqual(base.contentFingerprint, makeThreadTimelineSnapshot(slashCommandCatalogFingerprint: "commands-v2").contentFingerprint)
+        XCTAssertEqual(base.contentFingerprint, makeThreadTimelineSnapshot(slashCommandMenuHeight: 236).contentFingerprint)
     }
 
     private func makeThreadTimelineSnapshot(
@@ -57,7 +162,10 @@ final class LogosModelTests: XCTestCase {
         composerBottomPadding: CGFloat = 28,
         connectionState: String = "connected",
         runStatus: String = "running",
-        focusRequest: ThreadTimelineSnapshot.FocusRequest? = nil
+        focusRequest: ThreadTimelineSnapshot.FocusRequest? = nil,
+        slashCommandMenuState: String = "inactive",
+        slashCommandCatalogFingerprint: String = "none",
+        slashCommandMenuHeight: CGFloat = 0
     ) -> ThreadTimelineSnapshot {
         ThreadTimelineSnapshot(
             activeProjectKey: activeProjectKey,
@@ -75,7 +183,10 @@ final class LogosModelTests: XCTestCase {
             composerBottomPadding: composerBottomPadding,
             connectionState: connectionState,
             runStatus: runStatus,
-            focusRequest: focusRequest
+            focusRequest: focusRequest,
+            slashCommandMenuState: slashCommandMenuState,
+            slashCommandCatalogFingerprint: slashCommandCatalogFingerprint,
+            slashCommandMenuHeight: slashCommandMenuHeight
         )
     }
 
@@ -378,6 +489,52 @@ final class LogosModelTests: XCTestCase {
             "register_device",
             "list_projects"
         ])
+    }
+
+    @MainActor
+    func testCommandCatalogRequestAndStaleResponseHandling() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.requestCommandCatalog())
+        let requestFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestID = try XCTUnwrap(requestFrame["request_id"] as? String)
+        XCTAssertEqual(requestFrame["type"] as? String, "commands_get")
+
+        client.handleFrameString(#"""
+        {"type":"commands_list","request_id":"stale-catalog","payload":{"schema_version":1,"catalog_version":"old","generated_at":"2026-05-27T00:00:00Z","fallback_used":false,"warnings":[],"commands":[]}}
+        """#)
+        XCTAssertNotEqual(client.slashCommandCatalog.catalogVersion, "old")
+
+        client.handleFrameString("""
+        {"type":"commands_list","request_id":"\(requestID)","payload":{"schema_version":1,"catalog_version":"fresh","generated_at":"2026-05-27T00:00:00Z","fallback_used":false,"warnings":[],"commands":[{"id":"builtin:resume","trigger":"/resume","canonical":"/resume","aliases":[],"description":"Resume","category":"Session","args_hint":"[name]","subcommands":[],"source":"builtin","available":true,"unavailable_reason":"","requires_args":false,"adds_trailing_space":true,"deprecated":false}]}}
+        """)
+
+        XCTAssertEqual(client.slashCommandCatalog.catalogVersion, "fresh")
+        XCTAssertEqual(client.slashCommandCatalog.commands.first?.canonical, "/resume")
+    }
+
+    @MainActor
+    func testCommandCompletionRequestAndStaleResponseHandling() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+
+        XCTAssertTrue(client.requestSlashCommandCompletion(text: "/res"))
+        let requestFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        let requestID = try XCTUnwrap(requestFrame["request_id"] as? String)
+        XCTAssertEqual(requestFrame["type"] as? String, "commands_complete")
+
+        client.handleFrameString(#"""
+        {"type":"commands_complete_result","request_id":"stale-completion","payload":{"catalog_version":"v1","fallback_used":false,"warnings":[],"items":[{"canonical":"/wrong","replacement_text":"/wrong","replacement_start":0,"replacement_end":4,"display":"/wrong","detail":"","kind":"command","adds_trailing_space":false}]}}
+        """#)
+        XCTAssertTrue(client.slashCommandCompletion.items.isEmpty)
+
+        client.handleFrameString("""
+        {"type":"commands_complete_result","request_id":"\(requestID)","payload":{"catalog_version":"v1","fallback_used":false,"warnings":[],"items":[{"canonical":"/resume","replacement_text":"/resume ","replacement_start":0,"replacement_end":4,"display":"/resume","detail":"[name]","kind":"command","adds_trailing_space":true}]}}
+        """)
+
+        XCTAssertEqual(client.slashCommandCompletion.items.first?.canonical, "/resume")
+        XCTAssertEqual(client.slashCommandCompletion.items.first?.replacementText, "/resume ")
     }
 
     @MainActor
@@ -1969,7 +2126,9 @@ final class LogosModelTests: XCTestCase {
         XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.isExpanded) { _, _ in handleThreadContentChanged() }"))
         XCTAssertFalse(contentViewSource.contains(".onChange(of: client.progressActivity?.isComplete) { _, _ in handleThreadContentChanged() }"))
         XCTAssertFalse(contentViewSource.contains(".onChange(of: client.runStatus) { _, _ in handleThreadContentChanged() }"))
-        XCTAssertTrue(contentViewSource.contains(".onChange(of: threadTimelineSnapshot) { _, _ in handleThreadContentChanged() }"))
+        XCTAssertTrue(contentViewSource.contains(".onChange(of: threadTimelineSnapshot) { oldValue, newValue in"))
+        XCTAssertTrue(contentViewSource.contains("handleThreadTimelineSnapshotChanged(from: oldValue, to: newValue)"))
+        XCTAssertTrue(contentViewSource.contains("oldValue.contentFingerprint != newValue.contentFingerprint"))
         XCTAssertTrue(contentViewSource.contains("threadScrollPosition.scrollTo(id: \"thread-bottom\", anchor: .bottom)"))
         XCTAssertTrue(contentViewSource.contains(".defaultScrollAnchor(.bottom, for: .alignment)"))
         XCTAssertTrue(contentViewSource.contains("ThreadAutoFollowPolicy.isNearBottom"))
@@ -2016,6 +2175,19 @@ final class LogosModelTests: XCTestCase {
         XCTAssertFalse(contentViewSource.contains(".lineLimit(4)"))
         XCTAssertFalse(contentViewSource.contains("Text(latestEvent.text)"))
         XCTAssertTrue(contentViewSource.contains("event.count > 1"))
+    }
+
+    func testSlashCommandMenuKeepsComposerPillInStableViewHierarchy() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let projectDirectory = testsDirectory.deletingLastPathComponent()
+        let contentViewSource = try String(contentsOf: projectDirectory.appendingPathComponent("Logos/ContentView.swift"), encoding: .utf8)
+        let composerBarStart = try XCTUnwrap(contentViewSource.range(of: "private var composerBar: some View"))
+        let composerBarEnd = try XCTUnwrap(contentViewSource.range(of: "@ViewBuilder\n    private var composerPillSurface"))
+        let composerBarSource = String(contentViewSource[composerBarStart.lowerBound..<composerBarEnd.lowerBound])
+
+        XCTAssertTrue(composerBarSource.contains("VStack(alignment: .leading"))
+        XCTAssertEqual(composerBarSource.components(separatedBy: "composerPillSurface").count - 1, 1)
+        XCTAssertFalse(composerBarSource.contains("} else {\n                composerPillSurface"))
     }
 
     func testConnectionLifecycleRejectsStaleCallbacksAfterDisconnectOrReconnect() throws {
@@ -2185,6 +2357,31 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.runStatus, .running)
     }
 
+    @MainActor
+    func testScopedIdleRunStatusCompletesCurrentSlashCommandProgress() throws {
+        let socket = RecordingWebSocketTask()
+        let client = makeSocketBackedClient(socket: socket)
+        XCTAssertTrue(client.sendText("/status"))
+        let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
+        let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+
+        client.handleFrameString("""
+        {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"gateway_status","progress_kind":"gateway_status","text":"Slash command is running"}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .running)
+        XCTAssertEqual(client.progressActivity?.isComplete, false)
+
+        client.handleFrameString("""
+        {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle"}}
+        """)
+
+        XCTAssertEqual(client.runStatus, .idle)
+        XCTAssertEqual(client.progressActivity?.isComplete, true)
+        XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
+    }
+
+    @MainActor
     @MainActor
     func testLegacyGatewayStillWorkingMessageAggregatesOutsideMessagesAndNeverAutoplays() throws {
         let socket = RecordingWebSocketTask()

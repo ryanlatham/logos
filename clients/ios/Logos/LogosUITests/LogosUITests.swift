@@ -38,6 +38,39 @@ final class LogosUITests: XCTestCase {
         app.buttons["text"].tap()
     }
 
+    func testSlashCommandMenuFiltersAndCompletesCommand() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        openTextComposer(in: app)
+
+        let composer = app.textFields["composerTextField"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 8))
+        composer.tap()
+        composer.typeText("/")
+        XCTAssertTrue(app.otherElements["slashCommandMenu"].waitForExistence(timeout: 8))
+        app.typeText("res")
+
+        let resume = app.buttons["slashCommandRow./resume"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 8))
+        resume.tap()
+
+        XCTAssertEqual(composer.value as? String, "/resume ")
+    }
+
+    func testSlashCommandSubmissionAnchorsThreadLikeNewMessage() throws {
+        let app = launchConfiguredApp()
+        XCTAssertTrue(waitForConnectedHome(in: app))
+        createUniqueProject(in: app)
+
+        send("/status", in: app)
+
+        let responseMessage = app.staticTexts["Mock Hermes received: /status"].firstMatch
+        XCTAssertTrue(responseMessage.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForVisible(responseMessage, in: app, timeout: 8))
+        assertElementSitsNearComposer(responseMessage, in: app, message: "Slash command responses should stay visually anchored like new chat messages")
+        XCTAssertFalse(app.buttons["threadNewUpdatesButton"].exists)
+    }
+
     func testProjectTitleFieldAcceptsImmediateTyping() throws {
         let app = launchConfiguredApp()
         XCTAssertTrue(waitForConnectedHome(in: app))
