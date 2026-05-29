@@ -765,6 +765,24 @@ Live APNS delivery uses Apple's HTTP/2 provider API. The Hermes runtime must hav
 
 Private-payload rule: pushes should say only that Logos/Hermes needs attention, finished, or needs input. Fetch response text, summaries, commands, and transcripts over the authenticated WebSocket after reconnect.
 
+## TestFlight and distribution
+
+Logos is a private client to your own Mac-hosted adapter; it collects no data and does not track users (see `clients/ios/Logos/Logos/PrivacyInfo.xcprivacy`). What the project configures vs. what you must provide:
+
+Already configured in the repo:
+
+- **Privacy manifest** (`PrivacyInfo.xcprivacy`): declares no tracking/no data collection and the one required-reason API in use (UserDefaults, `CA92.1`).
+- **APNS environment per build configuration**: Debug/device builds use `Logos.entitlements` (`aps-environment: development` → sandbox); Release/TestFlight builds use `LogosRelease.entitlements` (`aps-environment: production`). The adapter records each device's APNS environment, so sandbox dev devices and production TestFlight devices coexist.
+- **App-layer encryption** for wider use: the adapter negotiates ChaCha20-Poly1305/AES-GCM with the app by default (`LOGOS_ENC_MODE=negotiate`). Set `LOGOS_ENC_MODE=required` for hardened deployments once all your devices run a build that supports it.
+
+What you must provide:
+
+1. **Bundle identifier** you own. The placeholder is `dev.logos.app`; change `PRODUCT_BUNDLE_IDENTIFIER` (and the App ID + `LOGOS_APNS_BUNDLE_ID`) to your reverse-DNS id, then regenerate the project.
+2. **Signing team**: open the project in Xcode and select your `DEVELOPMENT_TEAM` under Signing & Capabilities (the project uses automatic signing).
+3. **Push Notifications capability** on the App ID, with an APNS Auth Key configured per [APNS setup](#apns-setup).
+4. **Build number** for each upload: bump `CFBundleVersion` (e.g. `agvtool` or a release-workflow build number) before archiving for TestFlight.
+5. **Tester onboarding**: testers pair by opening a `logos://pair#…` deep link or scanning the QR from `/logos-pair`; send them a longer-TTL invite (the in-app pairing flow handles the token exchange and Keychain storage).
+
 ## Troubleshooting
 
 ### `ModuleNotFoundError: gateway` or `ModuleNotFoundError: logos`
