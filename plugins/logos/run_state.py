@@ -250,3 +250,9 @@ class RunStateMixin:
             device_id=current.device_id,
             payload=payload,
         )
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            event_name = "run.cancelled" if outcome_name == "CANCELLED" else (
+                "run.interrupted" if interrupted else "run.reconciled"
+            )
+            telemetry.event(event_name, final_status=final_status, had_origin_text=bool(current.origin_text))

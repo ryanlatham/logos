@@ -68,6 +68,7 @@ from .message_state import MessageStateMixin
 from .request_context import current_request_context, request_scope
 from .run_state import RunStateMixin
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
+from .telemetry import TelemetryLog
 from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
 from .ws_server import LogosWebSocketServer
@@ -153,6 +154,7 @@ class LogosAdapter(
         )
         self.apns = APNSClient.from_env()
         self._notifier = PrivateNotifier()
+        self._telemetry = TelemetryLog()
         self.latest_pairing_invite: PairingInvite | None = None
         self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_keepalive_sent_at: dict[tuple[str, str], float] = {}
