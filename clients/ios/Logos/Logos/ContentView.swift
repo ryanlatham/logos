@@ -220,6 +220,7 @@ struct ContentView: View {
     @State private var draft = ""
     @State private var clarifyAnswer = ""
     @StateObject private var voiceInput = VoiceInputController()
+    @StateObject private var appCoordinator = AppCoordinator()
     @AppStorage("logos.slashCommandRecents") private var slashCommandRecentsStorage = ""
 
     @State private var composerMode: ComposerMode = .paused
@@ -336,21 +337,10 @@ struct ContentView: View {
         .animation(.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.28), value: showSettings)
         .onAppear(perform: configureRuntime)
         .onChange(of: scenePhase) { _, newPhase in
-            client.updateSceneActivationForPlayback(isActive: newPhase == .active)
-            if newPhase == .active {
-                client.resumeAudioForSceneActive()
-                client.connectIfAutoConnectEnabled()
-                client.requestCommandCatalog()
-            } else if newPhase == .inactive || newPhase == .background {
-                client.pauseAudioForSceneBackground()
-            }
+            handleScenePhaseChange(newPhase)
         }
         .onChange(of: client.connectionState) { _, newState in
-            voiceInput.updateTransportAvailable(newState == .connected)
-            if newState == .connected {
-                pushEnabled = notifications.authorizationStatus.contains("allowed")
-                client.requestCommandCatalog()
-            }
+            handleConnectionStateChange(newState)
         }
         .onChange(of: draft) { _, newValue in
             handleDraftChangedForSlashCommands(newValue)
@@ -375,12 +365,8 @@ struct ContentView: View {
             }
         }
         .onOpenURL { url in
-            if let route = LogosPairingRoute.from(url: url) {
+            if let route = appCoordinator.handleURL(url) {
                 pendingPairingRoute = route
-                return
-            }
-            if let route = LogosNotificationRoute.from(url: url) {
-                notifications.route(route)
             }
         }
         .alert(
@@ -1838,29 +1824,37 @@ struct ContentView: View {
     }
 
     private func configureRuntime() {
-        client.connectIfRequestedByEnvironment()
-        voiceInput.configureCallbacks(
-            partial: { text, inputID, partialSeq, startedAt in
-                client.sendSpeech(text: text, isFinal: false, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
-            },
-            final: { text, inputID, partialSeq, startedAt in
+        // App-lifecycle orchestration now lives in AppCoordinator (WS1 P6). ContentView keeps
+        // only the dependency-wiring seam plus the closures that write back into its @State.
+        appCoordinator.attach(
+            client: client,
+            voiceInput: voiceInput,
+            notifications: notifications,
+            onVoiceFinal: { text, inputID, partialSeq, startedAt in
                 handleFinalVoiceTranscript(text: text, inputID: inputID, partialSeq: partialSeq, startedAt: startedAt)
+            },
+            onDerivedFlags: { speechEnabled, pushAllowed in
+                onDeviceSpeech = speechEnabled
+                pushEnabled = pushAllowed
             }
         )
-        notifications.onDeviceToken = { token in
-            client.registerDevice(apnsToken: token)
-        }
-        if let token = notifications.deviceToken {
-            client.registerDevice(apnsToken: token)
-        }
+        appCoordinator.start()
         client.updateSceneActivationForPlayback(isActive: scenePhase == .active)
         notifications.onRoute = { route in
             client.handleNotificationRoute(route)
         }
-        voiceInput.refreshAvailability()
-        voiceInput.updateTransportAvailable(client.connectionState == .connected)
-        onDeviceSpeech = voiceInput.voiceEnabled
-        pushEnabled = notifications.authorizationStatus.contains("allowed")
+        appCoordinator.activateInputs()
+    }
+
+    private func handleScenePhaseChange(_ newPhase: ScenePhase) {
+        appCoordinator.handleScenePhaseChange(
+            isActive: newPhase == .active,
+            isBackgroundOrInactive: newPhase == .inactive || newPhase == .background
+        )
+    }
+
+    private func handleConnectionStateChange(_ newState: LogosConnectionState) {
+        appCoordinator.handleConnectionStateChange(newState) { pushEnabled = $0 }
     }
 
     private func handleFinalVoiceTranscript(text: String, inputID: String, partialSeq: Int, startedAt: Int64) -> Bool {
