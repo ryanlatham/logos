@@ -57,6 +57,7 @@ from .config import (
     _truthy,
     _validate_config,
 )
+from .notifications import APNS_STALE_DEVICE_REASONS, PrivateNotifier
 from .progress_analysis import ProgressAnalyzer
 from .request_context import current_request_context, request_scope
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
@@ -65,8 +66,6 @@ from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
-
-APNS_STALE_DEVICE_REASONS = {"BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"}
 
 
 PROGRESS_MESSAGE_ID_PREFIX = "progress-"
@@ -141,6 +140,7 @@ class LogosAdapter(BasePlatformAdapter):
             max(1.0, float(self.stale_timeout_seconds) / 3.0),
         )
         self.apns = APNSClient.from_env()
+        self._notifier = PrivateNotifier()
         self.latest_pairing_invite: PairingInvite | None = None
         self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_keepalive_sent_at: dict[tuple[str, str], float] = {}
@@ -1487,7 +1487,9 @@ class LogosAdapter(BasePlatformAdapter):
         request_id: str | None = None,
         sensitive_context: dict[str, Any] | None = None,
     ) -> None:
-        payload = build_private_apns_payload(
+        await self._notifier.send(
+            self.store,
+            self.apns,
             kind,
             project_key=project_key,
             session_id=session_id,
@@ -1496,38 +1498,6 @@ class LogosAdapter(BasePlatformAdapter):
             request_id=request_id,
             sensitive_context=sensitive_context,
         )
-        for device in self.store.list_devices(active_only=True):
-            if not device.apns_token:
-                continue
-            if "notifications" not in {str(item).lower() for item in device.capabilities}:
-                continue
-            environment = (
-                str(device.apns_environment or self.apns.config.environment or "").strip().lower() or None
-            )
-            try:
-                result_or_awaitable = self.apns.send(device.apns_token, payload, environment=environment)
-                result = await result_or_awaitable if inspect.isawaitable(result_or_awaitable) else result_or_awaitable
-            except Exception as exc:  # pragma: no cover - exercised with injected clients
-                logger.warning(
-                    "Logos APNS send raised for device_id=%s environment=%s error_type=%s",
-                    device.device_id,
-                    environment,
-                    type(exc).__name__,
-                )
-                continue
-            if not result.success and not result.skipped:
-                reason = str(result.reason or "")
-                if reason in APNS_STALE_DEVICE_REASONS or result.status == 410:
-                    self.store.clear_device_apns_registration(device.device_id)
-                logger.warning(
-                    "Logos APNS send failed for device_id=%s environment=%s status=%s reason=%s apns_id=%s temporary=%s",
-                    device.device_id,
-                    result.environment or environment,
-                    result.status,
-                    result.reason,
-                    result.apns_id,
-                    result.temporary_failure,
-                )
 
     def _state_update(
         self,
