@@ -5195,6 +5195,58 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(decoder.decodeCalls, 1)
     }
 
+    // WS1 P5 prerequisite: behavioral coverage of the audio/playback flow THROUGH LogosClient
+    // (request -> receive -> play -> stop, plus the unsolicited-frame gate). This pins the
+    // observable state machine so the audio internals can later be lifted into a collaborator.
+    @MainActor
+    func testAudioPlaybackFlowThroughClientRequestReceivePlayStop() throws {
+        let socket = RecordingWebSocketTask()
+        let factory = RecordingAudioPlayerFactory()
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1, -0.1, 0.2], sampleRate: 24_000))
+        let audio = AudioPlaybackController(sessionManager: RecordingAudioSessionManager(), playerFactory: factory, sampleDecoder: decoder)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: audio)
+        client.activeProjectKey = "default"
+
+        let message = LogosMessage(
+            projectKey: "default", sessionID: "s1", messageID: "m1", serverSeq: 5,
+            role: "assistant", content: "hello world", timestamp: 1, status: "persisted"
+        )
+
+        // 1. Request playback -> requesting overlay + a playback_audio frame carrying the id.
+        client.playback(message: message)
+        let audioID = try XCTUnwrap(client.audioPlaybackOverlay?.audioID)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
+        XCTAssertEqual(client.playbackStatus, "Requesting audio")
+        let sent = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
+        XCTAssertEqual(sent["type"] as? String, "playback_audio")
+        XCTAssertEqual((sent["payload"] as? [String: Any])?["audio_id"] as? String, audioID)
+
+        // 2. An unsolicited chunk (different id) must be ignored — the gate holds.
+        client.handleFrameString(#"{"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"s1","payload":{"audio_id":"intruder","chunk_index":0,"data":"AQID"}}"#)
+        XCTAssertEqual(client.audioPlaybackOverlay?.audioID, audioID)
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
+
+        // 3. The matching chunk advances to receiving.
+        client.handleFrameString(
+            "{\"type\":\"audio_chunk\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_index\":0,\"data\":\"AQID\",\"mime_type\":\"audio/mp4\",\"encoding\":\"m4a\"}}"
+        )
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .receiving)
+        XCTAssertEqual(client.playbackStatus, "Receiving audio")
+
+        // 4. audio_end finalizes and starts playback.
+        client.handleFrameString(
+            "{\"type\":\"audio_end\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_count\":1}}"
+        )
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
+        XCTAssertEqual(factory.player.playCalls, 1)
+
+        // 5. Stop clears the overlay/status.
+        client.stopPlayback()
+        XCTAssertNil(client.audioPlaybackOverlay)
+        XCTAssertNil(client.playbackStatus)
+        XCTAssertEqual(factory.player.stopCalls, 1)
+    }
+
     func testAudioPlaybackRejectsOversizedChunkBeforeDecode() throws {
         let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000))
         let controller = AudioPlaybackController(
