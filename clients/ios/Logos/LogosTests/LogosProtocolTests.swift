@@ -117,4 +117,39 @@ final class LogosProtocolTests: XCTestCase {
         XCTAssertEqual(outcome.droppedCount, 0)
         XCTAssertFalse(outcome.hasDrops)
     }
+
+    // MARK: - LogosProject Codable migration (P8)
+
+    func testProjectFromDictionaryDecodesAllFields() throws {
+        let project = try XCTUnwrap(LogosProject.from(dictionary: [
+            "project_key": "archwright",
+            "title": "Archwright",
+            "current_session_id": "s1",
+            "last_preview": "hello there",
+        ]))
+        XCTAssertEqual(project.projectKey, "archwright")
+        XCTAssertEqual(project.title, "Archwright")
+        XCTAssertEqual(project.currentSessionID, "s1")
+        XCTAssertEqual(project.lastPreview, "hello there")
+    }
+
+    func testProjectTitleFallsBackToKeyWhenMissingOrNonString() {
+        XCTAssertEqual(LogosProject.from(dictionary: ["project_key": "p"])?.title, "p")
+        // Non-string title coerces to the key (preserves the pre-Codable behavior).
+        XCTAssertEqual(LogosProject.from(dictionary: ["project_key": "p", "title": 42])?.title, "p")
+    }
+
+    func testProjectMissingKeyIsDropped() {
+        XCTAssertNil(LogosProject.from(dictionary: ["title": "No key"]))
+        XCTAssertNil(LogosProject.from(dictionary: ["project_key": 7]))  // non-string key
+    }
+
+    func testProjectDecodesDirectlyViaCodable() throws {
+        let json = #"{"project_key":"p","title":"P","current_session_id":"s"}"#
+        let project = try JSONDecoder().decode(LogosProject.self, from: Data(json.utf8))
+        XCTAssertEqual(project.projectKey, "p")
+        XCTAssertEqual(project.title, "P")
+        XCTAssertEqual(project.currentSessionID, "s")
+        XCTAssertNil(project.lastPreview)
+    }
 }

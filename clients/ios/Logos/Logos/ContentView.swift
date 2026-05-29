@@ -2618,20 +2618,14 @@ struct ContentView: View {
     }
 
     private var connectionTitle: String {
-        switch client.connectionState {
-        case .connected: return "Connected"
-        case .connecting: return "Connecting…"
-        case .disconnected: return "Disconnected"
-        case .error: return "Error"
-        }
+        ConnectionStatusPresentation.title(for: client.connectionState)
     }
 
     private var connectionDetail: String {
-        if client.settings.urlString.contains("tail")
-            || client.settings.urlString.contains(".ts.net") {
-            return "via Tailscale"
-        }
-        return client.settings.urlString
+        ConnectionStatusPresentation.transportDescription(
+            urlString: client.settings.urlString,
+            isPinned: client.settings.certSPKISHA256.isEmpty == false
+        )
     }
 
     private var autoConnectDetail: String {
@@ -2639,18 +2633,14 @@ struct ContentView: View {
     }
 
     private var connectionActionTitle: String {
-        switch client.connectionState {
-        case .connected: return "Disconnect"
-        case .connecting: return "Connecting…"
-        case .disconnected, .error: return "Connect"
-        }
+        ConnectionStatusPresentation.actionTitle(for: client.connectionState)
     }
 
     private var connectionColor: Color {
-        switch client.connectionState {
-        case .connected: return .logosGreen
-        case .connecting: return .logosAmber
-        case .disconnected: return .logosLabel3
+        switch ConnectionStatusPresentation.indicator(for: client.connectionState) {
+        case .ok: return .logosGreen
+        case .pending: return .logosAmber
+        case .idle: return .logosLabel3
         case .error: return .logosRed
         }
     }

@@ -76,10 +76,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published private(set) var progressActivity: ProgressActivityState?
     @Published private(set) var connectionRetryState: ConnectionRetryState?
     @Published private(set) var audioPlaybackOverlay: AudioPlaybackOverlayState?
-    @Published private(set) var slashCommandCatalog: SlashCommandCatalog = .fallback
-    @Published private(set) var slashCommandCompletion: SlashCommandCompletionResult = .empty
+    @Published internal(set) var slashCommandCatalog: SlashCommandCatalog = .fallback
+    @Published internal(set) var slashCommandCompletion: SlashCommandCompletionResult = .empty
 
-    private var task: (any WebSocketTasking)?
+    var task: (any WebSocketTasking)?
     private var connectionLifecycle = LogosConnectionLifecycle()
     private let store: SQLiteMessageStore
     private let socketFactory: any WebSocketTaskMaking
@@ -93,7 +93,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var autoPlayedMessageKeys = Set<String>()
     private var pendingAPNSToken: String?
     private let pairingExchanger: any PairingCredentialExchanging
-    private var isWebSocketOpen = false
+    var isWebSocketOpen = false
     private var pendingMessages = PendingMessageBuffer()
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
@@ -102,8 +102,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var localNoticeMessages: [LogosMessage] = []
     private var localNoticeSequence = 0
     private var pendingCancelRequestID: String?
-    private var pendingCommandCatalogRequestID: String?
-    private var pendingCommandCompletionRequestID: String?
+    var pendingCommandCatalogRequestID: String?
+    var pendingCommandCompletionRequestID: String?
     private var pendingReconnectReplayRequestID: String?
     private var pendingOutboundResponseRequestID: String?
     private var outstandingOutboundResponseRequestIDs = Set<String>()
@@ -484,37 +484,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         ])
     }
 
-    @discardableResult
-    func requestCommandCatalog(includeUnavailable: Bool = true) -> Bool {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
-        let requestID = UUID().uuidString
-        pendingCommandCatalogRequestID = requestID
-        return sendFrame([
-            "type": "commands_get",
-            "request_id": requestID,
-            "device_id": settings.deviceID,
-            "project_key": activeProjectKey,
-            "payload": ["include_unavailable": includeUnavailable]
-        ])
-    }
-
-    @discardableResult
-    func requestSlashCommandCompletion(text: String) -> Bool {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
-        guard text.hasPrefix("/"), text.count <= 500, text.rangeOfCharacter(from: .controlCharacters) == nil else { return false }
-        let requestID = UUID().uuidString
-        pendingCommandCompletionRequestID = requestID
-        return sendFrame([
-            "type": "commands_complete",
-            "request_id": requestID,
-            "device_id": settings.deviceID,
-            "project_key": activeProjectKey,
-            "payload": [
-                "text": text,
-                "catalog_version": slashCommandCatalog.catalogVersion
-            ]
-        ])
-    }
 
     func registerDevice(apnsToken: String?) {
         if let token = apnsToken, token.isEmpty == false {
@@ -1649,7 +1618,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     @discardableResult
-    private func sendFrame(
+    func sendFrame(
         _ frame: [String: Any],
         requiresAuthentication: Bool = true,
         onCompletion: ((Result<Void, Error>) -> Void)? = nil
@@ -1911,31 +1880,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
     }
 
-    private func handleCommandsList(_ root: [String: Any]) {
-        let requestID = root["request_id"] as? String
-        if let pendingCommandCatalogRequestID, requestID != pendingCommandCatalogRequestID {
-            LogosConnectionLog.logger.info("Ignoring stale command catalog request_id=\(requestID ?? "<none>", privacy: .public)")
-            return
-        }
-        guard let payload = root["payload"] as? [String: Any],
-              let catalog = SlashCommandCatalog.from(dictionary: payload)
-        else { return }
-        slashCommandCatalog = catalog
-        pendingCommandCatalogRequestID = nil
-    }
-
-    private func handleCommandsCompleteResult(_ root: [String: Any]) {
-        let requestID = root["request_id"] as? String
-        if let pendingCommandCompletionRequestID, requestID != pendingCommandCompletionRequestID {
-            LogosConnectionLog.logger.info("Ignoring stale command completion request_id=\(requestID ?? "<none>", privacy: .public)")
-            return
-        }
-        guard let payload = root["payload"] as? [String: Any],
-              let completion = SlashCommandCompletionResult.from(dictionary: payload)
-        else { return }
-        slashCommandCompletion = completion
-        pendingCommandCompletionRequestID = nil
-    }
 
     private func handleMessagesBatch(_ root: [String: Any]) {
         guard let payload = root["payload"] as? [String: Any] else { return }
