@@ -88,8 +88,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var requestedAudioIDs = Set<String>()
     private var stoppedAudioIDs = Set<String>()
     private var activeAudioID: String?
-    private var spectrumUpdateTask: Task<Void, Never>?
-    private var spectrumUpdateAudioID: String?
+    private let spectrumAnimator = SpectrumAnimator()
     private var autoPlayedMessageKeys = Set<String>()
     private var pendingAPNSToken: String?
     private let pairingExchanger: any PairingCredentialExchanging
@@ -1226,26 +1225,13 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func startSpectrumUpdates(audioID: String) {
-        stopSpectrumUpdates()
-        spectrumUpdateAudioID = audioID
-        spectrumUpdateTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: 50_000_000)
-                } catch {
-                    return
-                }
-                guard let self else { return }
-                self.refreshPlaybackSpectrum(audioID: audioID)
-            }
+        spectrumAnimator.start(audioID: audioID) { [weak self] id in
+            self?.refreshPlaybackSpectrum(audioID: id)
         }
     }
 
     private func stopSpectrumUpdates(audioID: String? = nil) {
-        if let audioID, spectrumUpdateAudioID != audioID { return }
-        spectrumUpdateTask?.cancel()
-        spectrumUpdateTask = nil
-        spectrumUpdateAudioID = nil
+        spectrumAnimator.stop(audioID: audioID)
     }
 
     func refreshPlaybackSpectrumForTesting(audioID: String) {
