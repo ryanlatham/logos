@@ -153,6 +153,40 @@ final class TaskStaleTimeoutScheduler: StaleTimeoutScheduling {
     }
 }
 
+/// Schedules the single-shot fire that clears a transient fast-ack once its TTL
+/// elapses. Production sleeps in real wall-clock time; tests inject a manual
+/// scheduler so the clear can be fired synchronously instead of racing a real
+/// timer (which is flaky on a loaded CI runner).
+@MainActor
+protocol AckClearScheduling: AnyObject {
+    /// Schedule `fire` to run after `interval` seconds, replacing any pending fire.
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void)
+    /// Cancel any pending fire.
+    func cancel()
+}
+
+@MainActor
+final class TaskAckClearScheduler: AckClearScheduling {
+    private var task: Task<Void, Never>?
+
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void) {
+        task?.cancel()
+        task = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0.001, interval) * 1_000_000_000))
+            } catch {
+                return
+            }
+            fire()
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 struct FastAckState: Equatable {
     let id: String
     let projectKey: String
@@ -319,8 +353,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var pendingMessages = PendingMessageBuffer()
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
-    private var ackClearTask: Task<Void, Never>?
     private let staleTimeoutScheduler: any StaleTimeoutScheduling
+    private let ackClearScheduler: any AckClearScheduling
     private var localNoticeMessages: [LogosMessage] = []
     private var localNoticeSequence = 0
     private var pendingCancelRequestID: String?
@@ -362,7 +396,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         pairingExchanger: any PairingCredentialExchanging = WebSocketPairingCredentialExchanger(),
         audioPlayback: AudioPlaybackController = AudioPlaybackController(),
         staleTimeoutInterval: TimeInterval = 900,
-        staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil
+        staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil,
+        ackClearScheduler: (any AckClearScheduling)? = nil
     ) {
         self.store = store
         self.socketFactory = socketFactory
@@ -370,6 +405,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         self.audioPlayback = audioPlayback
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
         self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
+        self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
         messages = visibleMessages(from: store.loadMessages(projectKey: activeProjectKey))
         audioPlayback.onPlaybackFinished = { [weak self] audioID, succeeded in
             Task { @MainActor in
@@ -2195,7 +2231,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func setTransientAck(_ text: String?, id: String? = nil, projectKey: String? = nil, ttlMilliseconds: Int? = nil) {
-        ackClearTask?.cancel()
         let ackID = id?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? id! : UUID().uuidString
         let ackProjectKey = projectKey ?? activeProjectKey
         guard let state = FastAckState.next(id: ackID, projectKey: ackProjectKey, text: text, ttlMilliseconds: ttlMilliseconds) else {
@@ -2204,13 +2239,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         ackState = state
         ackText = state.text
-        let delay = UInt64(state.ttlMilliseconds) * 1_000_000
-        ackClearTask = Task { [weak self, ackID = state.id, ackProjectKey = state.projectKey] in
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
+        let interval = TimeInterval(state.ttlMilliseconds) / 1_000.0
+        ackClearScheduler.schedule(after: interval) { [weak self, ackID = state.id, ackProjectKey = state.projectKey] in
             self?.clearAck(matching: ackID, projectKey: ackProjectKey)
         }
     }
@@ -2218,8 +2248,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func clearAck(matching id: String? = nil, projectKey: String? = nil) {
         if let id, ackState?.id != id { return }
         if let projectKey, ackState?.projectKey != projectKey { return }
-        ackClearTask?.cancel()
-        ackClearTask = nil
+        ackClearScheduler.cancel()
         ackState = nil
         ackText = nil
     }
