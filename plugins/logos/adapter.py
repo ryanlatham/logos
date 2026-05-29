@@ -59,6 +59,7 @@ from .config import (
 )
 from .notifications import APNS_STALE_DEVICE_REASONS, PrivateNotifier
 from .progress_analysis import ProgressAnalyzer
+from .providers import FastLLMProvider, TTSProvider
 from .request_context import current_request_context, request_scope
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
 from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
@@ -116,8 +117,8 @@ class LogosAdapter(BasePlatformAdapter):
         self.ws_server: LogosWebSocketServer | None = None
         self.store = LogosStore(self._store_path(extra))
         self.store.interrupt_active_run_states(reason="adapter_restarted")
-        self.tts = build_tts(extra)
-        self.fast_model = build_fast_model(extra)
+        self.tts: TTSProvider = build_tts(extra)
+        self.fast_model: FastLLMProvider = build_fast_model(extra)
         self._progress = ProgressAnalyzer()
         final_audio_full_max_chars = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_CHARS")
         final_audio_full_max_words = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_WORDS")
