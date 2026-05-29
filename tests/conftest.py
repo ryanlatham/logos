@@ -51,6 +51,7 @@ _HERMES_DEPENDENT_MODULES = [
     "test_stage_h_fast_model.py",
     "test_stage_j_notifications.py",
     "test_stage_l_commands.py",
+    "test_stage_m_encryption.py",
     "test_logos_pairing.py",
     "test_review_hardening.py",
 ]
