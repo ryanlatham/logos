@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-LOGOS_STORE_SCHEMA_VERSION = 2
+LOGOS_STORE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -166,6 +166,10 @@ class LogosRunState:
     payload: dict[str, Any]
     server_seq: int
     updated_at: float
+    started_at: float | None = None
+    last_checkpoint_at: float | None = None
+    origin_text: str | None = None
+    origin_request_id: str | None = None
 
     def to_protocol(self) -> dict[str, Any]:
         return {
@@ -177,6 +181,10 @@ class LogosRunState:
             "payload": self.payload,
             "server_seq": self.server_seq,
             "updated_at": self.updated_at,
+            "started_at": self.started_at,
+            "last_checkpoint_at": self.last_checkpoint_at,
+            "origin_text": self.origin_text,
+            "origin_request_id": self.origin_request_id,
         }
 
 
@@ -334,13 +342,31 @@ class LogosStore:
                     device_id TEXT,
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     server_seq INTEGER NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    started_at REAL,
+                    last_checkpoint_at REAL,
+                    origin_text TEXT,
+                    origin_request_id TEXT
                 )
                 """
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logos_run_states_seq ON logos_run_states(server_seq)"
             )
+            # Additive v2 -> v3 migration: durable run-recovery columns. CREATE TABLE IF NOT
+            # EXISTS leaves an existing table untouched, so backfill any missing columns on
+            # pre-v3 databases. Column names/types are fixed literals (no injection surface).
+            existing_run_state_cols = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(logos_run_states)").fetchall()
+            }
+            for column, decl in (
+                ("started_at", "REAL"),
+                ("last_checkpoint_at", "REAL"),
+                ("origin_text", "TEXT"),
+                ("origin_request_id", "TEXT"),
+            ):
+                if column not in existing_run_state_cols:
+                    self._conn.execute(f"ALTER TABLE logos_run_states ADD COLUMN {column} {decl}")
             self._conn.execute(f"PRAGMA user_version = {LOGOS_STORE_SCHEMA_VERSION}")
 
     def upsert_device(
@@ -582,6 +608,9 @@ class LogosStore:
         device_id: str | None = None,
         payload: dict[str, Any] | None = None,
         updated_at: float | None = None,
+        started_at: float | None = None,
+        origin_text: str | None = None,
+        origin_request_id: str | None = None,
     ) -> LogosRunState:
         project_key = str(project_key or "default")
         status = str(status or "idle")
@@ -590,12 +619,16 @@ class LogosStore:
         with self._lock:
             server_seq = self.next_server_seq()
             with self._conn:
+                # started_at / origin_text / origin_request_id are set once at run start and
+                # preserved (COALESCE) across later status-only updates; last_checkpoint_at
+                # advances to updated_at on every touch so a stale run can be detected.
                 self._conn.execute(
                     """
                     INSERT INTO logos_run_states (
                         project_key, session_id, status, request_id, device_id,
-                        payload_json, server_seq, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        payload_json, server_seq, updated_at,
+                        started_at, last_checkpoint_at, origin_text, origin_request_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_key) DO UPDATE SET
                         session_id = excluded.session_id,
                         status = excluded.status,
@@ -603,7 +636,11 @@ class LogosStore:
                         device_id = excluded.device_id,
                         payload_json = excluded.payload_json,
                         server_seq = excluded.server_seq,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        last_checkpoint_at = excluded.updated_at,
+                        started_at = COALESCE(excluded.started_at, logos_run_states.started_at),
+                        origin_text = COALESCE(excluded.origin_text, logos_run_states.origin_text),
+                        origin_request_id = COALESCE(excluded.origin_request_id, logos_run_states.origin_request_id)
                     """,
                     (
                         project_key,
@@ -614,6 +651,10 @@ class LogosStore:
                         payload_json,
                         server_seq,
                         updated_at,
+                        started_at,
+                        updated_at,
+                        origin_text,
+                        origin_request_id,
                     ),
                 )
             stored = self.latest_run_state(project_key)
@@ -1098,6 +1139,16 @@ class LogosStore:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
+        columns = set(row.keys())
+
+        def _opt_float(name: str) -> float | None:
+            value = row[name] if name in columns else None
+            return float(value) if value is not None else None
+
+        def _opt_str(name: str) -> str | None:
+            value = row[name] if name in columns else None
+            return str(value) if value is not None else None
+
         return LogosRunState(
             project_key=row["project_key"],
             session_id=row["session_id"],
@@ -1107,6 +1158,10 @@ class LogosStore:
             payload=payload,
             server_seq=int(row["server_seq"]),
             updated_at=float(row["updated_at"]),
+            started_at=_opt_float("started_at"),
+            last_checkpoint_at=_opt_float("last_checkpoint_at"),
+            origin_text=_opt_str("origin_text"),
+            origin_request_id=_opt_str("origin_request_id"),
         )
 
     @staticmethod

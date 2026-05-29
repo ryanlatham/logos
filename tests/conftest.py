@@ -54,6 +54,7 @@ _HERMES_DEPENDENT_MODULES = [
     "test_stage_m_encryption.py",
     "test_logos_pairing.py",
     "test_review_hardening.py",
+    "test_run_recovery.py",
 ]
 
 if not HERMES_AVAILABLE:

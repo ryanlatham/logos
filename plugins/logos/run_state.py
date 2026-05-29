@@ -6,6 +6,11 @@ from typing import Any
 
 from .config import _optional_nonempty_str
 from .request_context import current_request_context
+from .schema import redact_secrets
+
+# Run-origin text persisted for retry-after-interruption is capped so a pathological prompt
+# can't bloat the run-state row.
+MAX_RUN_ORIGIN_TEXT_CHARS = 2000
 
 logger = logging.getLogger(__name__)
 
@@ -177,3 +182,71 @@ class RunStateMixin:
             payload={"cancelled": not dispatch_failed, "reason": "stop_dispatch_failed"} if dispatch_failed else {"cancelled": True},
         )
         return terminal_frame
+
+    async def on_processing_start(self, event) -> None:  # type: ignore[override]
+        """Record durable run origin so an interrupted run can be recovered/retried.
+
+        Fires when Hermes begins background processing (after handle_message routes the
+        input). The "running" status is already broadcast by the dispatch path; here we only
+        enrich the persisted row with started_at + the redacted origin text + origin_request_id,
+        which COALESCE-preserve across later status-only updates.
+        """
+        await super().on_processing_start(event)
+        context = self._request_context_for_event(event)
+        if not context:
+            return
+        origin_text = redact_secrets(getattr(event, "text", "") or "")
+        if isinstance(origin_text, str) and len(origin_text) > MAX_RUN_ORIGIN_TEXT_CHARS:
+            origin_text = origin_text[:MAX_RUN_ORIGIN_TEXT_CHARS]
+        self.store.upsert_run_state(
+            project_key=context["project_key"],
+            session_id=context["session_id"],
+            status="running",
+            request_id=context["request_id"],
+            started_at=time.time(),
+            origin_text=origin_text if isinstance(origin_text, str) else None,
+            origin_request_id=context["request_id"],
+        )
+
+    async def on_processing_complete(self, event, outcome) -> None:  # type: ignore[override]
+        """Reconcile a run that ended without a final message (honest, idempotent).
+
+        Hermes' final response normally flips the run to ``idle`` via ``send``; this hook fires
+        even on failure/cancel/empty-success, so a crashed or cancelled run can't orphan a
+        spinner. We act ONLY if the persisted row is still active for THIS request_id (so we
+        never double-idle a run a final message already terminated). An interrupted run carries
+        its redacted ``retry_text`` so the app can offer a one-tap retry.
+        """
+        await super().on_processing_complete(event, outcome)
+        context = self._request_context_for_event(event)
+        if not context:
+            return
+        project_key = context["project_key"]
+        request_id = context["request_id"]
+        current = self.store.latest_run_state(project_key)
+        if current is None or current.status not in {"running", "queued", "cancelling"}:
+            return
+        if current.request_id and request_id and current.request_id != request_id:
+            return
+        outcome_name = getattr(outcome, "name", str(outcome)).upper()
+        final_status = {
+            "SUCCESS": "completed",
+            "FAILURE": "failed",
+            "CANCELLED": "cancelled",
+        }.get(outcome_name, "completed")
+        interrupted = outcome_name != "SUCCESS"
+        payload: dict[str, Any] = {"reconciled": True, "final_status": final_status}
+        if interrupted:
+            payload["interrupted"] = True
+            payload["reason"] = f"processing_{final_status}"
+            if current.origin_text:
+                payload["retry_text"] = current.origin_text
+                payload["origin_request_id"] = current.origin_request_id or request_id
+        await self._broadcast_run_status(
+            project_key=project_key,
+            session_id=current.session_id or context["session_id"],
+            status="error" if outcome_name == "FAILURE" else "idle",
+            request_id=request_id,
+            device_id=current.device_id,
+            payload=payload,
+        )
