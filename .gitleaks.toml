@@ -1,0 +1,23 @@
+title = "Logos gitleaks config"
+
+# Build on gitleaks' built-in rule set, then allowlist the project's known,
+# non-secret test fixtures and documentation placeholders so they don't trip CI.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret test fixtures and placeholders"
+regexTarget = "match"
+regexes = [
+  '''dev-secret''',
+  '''stage-f-secret''',
+  '''ci-secret''',
+  # Fake APNS token used in tests/test_stage_j_notifications.py.
+  '''abcdef123456''',
+  # Live-smoke device IDs recorded in docs/logos/TEST_REPORT.md (not credentials).
+  '''live-smoke-[a-z]+-[0-9a-f]{6}''',
+  # README/docs placeholders, not real material.
+  '''AuthKey_<key-id>\.p8''',
+  '''openssl rand -hex 32''',
+  '''<your\.reverse\.dns\.logos>''',
+]

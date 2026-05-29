@@ -1,0 +1,58 @@
+name: python
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Tier 1: runs on every push/PR with no Hermes checkout. Covers the
+  # Hermes-free units (schema, store, protocol, CLI, crypto). The
+  # Hermes-dependent modules are skipped by tests/conftest.py when the
+  # gateway package is unavailable.
+  tier1:
+    name: compile + Hermes-free tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install cryptography websockets "qrcode[pil]" pytest pytest-asyncio httpx h2
+      - name: Compile (syntax/import sanity)
+        run: python -m compileall -q plugins/logos scripts tests
+      - name: Hermes-free tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/plugins
+          HERMES_SRC: /nonexistent  # force the gateway package to be absent
+        run: python -m pytest -q tests
+
+  # Tier 2: full suite against the real Hermes gateway. Opt-in because Hermes
+  # may be private — enable by setting repo variables ENABLE_HERMES_TESTS=true,
+  # HERMES_REPO (owner/name) and optionally HERMES_REF. Never required to merge.
+  tier2-full:
+    name: full suite (with Hermes)
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_HERMES_TESTS == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Checkout Hermes
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.HERMES_REPO }}
+          ref: ${{ vars.HERMES_REF }}
+          token: ${{ secrets.HERMES_REPO_TOKEN }}
+          path: hermes-agent
+      - name: Install dependencies
+        run: |
+          pip install cryptography websockets "qrcode[pil]" pytest pytest-asyncio httpx h2 PyYAML
+          if [ -f hermes-agent/requirements.txt ]; then pip install -r hermes-agent/requirements.txt; fi
+      - name: Full suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/hermes-agent
+          HERMES_SRC: ${{ github.workspace }}/hermes-agent
+        run: python -m pytest -q tests
