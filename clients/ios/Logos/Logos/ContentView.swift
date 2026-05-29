@@ -367,6 +367,13 @@ struct ContentView: View {
         .onChange(of: voiceInput.isFinalizingTranscript) { _, _ in
             syncComposerWithVoiceState()
         }
+        .onChange(of: voiceInput.isRecording) { _, isRecording in
+            if isRecording {
+                LogosHaptics.recordStart()
+            } else {
+                LogosHaptics.recordStop()
+            }
+        }
         .onOpenURL { url in
             if let route = LogosPairingRoute.from(url: url) {
                 pendingPairingRoute = route
@@ -827,7 +834,8 @@ struct ContentView: View {
                     .lineSpacing(1)
                     .foregroundStyle(message.role == "user" ? Color.logosAmberOn : Color.logosLabel)
                     .textSelection(.enabled)
-                    .accessibilityLabel(message.content)
+                    .accessibilityIdentifier(message.content)
+                    .accessibilityLabel(messageBubbleAccessibilityLabel(message))
 
                 HStack(spacing: 8) {
                     if message.status != "persisted" {
@@ -2312,6 +2320,11 @@ struct ContentView: View {
         if isRecording { return "Stops recording and stays ready to record again" }
         if voiceInput.isFinalizingTranscript { return "Wait until the transcript finishes sending" }
         return "Starts tap to record"
+    }
+
+    private func messageBubbleAccessibilityLabel(_ message: LogosMessage) -> String {
+        let speaker = message.role == "user" ? "You" : "Hermes"
+        return "\(speaker): \(message.content)"
     }
 
     private func submitDraft() {
