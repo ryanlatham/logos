@@ -28,3 +28,6 @@ xcuserdata/
 
 # XcodeGen output; regenerate with clients/ios/Logos/project.yml
 clients/ios/Logos/Logos.xcodeproj/
+
+# Agent worktrees (Claude Code isolation)
+.claude/worktrees/
