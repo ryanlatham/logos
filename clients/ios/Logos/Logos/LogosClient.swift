@@ -63,9 +63,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
     @Published private(set) var messages: [LogosMessage] = []
     @Published private(set) var runStatus: LogosRunStatus = .idle
-    @Published private(set) var approvalCard: ApprovalCard?
-    @Published private(set) var clarifyCard: ClarifyCard?
-    @Published private(set) var pendingInteractionResponseID: String?
     @Published private(set) var threadFocusRequest: ThreadFocusRequest?
     @Published var lastError: String?
     /// Bounded, source-tagged history of client errors (WS1 P7). `lastError` remains the
@@ -84,6 +81,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var audioCancellable: AnyCancellable?
     let progressActivityManager: ProgressActivityManager
     private var progressCancellable: AnyCancellable?
+    let interactionController: InteractionController
+    private var interactionCancellable: AnyCancellable?
     private var staleTimeoutInterval: TimeInterval
     private var autoPlayedMessageKeys = Set<String>()
     private var pendingAPNSToken: String?
@@ -132,12 +131,14 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         self.pairingExchanger = pairingExchanger
         self.audioCoordinator = AudioCoordinator(audioPlayback: audioPlayback)
         self.progressActivityManager = ProgressActivityManager()
+        self.interactionController = InteractionController()
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
         self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
         self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
         messages = visibleMessages(from: store.loadMessages(projectKey: activeProjectKey))
         audioCoordinator.host = self
         progressActivityManager.host = self
+        interactionController.host = self
         // Re-emit the coordinator's published audio-state changes as our own so SwiftUI views
         // observing `LogosClient` refresh when the (forwarded) overlay/status change.
         audioCancellable = audioCoordinator.objectWillChange.sink { [weak self] _ in
@@ -146,6 +147,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         // Re-emit the progress manager's published changes so views reading the forwarded
         // `progressActivity`/`connectionRetryState` refresh (WS1 P5, mirrors the audio wiring).
         progressCancellable = progressActivityManager.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // Re-emit the interaction controller's published changes so views reading the forwarded
+        // `approvalCard`/`clarifyCard`/`pendingInteractionResponseID` refresh (WS1 P5).
+        interactionCancellable = interactionController.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
     }
@@ -650,70 +656,16 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     func approveCurrentRequest() {
-        guard let approvalCard else { return }
-        guard runStatus != .cancelling else { return }
-        guard ensureConnectedForUserAction("approve request") else { return }
-        let sent = sendFrame([
-            "type": "approval_response",
-            "request_id": approvalCard.id,
-            "device_id": settings.deviceID,
-            "project_key": approvalCard.projectKey,
-            "payload": ["decision": "approve"]
-        ]) { [weak self, requestID = approvalCard.id, projectKey = approvalCard.projectKey] result in
-            guard case .failure = result else { return }
-            self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
-        }
-        if sent {
-            pendingInteractionResponseID = approvalCard.id
-            setTransientAck("Approved. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
-        }
+        interactionController.approveCurrentRequest()
     }
 
     func denyCurrentRequest() {
-        guard let approvalCard else { return }
-        guard runStatus != .cancelling else { return }
-        guard ensureConnectedForUserAction("deny request") else { return }
-        let sent = sendFrame([
-            "type": "approval_response",
-            "request_id": approvalCard.id,
-            "device_id": settings.deviceID,
-            "project_key": approvalCard.projectKey,
-            "payload": ["decision": "deny"]
-        ]) { [weak self, requestID = approvalCard.id, projectKey = approvalCard.projectKey] result in
-            guard case .failure = result else { return }
-            self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
-        }
-        if sent {
-            pendingInteractionResponseID = approvalCard.id
-            setTransientAck("Denied. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
-        }
+        interactionController.denyCurrentRequest()
     }
 
     @discardableResult
     func answerClarification(_ text: String) -> Bool {
-        guard let clarifyCard else { return false }
-        guard runStatus != .cancelling else { return false }
-        guard ensureConnectedForUserAction("answer clarification") else { return false }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let sent = sendFrame([
-            "type": "clarify_response",
-            "request_id": clarifyCard.id,
-            "device_id": settings.deviceID,
-            "project_key": clarifyCard.projectKey,
-            "payload": [
-                "clarify_id": clarifyCard.id,
-                "text": trimmed
-            ]
-        ]) { [weak self, requestID = clarifyCard.id, projectKey = clarifyCard.projectKey] result in
-            guard case .failure = result else { return }
-            self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
-        }
-        if sent {
-            pendingInteractionResponseID = clarifyCard.id
-            setTransientAck("Clarification sent. Waiting for Hermes…", id: clarifyCard.id, projectKey: clarifyCard.projectKey)
-        }
-        return sent
+        interactionController.answerClarification(text)
     }
 
     func cancelRun() {
@@ -740,7 +692,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             pendingCancelRequestID = requestID
             runStatus = .cancelling
             suspendStaleTimeout()
-            clearInteractionStateForCancel()
+            interactionController.clearInteractionStateForCancel()
             clearAck()
         }
     }
@@ -804,12 +756,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func clearCardsNotMatchingActiveProject() {
-        if let approvalCard, approvalCard.projectKey != activeProjectKey {
-            self.approvalCard = nil
-        }
-        if let clarifyCard, clarifyCard.projectKey != activeProjectKey {
-            self.clarifyCard = nil
-        }
+        interactionController.clearCardsNotMatchingActiveProject()
     }
 
     private func recordError(_ message: String) {
@@ -912,11 +859,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             if progressActivity?.isComplete != false {
                 runStatus = .idle
             }
-            if clearInteractionCards {
-                clearInteractionStateForCancel()
-            } else if let pendingInteractionResponseID {
-                clearPendingInteractionResponse(requestID: pendingInteractionResponseID, projectKey: activeProjectKey)
-            }
+            interactionController.failInterruptedInteraction(clearCards: clearInteractionCards)
             connectionState = .error
             if retryable {
                 progressActivityManager.noteConnectionRetryFailure(message)
@@ -1193,9 +1136,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         case "run_status":
             handleRunStatus(root)
         case "approval_request":
-            handleApprovalRequest(root)
+            interactionController.handleApprovalRequest(root)
         case "clarify_request":
-            handleClarifyRequest(root)
+            interactionController.handleClarifyRequest(root)
         case "tool_progress", "progress_update":
             progressActivityManager.handleToolProgress(root)
         case "audio_chunk":
@@ -1309,10 +1252,10 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         pendingMessages.reconcile(with: persistedMessages)
         let pending = payload["pending_interactions"] as? [[String: Any]] ?? []
         for interaction in pending {
-            handlePendingInteraction(interaction)
+            interactionController.handlePendingInteraction(interaction)
         }
         if payload.keys.contains("pending_interactions") {
-            reconcilePendingInteractionCards(pending, projectKey: root["project_key"] as? String ?? activeProjectKey)
+            interactionController.reconcilePendingInteractionCards(pending, projectKey: root["project_key"] as? String ?? activeProjectKey)
         }
         if let replayedRunStatus {
             handleReplayedRunStatus(
@@ -1380,34 +1323,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         handleRunStatus(root)
     }
 
-    private func reconcilePendingInteractionCards(_ pending: [[String: Any]], projectKey: String) {
-        guard projectKey == activeProjectKey else { return }
-        let pendingIDs = Set(pending.compactMap { interaction in
-            interaction["request_id"] as? String ?? (interaction["payload"] as? [String: Any])?["approval_id"] as? String ?? (interaction["payload"] as? [String: Any])?["clarify_id"] as? String
-        })
-        if let approvalCard, pendingIDs.contains(approvalCard.id) == false {
-            clearAck(matching: approvalCard.id, projectKey: approvalCard.projectKey)
-            self.approvalCard = nil
-        }
-        if let clarifyCard, pendingIDs.contains(clarifyCard.id) == false {
-            clearAck(matching: clarifyCard.id, projectKey: clarifyCard.projectKey)
-            self.clarifyCard = nil
-        }
-        if let pendingInteractionResponseID, pendingIDs.contains(pendingInteractionResponseID) == false {
-            clearAck(matching: pendingInteractionResponseID, projectKey: projectKey)
-            self.pendingInteractionResponseID = nil
-        }
-    }
-
-    private func handlePendingInteraction(_ interaction: [String: Any]) {
-        let type = interaction["type"] as? String ?? interaction["frame_type"] as? String
-        if type == "approval_request" {
-            handleApprovalRequest(interaction)
-        } else if type == "clarify_request" {
-            handleClarifyRequest(interaction)
-        }
-    }
-
     private func setTransientAck(_ text: String?, id: String? = nil, projectKey: String? = nil, ttlMilliseconds: Int? = nil) {
         let ackID = id?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? id! : UUID().uuidString
         let ackProjectKey = projectKey ?? activeProjectKey
@@ -1431,19 +1346,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         ackText = nil
     }
 
-    private func clearPendingInteractionResponse(requestID: String, projectKey: String) {
-        if pendingInteractionResponseID == requestID {
-            pendingInteractionResponseID = nil
-        }
-        clearAck(matching: requestID, projectKey: projectKey)
-    }
-
-    private func clearInteractionStateForCancel() {
-        approvalCard = nil
-        clarifyCard = nil
-        pendingInteractionResponseID = nil
-    }
-
     private func clearRunScopedStateForProjectChange() {
         runStatus = .idle
         if let request = threadFocusRequest, request.projectKey != activeProjectKey {
@@ -1455,7 +1357,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         outstandingOutboundResponseRequestIDs.removeAll()
         progressActivityManager.clearRunScopedState()
         requiresScopedLiveResponse = false
-        clearInteractionStateForCancel()
+        interactionController.clearInteractionStateForCancel()
         suspendStaleTimeout()
         clearAck()
         progressActivityManager.clearProgressActivity()
@@ -1468,7 +1370,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         pendingReconnectReplayRequestID = nil
         pendingOutboundResponseRequestID = nil
         outstandingOutboundResponseRequestIDs.removeAll()
-        clearInteractionStateForCancel()
+        interactionController.clearInteractionStateForCancel()
         clearAck()
         progressActivityManager.clearProgressActivity()
         audioCoordinator.clearAudioPlaybackForProjectSwitch()
@@ -1484,17 +1386,17 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             return
         }
         if let requestID, requestID == pendingInteractionResponseID {
-            clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
+            interactionController.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
         }
         if progressActivityManager.activeRunErrorMatches(requestID) {
             progressActivityManager.finishProgressRun(requestID: requestID, finalStatus: .failed, failureMessage: message, suppressLateFrames: true)
             return
         }
         if code == "approval_not_pending" {
-            if approvalCard?.id == requestID { approvalCard = nil }
+            interactionController.clearApprovalCardIfMatches(requestID: requestID)
             if runStatus == .awaitingApproval { runStatus = .idle }
         } else if code == "clarify_not_pending" {
-            if clarifyCard?.id == requestID { clarifyCard = nil }
+            interactionController.clearClarifyCardIfMatches(requestID: requestID)
             if runStatus == .awaitingClarification { runStatus = .idle }
         }
         if progressActivity?.isComplete == false {
@@ -1708,20 +1610,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             suspendStaleTimeout()
             clearAck()
         }
-        if previous == .awaitingApproval && next != .awaitingApproval {
-            approvalCard = nil
-            pendingInteractionResponseID = nil
-        } else if let approvalCard, pendingInteractionResponseID == approvalCard.id, next != .awaitingApproval {
-            self.approvalCard = nil
-            pendingInteractionResponseID = nil
-        }
-        if previous == .awaitingClarification && next != .awaitingClarification {
-            clarifyCard = nil
-            pendingInteractionResponseID = nil
-        } else if let clarifyCard, pendingInteractionResponseID == clarifyCard.id, next != .awaitingClarification {
-            self.clarifyCard = nil
-            pendingInteractionResponseID = nil
-        }
+        interactionController.applyRunStatusTransition(previous: previous, next: next)
     }
 
     private func isInterruptedRunStatus(_ payload: [String: Any]) -> Bool {
@@ -1777,43 +1666,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             return
         }
         _ = requestFinalAutoPlayback(message)
-    }
-
-    private func handleApprovalRequest(_ root: [String: Any]) {
-        guard let payload = root["payload"] as? [String: Any] else { return }
-        let projectKey = root["project_key"] as? String ?? activeProjectKey
-        guard projectKey == activeProjectKey else { return }
-        guard runStatus != .cancelling else { return }
-        approvalCard = ApprovalCard(
-            id: root["request_id"] as? String ?? payload["approval_id"] as? String ?? UUID().uuidString,
-            projectKey: projectKey,
-            title: payload["title"] as? String ?? "Approval required",
-            summary: payload["summary"] as? String ?? "Hermes needs approval.",
-            commandPreview: payload["command_preview"] as? String ?? "",
-            risk: payload["risk"] as? String ?? ""
-        )
-        runStatus = .awaitingApproval
-        suspendStaleTimeout()
-        pendingInteractionResponseID = nil
-        clearAck()
-    }
-
-    private func handleClarifyRequest(_ root: [String: Any]) {
-        guard let payload = root["payload"] as? [String: Any] else { return }
-        let projectKey = root["project_key"] as? String ?? activeProjectKey
-        guard projectKey == activeProjectKey else { return }
-        guard runStatus != .cancelling else { return }
-        clarifyCard = ClarifyCard(
-            id: root["request_id"] as? String ?? payload["clarify_id"] as? String ?? UUID().uuidString,
-            projectKey: projectKey,
-            question: payload["question"] as? String ?? "Hermes needs clarification.",
-            choices: payload["choices"] as? [String] ?? [],
-            allowFreeText: payload["allow_free_text"] as? Bool ?? true
-        )
-        runStatus = .awaitingClarification
-        suspendStaleTimeout()
-        pendingInteractionResponseID = nil
-        clearAck()
     }
 
     private func upsertProject(_ project: LogosProject) {
@@ -2025,7 +1877,7 @@ extension LogosClient: ProgressActivityManagerHost {
     }
 
     func clearInteractionStateForProgress() {
-        clearInteractionStateForCancel()
+        interactionController.clearInteractionStateForProgress()
     }
 
     func clearAudioPlaybackForProgress() {
@@ -2071,6 +1923,58 @@ extension LogosClient: ProgressActivityManagerHost {
 
     func progressIntegerValue(_ value: Any?) -> Int? {
         integerValue(value)
+    }
+}
+
+// MARK: - Interaction forwarding (WS1 P5)
+
+extension LogosClient {
+    /// Re-exposes the controller's approval card so existing views/tests reading `client.approvalCard`
+    /// keep working (get-only, matching the original `@Published private(set)`).
+    var approvalCard: ApprovalCard? { interactionController.approvalCard }
+
+    /// Re-exposes the controller's clarify card (get-only, matching the original `@Published private(set)`).
+    var clarifyCard: ClarifyCard? { interactionController.clarifyCard }
+
+    /// Re-exposes the controller's pending interaction-response id (get-only, matching the original
+    /// `@Published private(set)`).
+    var pendingInteractionResponseID: String? { interactionController.pendingInteractionResponseID }
+}
+
+extension LogosClient: InteractionControllerHost {
+    var interactionActiveProjectKey: String { activeProjectKey }
+
+    var interactionRunStatus: LogosRunStatus {
+        get { runStatus }
+        set { runStatus = newValue }
+    }
+
+    var interactionDeviceID: String { settings.deviceID }
+
+    @discardableResult
+    func ensureInteractionConnected(_ action: String) -> Bool {
+        ensureConnectedForUserAction(action)
+    }
+
+    @discardableResult
+    func sendInteractionFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+        sendFrame(frame, onCompletion: onCompletion)
+    }
+
+    func suspendInteractionStaleTimeout() {
+        suspendStaleTimeout()
+    }
+
+    func setInteractionTransientAck(_ text: String?, id: String?, projectKey: String?) {
+        setTransientAck(text, id: id, projectKey: projectKey)
+    }
+
+    func clearInteractionAck() {
+        clearAck()
+    }
+
+    func clearInteractionAck(matchingID id: String, projectKey: String) {
+        clearAck(matching: id, projectKey: projectKey)
     }
 }
 
