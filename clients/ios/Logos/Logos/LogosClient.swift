@@ -67,6 +67,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published private(set) var pendingInteractionResponseID: String?
     @Published private(set) var threadFocusRequest: ThreadFocusRequest?
     @Published var lastError: String?
+    /// Bounded, source-tagged history of client errors (WS1 P7). `lastError` remains the
+    /// transient single-error banner; `errorLog` is the persistent, dismissible record.
+    @Published private(set) var errorLog = ErrorLogBuffer()
     @Published var playbackStatus: String?
     @Published private(set) var ackText: String?
     @Published private(set) var undeliveredSpeechDraft: UndeliveredSpeechDraft?
@@ -1140,9 +1143,26 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         audioPlaybackStreamTimeoutAudioID = nil
     }
 
+    /// Single funnel for surfacing a client error: records it in the persistent, source-tagged
+    /// history and mirrors it to the transient `lastError` banner.
+    func logError(_ message: String, source: LoggedError.Source) {
+        errorLog.record(message, source: source)
+        lastError = message
+    }
+
+    /// Dismiss one entry from the error history (UI affordance).
+    func dismissError(id: UUID) {
+        errorLog.dismiss(id: id)
+    }
+
+    /// Clear the entire error history.
+    func clearErrorHistory() {
+        errorLog.clear()
+    }
+
     private func recordAudioPlaybackError(_ message: String) {
         clearAck()
-        lastError = message
+        logError(message, source: .audio)
     }
 
     private func prepareForNewPlaybackRequest(audioID: String) {
@@ -1212,7 +1232,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func recordError(_ message: String) {
         clearAck()
         clearProgressActivity()
-        lastError = message
+        logError(message, source: .action)
     }
 
     private func updateAudioOverlay(audioID: String, phase: AudioPlaybackPhase, detail: String, canPause: Bool, canStop: Bool, spectrumBins: [Double]? = nil) {
@@ -1500,7 +1520,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         restoreInFlightFinalSpeechDrafts(reason: message)
         failInterruptedRemoteAudioStream()
         if connectionState != .disconnected || retryable {
-            lastError = message
+            logError(message, source: .connection)
             clearAck()
             if progressActivity?.isComplete != false {
                 runStatus = .idle
@@ -2168,7 +2188,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         if progressActivity?.isComplete == false {
             clearAck()
-            lastError = message
+            logError(message, source: .adapter)
             return
         }
         recordError(message)

@@ -1366,6 +1366,7 @@ struct ContentView: View {
                     hermesAdapterSection
                     voiceSettingsSection
                     notificationSettingsSection
+                    diagnosticsSettingsSection
                     settingsFooter
                 }
                 .padding(.horizontal, 14)
@@ -1713,6 +1714,79 @@ struct ContentView: View {
             }
             .settingsGroup()
         }
+    }
+
+    private var diagnosticsSettingsSection: some View {
+        SettingsSection(title: "Diagnostics") {
+            VStack(spacing: 0) {
+                if client.errorLog.isEmpty {
+                    SettingRowChrome(isLast: true) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "checkmark.seal")
+                                .settingsIcon()
+                            Text("No recent errors")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.logosLabel3)
+                                .accessibilityIdentifier("diagnosticsEmptyLabel")
+                            Spacer()
+                        }
+                    }
+                } else {
+                    let entries = client.errorLog.entries
+                    ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                        SettingRowChrome(isLast: false) {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .settingsIcon()
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(entry.source.label) · \(Self.errorRelativeTime(entry.date))")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(Color.logosLabel3)
+                                    Text(entry.message)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.logosLabel)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer()
+                                Button {
+                                    client.dismissError(id: entry.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(Color.logosLabel3)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("dismissErrorButton")
+                            }
+                        }
+                        .accessibilityIdentifier("errorHistoryRow")
+                    }
+
+                    SettingRowChrome(isLast: true) {
+                        Button {
+                            client.clearErrorHistory()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "trash")
+                                    .settingsIcon()
+                                Text("Clear error history")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(Color.logosAmber)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("clearErrorHistoryButton")
+                    }
+                }
+            }
+            .settingsGroup()
+        }
+    }
+
+    private static func errorRelativeTime(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var settingsFooter: some View {
