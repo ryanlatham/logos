@@ -235,7 +235,12 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         isWebSocketOpen = false
         connectionState = .connecting
         LogosConnectionLog.logger.info("Connection lifecycle started connection_id=\(connectionID.uuidString, privacy: .public) url=\(LogosConnectionLog.urlDescription(url), privacy: .public)")
-        let task = socketFactory.webSocketTask(with: url, lifecycleObserver: self)
+        let pinnedSPKI = settings.certSPKISHA256.trimmingCharacters(in: .whitespacesAndNewlines)
+        let task = socketFactory.webSocketTask(
+            with: url,
+            lifecycleObserver: self,
+            pinnedSPKISHA256: pinnedSPKI.isEmpty ? nil : pinnedSPKI
+        )
         self.task = task
         LogosConnectionLog.logger.info("WebSocket task assigned task_id=\(LogosConnectionLog.taskIDDescription(task), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
         task.resume()
@@ -570,6 +575,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             settings.urlString = credential.adapterURL
             settings.deviceID = credential.deviceID
             settings.secret = LogosSettings.normalizedSecret(credential.deviceSecret)
+            // WS3 S4: adopt the direct-WSS leaf pin from the (signed) pairing link, if any.
+            settings.certSPKISHA256 = (route.certSPKISHA256 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             settings.autoConnect = route.autoConnect
             settings.hasCompletedFirstConnection = true
             lastError = nil

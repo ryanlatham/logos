@@ -14,29 +14,42 @@ protocol WebSocketLifecycleObserving: AnyObject {
 }
 
 protocol WebSocketTaskMaking {
-    func webSocketTask(with url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?) -> any WebSocketTasking
+    /// `pinnedSPKISHA256` (WS3 S4): when non-nil, the leaf cert's SPKI pin must match or the
+    /// connection is rejected; nil keeps default CA evaluation (Tailscale/loopback).
+    func webSocketTask(
+        with url: URL,
+        lifecycleObserver: (any WebSocketLifecycleObserving)?,
+        pinnedSPKISHA256: String?
+    ) -> any WebSocketTasking
 }
 
 struct URLSessionWebSocketTaskFactory: WebSocketTaskMaking {
-    func webSocketTask(with url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?) -> any WebSocketTasking {
-        URLSessionWebSocketTaskBox(url: url, lifecycleObserver: lifecycleObserver)
+    func webSocketTask(
+        with url: URL,
+        lifecycleObserver: (any WebSocketLifecycleObserving)?,
+        pinnedSPKISHA256: String?
+    ) -> any WebSocketTasking {
+        URLSessionWebSocketTaskBox(url: url, lifecycleObserver: lifecycleObserver, pinnedSPKISHA256: pinnedSPKISHA256)
     }
 }
 
 final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWebSocketDelegate {
     private weak var lifecycleObserver: (any WebSocketLifecycleObserving)?
     private let url: URL
+    private let pinnedSPKISHA256: String?
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
 
-    init(url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?) {
+    init(url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?, pinnedSPKISHA256: String? = nil) {
         self.lifecycleObserver = lifecycleObserver
         self.url = url
+        let trimmedPin = pinnedSPKISHA256?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.pinnedSPKISHA256 = (trimmedPin?.isEmpty == false) ? trimmedPin : nil
         super.init()
         let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         self.session = session
         self.task = session.webSocketTask(with: url)
-        LogosConnectionLog.logger.info("WebSocket task created url=\(LogosConnectionLog.urlDescription(url), privacy: .public)")
+        LogosConnectionLog.logger.info("WebSocket task created url=\(LogosConnectionLog.urlDescription(url), privacy: .public) pinned=\(self.pinnedSPKISHA256 != nil, privacy: .public)")
     }
 
     deinit {
@@ -96,5 +109,23 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
 
     private func failureMessage(for error: Error) -> String {
         "WebSocket failed: \(LogosConnectionLog.errorDescription(error, url: url))"
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let isServerTrust = challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
+        // Pinned direct-WSS: the SPKI pin is the trust anchor, so the matching (self-signed) leaf
+        // is accepted and all else rejected — independent of CA evaluation. No pin -> default.
+        let accepted = LogosCertPinning.resolve(
+            challenge: challenge,
+            pinnedSPKISHA256: pinnedSPKISHA256,
+            completionHandler: completionHandler
+        )
+        if isServerTrust, pinnedSPKISHA256 != nil, accepted == false {
+            LogosConnectionLog.logger.error("Logos cert pin mismatch — rejecting connection url=\(LogosConnectionLog.urlDescription(self.url), privacy: .public)")
+        }
     }
 }

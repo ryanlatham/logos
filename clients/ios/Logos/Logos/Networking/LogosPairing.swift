@@ -9,6 +9,10 @@ struct LogosPairingRoute: Equatable, Identifiable {
     let deviceSecret: String?
     let expiresAt: Date?
     let autoConnect: Bool
+    /// WS3 S4: optional direct-WSS leaf SPKI pin distributed in the deep link. nil for
+    /// Tailscale/loopback invites (default TLS handling). Defaulted so existing memberwise
+    /// initializers stay source-compatible.
+    var certSPKISHA256: String? = nil
 
     var adapterHostDescription: String {
         URL(string: adapterURL)?.host ?? adapterURL
@@ -55,13 +59,17 @@ struct LogosPairingRoute: Equatable, Identifiable {
             expiresAt = nil
         }
         let autoConnect = root["autoconnect"] as? Bool ?? true
+        let certSPKISHA256 = (root["cert_spki_sha256"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
         return LogosPairingRoute(
             adapterURL: adapterURL,
             deviceID: deviceID,
             pairToken: pairToken,
             deviceSecret: nil,
             expiresAt: expiresAt,
-            autoConnect: autoConnect
+            autoConnect: autoConnect,
+            certSPKISHA256: certSPKISHA256
         )
     }
 
@@ -116,7 +124,11 @@ final class WebSocketPairingCredentialExchanger: PairingCredentialExchanging {
         guard route.allowsPairingTransport else { throw LogosPairingExchangeError.insecureAdapterURL }
         guard let pairToken = route.pairToken else { throw LogosPairingExchangeError.missingToken }
         guard let url = URL(string: route.adapterURL) else { throw LogosPairingExchangeError.invalidAdapterURL }
-        let session = URLSession(configuration: .ephemeral)
+        // WS3 S4: pin the pairing handshake too, using the pin carried in the (signed) deep link —
+        // otherwise a self-signed direct-WSS adapter would fail default CA validation here, before
+        // the pin is ever persisted. nil pin -> default handling (Tailscale/loopback), unchanged.
+        let pinningDelegate = LogosPinningSessionDelegate(pinnedSPKISHA256: route.certSPKISHA256)
+        let session = URLSession(configuration: .ephemeral, delegate: pinningDelegate, delegateQueue: nil)
         let task = session.webSocketTask(with: url)
         task.resume()
         defer {

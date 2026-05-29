@@ -5674,8 +5674,15 @@ private final class RecordingWebSocketTaskFactory: WebSocketTaskMaking {
         self.socket = socket
     }
 
-    func webSocketTask(with url: URL, lifecycleObserver: (any WebSocketLifecycleObserving)?) -> any WebSocketTasking {
+    private(set) var lastPinnedSPKISHA256: String?
+
+    func webSocketTask(
+        with url: URL,
+        lifecycleObserver: (any WebSocketLifecycleObserving)?,
+        pinnedSPKISHA256: String?
+    ) -> any WebSocketTasking {
         socket.lifecycleObserver = lifecycleObserver
+        lastPinnedSPKISHA256 = pinnedSPKISHA256
         return socket
     }
 }

@@ -9,12 +9,16 @@ struct LogosSettings: Equatable {
     private static let deviceIDKey = "logos.device.id"
     private static let autoConnectKey = "logos.autoconnect"
     private static let hasCompletedFirstConnectionKey = "logos.hasCompletedFirstConnection"
+    private static let certSPKIKey = "logos.adapter.cert_spki_sha256"
 
     var urlString: String
     var deviceID: String
     var secret: String
     var autoConnect: Bool
     var hasCompletedFirstConnection: Bool
+    /// WS3 S4: pinned leaf SPKI-SHA256 for the direct-WSS adapter (empty = no pin / default TLS).
+    /// A public key hash, not a secret, so it lives in UserDefaults alongside the URL.
+    var certSPKISHA256: String
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment, userDefaults: UserDefaults = .standard) {
         self.urlString = environment["LOGOS_WS_URL"]
@@ -28,6 +32,9 @@ struct LogosSettings: Equatable {
                 ?? LogosKeychain.loadSecret()
                 ?? ""
         )
+        self.certSPKISHA256 = (environment["LOGOS_CERT_SPKI_SHA256"]
+            ?? userDefaults.string(forKey: Self.certSPKIKey)
+            ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if let envAutoConnect = environment["LOGOS_AUTOCONNECT"] {
             self.autoConnect = envAutoConnect == "1" || envAutoConnect.lowercased() == "true"
             self.hasCompletedFirstConnection = self.autoConnect || userDefaults.bool(forKey: Self.hasCompletedFirstConnectionKey)
@@ -42,6 +49,12 @@ struct LogosSettings: Equatable {
         userDefaults.set(deviceID, forKey: Self.deviceIDKey)
         userDefaults.set(autoConnect, forKey: Self.autoConnectKey)
         userDefaults.set(hasCompletedFirstConnection, forKey: Self.hasCompletedFirstConnectionKey)
+        let trimmedPin = certSPKISHA256.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedPin.isEmpty {
+            userDefaults.removeObject(forKey: Self.certSPKIKey)
+        } else {
+            userDefaults.set(trimmedPin, forKey: Self.certSPKIKey)
+        }
         let normalizedSecret = Self.normalizedSecret(secret)
         if normalizedSecret.isEmpty {
             LogosKeychain.deleteSecret()
