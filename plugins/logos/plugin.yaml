@@ -31,6 +31,10 @@ optional_env:
     description: "SQLite path for Logos adapter metadata/store"
     prompt: "Logos store path"
     password: false
+  - name: LOGOS_ENC_MODE
+    description: "App-layer encryption: negotiate (default), required (reject non-encrypting clients), or off"
+    prompt: "Logos encryption mode (negotiate/required/off)"
+    password: false
   - name: LOGOS_TIMEOUT_SECONDS
     description: "Maximum app stale-silence timeout before Logos adds a local notice (default: 900)"
     prompt: "Logos stale timeout seconds"

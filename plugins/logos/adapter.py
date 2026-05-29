@@ -617,6 +617,7 @@ class LogosAdapter(BasePlatformAdapter):
             host=self.host,
             port=self.port,
             device_secret=self.device_secret,
+            enc_mode=os.getenv("LOGOS_ENC_MODE", "negotiate").strip().lower() or "negotiate",
         )
         try:
             await self.ws_server.start()
