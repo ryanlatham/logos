@@ -2114,7 +2114,20 @@ final class LogosModelTests: XCTestCase {
     func testProgressActivityCardLivesInActiveBottomFlowAndScrollsOnProgressUpdates() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let projectDirectory = testsDirectory.deletingLastPathComponent()
-        let contentViewSource = try String(contentsOf: projectDirectory.appendingPathComponent("Logos/ContentView.swift"), encoding: .utf8)
+        // ProgressActivityCard and the related thread/progress views were extracted into Views/*.
+        // This structural test spans the decomposed view layer, so read ContentView plus the
+        // extracted view files as one source. ContentView is first, so the placement/ordering
+        // checks below still resolve within its body.
+        let logosDirectory = projectDirectory.appendingPathComponent("Logos")
+        let contentViewSource = try [
+            "ContentView.swift",
+            "Views/ThreadViews.swift",
+            "Views/AudioViews.swift",
+            "Views/MessageViews.swift",
+            "Views/ListRowViews.swift",
+            "Views/SettingsViews.swift",
+        ].map { try String(contentsOf: logosDirectory.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
         let messagesRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesBeforeProgress)"))
         let progressRange = try XCTUnwrap(contentViewSource.range(of: "ProgressActivityCard("))
         let afterProgressRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesAfterProgress)"))
