@@ -135,6 +135,14 @@ struct ProgressActivityCard: View {
                         if isWorking {
                             SpinningHourglassIcon(isAnimating: isWorking)
                         }
+                        if isWorking, activity.finalStatus == nil {
+                            Label(activity.currentMilestone.label, systemImage: activity.currentMilestone.systemImage)
+                                .labelStyle(.titleAndIcon)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color.logosLabel3)
+                                .transition(.opacity)
+                                .accessibilityIdentifier("progressMilestoneLabel")
+                        }
                     }
                     if hasAdapterUpdates {
                         Text("\(totalEventCount) update\(totalEventCount == 1 ? "" : "s")")
