@@ -64,6 +64,8 @@ def test_pairing_deep_link_is_versioned_url_safe_and_does_not_expose_device_secr
         "pair_token": "pair-token-secret-value",
         "expires_at": 1_778_760_000.0,
         "autoconnect": True,
+        # WS3 S4: the optional transport pin is surfaced (None for non-pinned Tailscale invites).
+        "cert_spki_sha256": None,
     }
 
 

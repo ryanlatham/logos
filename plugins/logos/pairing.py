@@ -61,6 +61,7 @@ def build_pairing_deep_link(
     pair_token: str,
     expires_at: float,
     autoconnect: bool = True,
+    cert_spki_sha256: str | None = None,
 ) -> str:
     normalized_url = _normalized_adapter_url(adapter_url)
     normalized_device_id = str(device_id or "").strip()
@@ -77,6 +78,11 @@ def build_pairing_deep_link(
         "expires_at": float(expires_at),
         "autoconnect": bool(autoconnect),
     }
+    # Optional WS3 S4 transport pin: present only for direct-WSS deployments. Back-compatible —
+    # Tailscale/loopback invites simply omit it and the app falls back to default TLS handling.
+    pin = str(cert_spki_sha256 or "").strip()
+    if pin:
+        payload["cert_spki_sha256"] = pin
     encoded = _base64url_encode_json(payload)
     return f"logos://pair#{encoded}"
 
@@ -102,6 +108,7 @@ def decode_pairing_deep_link(url: str) -> dict[str, Any]:
         "pair_token": pair_token,
         "expires_at": float(payload.get("expires_at") or 0.0),
         "autoconnect": bool(payload.get("autoconnect", True)),
+        "cert_spki_sha256": str(payload.get("cert_spki_sha256") or "").strip() or None,
     }
 
 
@@ -144,6 +151,7 @@ def create_invite(
     ttl_seconds: int = DEFAULT_PAIRING_TTL_SECONDS,
     now: float | None = None,
     autoconnect: bool = True,
+    cert_spki_sha256: str | None = None,
 ) -> PairingInvite:
     issued_at = time.time() if now is None else float(now)
     ttl = max(30, min(int(ttl_seconds), 900))
@@ -158,6 +166,7 @@ def create_invite(
         pair_token=token,
         expires_at=expires_at,
         autoconnect=autoconnect,
+        cert_spki_sha256=cert_spki_sha256,
     )
     return PairingInvite(
         adapter_url=_normalized_adapter_url(adapter_url),

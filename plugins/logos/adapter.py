@@ -68,6 +68,12 @@ from .message_state import MessageStateMixin
 from .request_context import current_request_context, request_scope
 from .run_state import RunStateMixin
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
+from .tls import (
+    TLS_MODE_SELF_SIGNED,
+    build_server_ssl_context,
+    load_or_create_tls_material,
+    tls_mode_from_env,
+)
 from .telemetry import TelemetryLog
 from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
@@ -155,6 +161,7 @@ class LogosAdapter(
         self.apns = APNSClient.from_env()
         self._notifier = PrivateNotifier()
         self._telemetry = TelemetryLog()
+        self._tls_material: Any = None  # WS3 S4: lazily-loaded direct-WSS cert/key/pin
         self.latest_pairing_invite: PairingInvite | None = None
         self._transient_progress_context: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_keepalive_sent_at: dict[tuple[str, str], float] = {}
@@ -284,6 +291,7 @@ class LogosAdapter(
         autoconnect: bool = True,
     ) -> PairingInvite:
         url = adapter_url or self._public_adapter_url()
+        tls_material = self._ensure_tls_material()
         invite = create_invite(
             master_secret=self.device_secret,
             adapter_url=url,
@@ -291,6 +299,7 @@ class LogosAdapter(
             ttl_seconds=ttl_seconds,
             now=now,
             autoconnect=autoconnect,
+            cert_spki_sha256=getattr(tls_material, "spki_sha256", None),
         )
         self.store.upsert_pairing_token(
             token_hash=pairing_token_hash(invite.pair_token),
@@ -434,12 +443,14 @@ class LogosAdapter(
                 retryable=False,
             )
             return False
+        tls_material = self._ensure_tls_material()
         self.ws_server = LogosWebSocketServer(
             self,
             host=self.host,
             port=self.port,
             device_secret=self.device_secret,
             enc_mode=os.getenv("LOGOS_ENC_MODE", "negotiate").strip().lower() or "negotiate",
+            ssl_context=build_server_ssl_context(tls_material) if tls_material is not None else None,
         )
         try:
             await self.ws_server.start()
@@ -824,6 +835,22 @@ class LogosAdapter(
             return Path(str(configured)).expanduser()
         hermes_home = Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes")
         return hermes_home / "logos" / "logos.db"
+
+    def _ensure_tls_material(self) -> Any:
+        """Load/create the direct-WSS TLS material when LOGOS_TLS_MODE=self_signed (WS3 S4).
+
+        Returns None (and the server stays plain ``ws://``) for the default/off mode, so existing
+        Tailscale/loopback deployments are unaffected. The SPKI pin is reused for pairing invites.
+        """
+        if tls_mode_from_env() != TLS_MODE_SELF_SIGNED:
+            return None
+        if self._tls_material is None:
+            hermes_home = Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes")
+            self._tls_material = load_or_create_tls_material(
+                hermes_home / "logos" / "tls",
+                common_name=str(self.host or "logos.local"),
+            )
+        return self._tls_material
 
     def _project_key_for(self, envelope: Envelope) -> str:
         raw = envelope.project_key or envelope.payload.get("project_key")
