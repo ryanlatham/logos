@@ -49,11 +49,14 @@ struct DraftUserBubble: View {
                     .fill(Color.logosAmberOn)
                     .frame(width: 2, height: 16)
                     .opacity(caretVisible ? 1 : 0)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
             .background(Color.logosAmber, in: ChatBubbleShape(isUser: true))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("You, dictating: \(text)")
         }
         .onAppear {
             withAnimation(.linear(duration: 2.4).repeatForever(autoreverses: false)) { shimmerPhase.toggle() }
@@ -89,6 +92,17 @@ struct ProgressActivityCard: View {
         case .interrupted: return "Interrupted"
         case nil: return "Running"
         }
+    }
+
+    private var progressSummaryAccessibilityLabel: String {
+        var parts = [progressTitleText]
+        if isWorking, activity.finalStatus == nil {
+            parts.append(activity.currentMilestone.label)
+        }
+        if hasAdapterUpdates {
+            parts.append("\(totalEventCount) update\(totalEventCount == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: ", ")
     }
 
     private var accentColor: Color {
@@ -151,6 +165,8 @@ struct ProgressActivityCard: View {
                             .transition(.opacity)
                     }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(progressSummaryAccessibilityLabel)
 
                 Spacer(minLength: 8)
 

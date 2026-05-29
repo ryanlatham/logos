@@ -23,6 +23,8 @@ struct AudioPlaybackOverlayView: View {
                     .foregroundStyle(Color.logosLabel3)
                     .lineLimit(1)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(overlay.detail.isEmpty ? title : "\(title), \(overlay.detail)")
 
             Spacer(minLength: 8)
 
@@ -59,6 +61,10 @@ struct AudioPlaybackOverlayView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
         .shadow(color: .black.opacity(0.28), radius: 16, x: 0, y: 8)
         .accessibilityIdentifier("audioPlaybackOverlay")
+        // The overlay is a tightly packed horizontal pill (spectrum + status text +
+        // two fixed circular controls). Let the status text scale for accessibility,
+        // but clamp the largest sizes so the row does not break its fixed geometry.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
     }
 
     private var title: String {

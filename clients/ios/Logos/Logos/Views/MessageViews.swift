@@ -26,6 +26,8 @@ struct ThinkingBubble: View {
             Spacer(minLength: 48)
         }
         .padding(.horizontal, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Hermes: \(text)")
     }
 }
 
@@ -85,11 +87,13 @@ struct ApprovalCardView: View {
             HStack(spacing: 7) {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 14, weight: .semibold))
+                    .accessibilityHidden(true)
                 Text("Hermes needs approval")
                     .font(.system(size: 12, weight: .bold))
                     .textCase(.uppercase)
             }
             .foregroundStyle(Color.logosAmber)
+            .accessibilityElement(children: .combine)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(approval.title)
@@ -150,11 +154,13 @@ struct ClarifyCardView: View {
             HStack(spacing: 7) {
                 Image(systemName: "questionmark.circle")
                     .font(.system(size: 14, weight: .semibold))
+                    .accessibilityHidden(true)
                 Text("Clarification")
                     .font(.system(size: 12, weight: .bold))
                     .textCase(.uppercase)
             }
             .foregroundStyle(Color.logosTeal)
+            .accessibilityElement(children: .combine)
 
             Text(clarify.question)
                 .font(.system(size: 17, weight: .semibold))
