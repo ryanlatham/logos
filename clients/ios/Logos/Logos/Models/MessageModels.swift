@@ -213,6 +213,31 @@ struct LogosMessage: Identifiable, Hashable {
     }
 }
 
+extension LogosMessage: Decodable {
+    /// WS1 P8: `Decodable` conformance for the Codable wire layer (so an envelope payload or a
+    /// store row can decode straight to `LogosMessage`). It routes through the proven
+    /// `from(dictionary:)` decoder via `JSONValue.toDictionary()` — `LogosMessage` carries
+    /// non-field-mapping coercion (strict-bool `finalized` vs coerced `transient`/`error`, the
+    /// `progress_kind`/`kind` fallback, and the sorted-keys `metadataJSON`), so delegating
+    /// guarantees byte-for-byte equivalence with the existing path (no behavior drift). The
+    /// `LogosMessageCodableTests` value-equivalence harness pins that equivalence.
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(JSONValue.self)
+        guard
+            let dictionary = value.toDictionary(),
+            let message = LogosMessage.from(dictionary: dictionary)
+        else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Invalid Logos message frame (missing required fields)"
+                )
+            )
+        }
+        self = message
+    }
+}
+
 struct UndeliveredSpeechDraft: Identifiable, Equatable {
     var id: String { inputID }
     let inputID: String

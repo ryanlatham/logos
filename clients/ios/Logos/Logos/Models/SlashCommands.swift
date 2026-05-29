@@ -290,3 +290,55 @@ private extension String {
         return index == needle.endIndex
     }
 }
+
+// WS1 P8: Decodable conformance for the slash-command wire types. Like LogosMessage, these carry
+// non-field-mapping coercion (slash normalization, bool coercion, defaults), so each init(from:)
+// routes through the proven from(dictionary:) decoder via JSONValue.toDictionary() — guaranteeing
+// byte-for-byte equivalence with the existing path. LogosSlashCommandCodableTests pins it.
+extension SlashCommandSpec: Decodable {
+    init(from decoder: Decoder) throws {
+        guard
+            let dictionary = try decoder.singleValueContainer().decode(JSONValue.self).toDictionary(),
+            let value = SlashCommandSpec.from(dictionary: dictionary)
+        else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid SlashCommandSpec"))
+        }
+        self = value
+    }
+}
+
+extension SlashCommandCatalog: Decodable {
+    init(from decoder: Decoder) throws {
+        guard
+            let dictionary = try decoder.singleValueContainer().decode(JSONValue.self).toDictionary(),
+            let value = SlashCommandCatalog.from(dictionary: dictionary)
+        else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid SlashCommandCatalog"))
+        }
+        self = value
+    }
+}
+
+extension SlashCommandCompletionItem: Decodable {
+    init(from decoder: Decoder) throws {
+        guard
+            let dictionary = try decoder.singleValueContainer().decode(JSONValue.self).toDictionary(),
+            let value = SlashCommandCompletionItem.from(dictionary: dictionary)
+        else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid SlashCommandCompletionItem"))
+        }
+        self = value
+    }
+}
+
+extension SlashCommandCompletionResult: Decodable {
+    init(from decoder: Decoder) throws {
+        guard
+            let dictionary = try decoder.singleValueContainer().decode(JSONValue.self).toDictionary(),
+            let value = SlashCommandCompletionResult.from(dictionary: dictionary)
+        else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid SlashCommandCompletionResult"))
+        }
+        self = value
+    }
+}
