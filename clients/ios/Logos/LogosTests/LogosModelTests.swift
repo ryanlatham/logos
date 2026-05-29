@@ -2114,7 +2114,20 @@ final class LogosModelTests: XCTestCase {
     func testProgressActivityCardLivesInActiveBottomFlowAndScrollsOnProgressUpdates() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let projectDirectory = testsDirectory.deletingLastPathComponent()
-        let contentViewSource = try String(contentsOf: projectDirectory.appendingPathComponent("Logos/ContentView.swift"), encoding: .utf8)
+        // ProgressActivityCard and the related thread/progress views were extracted into Views/*.
+        // This structural test spans the decomposed view layer, so read ContentView plus the
+        // extracted view files as one source. ContentView is first, so the placement/ordering
+        // checks below still resolve within its body.
+        let logosDirectory = projectDirectory.appendingPathComponent("Logos")
+        let contentViewSource = try [
+            "ContentView.swift",
+            "Views/ThreadViews.swift",
+            "Views/AudioViews.swift",
+            "Views/MessageViews.swift",
+            "Views/ListRowViews.swift",
+            "Views/SettingsViews.swift",
+        ].map { try String(contentsOf: logosDirectory.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
         let messagesRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesBeforeProgress)"))
         let progressRange = try XCTUnwrap(contentViewSource.range(of: "ProgressActivityCard("))
         let afterProgressRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesAfterProgress)"))
@@ -2492,13 +2505,14 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testGatewayStatusProgressCanBecomeLocalStaleNoticeWithoutAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-gateway-status","project_key":"default","session_id":"session-gateway-status","payload":{"kind":"gateway_status","progress_kind":"gateway_status","text":"⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
 
         XCTAssertEqual(client.runStatus, .running)
         XCTAssertEqual(client.progressActivity?.timedOut, true)
@@ -3347,13 +3361,14 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testProgressSilenceTimeoutIsVisualOnlyAndFinalCancelsTimeout() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-timeout","project_key":"default","session_id":"session-timeout","payload":{"kind":"terminal","text":"Still running"}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
 
         XCTAssertEqual(client.progressActivity?.timedOut, true)
         XCTAssertNotEqual(client.runStatus, .error)
@@ -3362,13 +3377,15 @@ final class LogosModelTests: XCTestCase {
         var playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertTrue(playbackFrames.isEmpty)
 
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // A repeated timeout fire stays visual-only and never triggers autoplay.
+        XCTAssertTrue(scheduler.fireStaleTimeout())
         newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertTrue(playbackFrames.isEmpty)
 
         let socket2 = RecordingWebSocketTask()
-        let client2 = makeSocketBackedClient(socket: socket2, staleTimeoutInterval: 0.05)
+        let scheduler2 = ManualStaleTimeoutScheduler()
+        let client2 = makeSocketBackedClient(socket: socket2, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler2)
         let baselineCount2 = socket2.sentMessages.count
         client2.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-timeout","project_key":"default","session_id":"session-cancel-timeout","payload":{"kind":"terminal","text":"Almost done"}}
@@ -3376,7 +3393,7 @@ final class LogosModelTests: XCTestCase {
         client2.handleFrameString(#"""
         {"type":"state_update","request_id":"req-cancel-timeout","project_key":"default","session_id":"session-cancel-timeout","server_seq":90,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-cancel-timeout","message_id":"assistant-cancel-timeout","server_seq":90,"role":"assistant","content":"Finished before timeout.","timestamp":125.0,"metadata":{"finalized":true}}}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertFalse(scheduler2.hasPendingTimeout)
 
         XCTAssertEqual(client2.progressActivity?.requestID, "req-cancel-timeout")
         XCTAssertEqual(client2.progressActivity?.isComplete, true)
@@ -3392,7 +3409,8 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testServerClientConfigOverridesStaleTimeoutAndPromptSilenceAddsLocalNotice() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 30)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 30, staleTimeoutScheduler: scheduler)
 
         client.handleFrameString(#"""
         {"type":"hello","request_id":"hello-config","payload":{"client_config":{"stale_timeout_seconds":0.05}}}
@@ -3401,7 +3419,9 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(client.sendText("Do something slow."))
         let sentCount = socket.sentMessages.count
 
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // The server-provided client_config overrides the 30s default down to 0.05s.
+        XCTAssertEqual(try XCTUnwrap(scheduler.lastInterval), 0.05, accuracy: 0.0001)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
 
         XCTAssertNotEqual(client.runStatus, .error)
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
@@ -3415,19 +3435,22 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testRunStatusKeepaliveResetsStaleNoticeTimer() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
         XCTAssertTrue(client.sendText("Stay alive while working."))
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
+        let scheduleCountAfterSend = scheduler.scheduleCount
 
-        try await Task.sleep(nanoseconds: 40_000_000)
         client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
         """)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // A matching keepalive reschedules (resets) the active stale timer, and no
+        // notice is posted until the reset timer actually fires.
+        XCTAssertGreaterThan(scheduler.scheduleCount, scheduleCountAfterSend)
         XCTAssertTrue(client.messages.filter { $0.status == "local_notice" }.isEmpty)
 
-        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
         XCTAssertNotEqual(client.runStatus, .error)
     }
@@ -3435,15 +3458,18 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testMismatchedRunStatusKeepaliveDoesNotResetActiveStaleTimer() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
         XCTAssertTrue(client.sendText("Active run should not be reset by old keepalive."))
+        let scheduleCountAfterSend = scheduler.scheduleCount
 
-        try await Task.sleep(nanoseconds: 40_000_000)
         client.handleFrameString(#"""
         {"type":"run_status","request_id":"req-old-keepalive","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
         """#)
-        try await Task.sleep(nanoseconds: 55_000_000)
+        // A keepalive for a stale request ID must not reschedule the active timer.
+        XCTAssertEqual(scheduler.scheduleCount, scheduleCountAfterSend)
 
+        XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
         XCTAssertNotEqual(client.runStatus, .error)
     }
@@ -3451,18 +3477,20 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testTerminalRunStatusAfterStaleNoticeStopsRepeatingNotices() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         XCTAssertTrue(client.sendText("This will become stale, then idle."))
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
 
         client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle"}}
         """)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // The terminal idle status cancels the repeating timer; firing again is a no-op.
+        XCTAssertFalse(scheduler.fireStaleTimeout())
 
         XCTAssertEqual(client.runStatus, .idle)
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
@@ -3471,12 +3499,13 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testTimedOutProgressIgnoresUnrelatedLateProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
 
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-timeout-current","project_key":"default","session_id":"session-timeout-current","payload":{"kind":"terminal","text":"Current request running"}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.progressActivity?.requestID, "req-timeout-current")
         XCTAssertEqual(client.progressActivity?.timedOut, true)
 
@@ -3491,12 +3520,14 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testMessagesBatchDurableProgressDoesNotReviveLiveProgressOrStaleTimer() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
 
         client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"session-replay","payload":{"messages":[{"project_key":"default","session_id":"session-replay","message_id":"progress-replay","server_seq":91,"role":"assistant","content":"🔧 terminal: \"old\"","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","request_id":"req-old-replay","transient":false}}]}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // Durable progress replay must not arm a stale timer.
+        XCTAssertFalse(scheduler.hasPendingTimeout)
 
         XCTAssertNil(client.progressActivity)
         XCTAssertTrue(client.messages.isEmpty)
@@ -3507,10 +3538,11 @@ final class LogosModelTests: XCTestCase {
     func testLocalStaleNoticePersistsAcrossStoreReload() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
-        let client = makeSocketBackedClient(socket: socket, store: store, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, store: store, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         XCTAssertTrue(client.sendText("Persist stale notice."))
 
-        try await Task.sleep(nanoseconds: 90_000_000)
+        XCTAssertTrue(scheduler.fireStaleTimeout())
 
         let reloaded = LogosClient(store: store, staleTimeoutInterval: 0.05)
         XCTAssertEqual(reloaded.messages.filter { $0.status == "local_notice" }.count, 1)
@@ -3520,7 +3552,8 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testProgressTimeoutSuspendsWhileAwaitingApproval() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
         client.handleFrameString(#"""
@@ -3529,7 +3562,8 @@ final class LogosModelTests: XCTestCase {
         client.handleFrameString(#"""
         {"type":"approval_request","request_id":"req-approval-wait","project_key":"default","session_id":"session-approval-wait","payload":{"approval_id":"approval-wait","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // Awaiting approval suspends the stale timer; nothing remains armed to fire.
+        XCTAssertFalse(scheduler.hasPendingTimeout)
 
         XCTAssertEqual(client.runStatus, .awaitingApproval)
         XCTAssertEqual(client.progressActivity?.timedOut, false)
@@ -3541,7 +3575,8 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testCancelRunDedupeSuspendsProgressTimeoutAndAcceptsIdle() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05)
+        let scheduler = ManualStaleTimeoutScheduler()
+        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel","project_key":"default","session_id":"session-cancel","payload":{"kind":"terminal","text":"Long task running"}}
         """#)
@@ -3562,7 +3597,8 @@ final class LogosModelTests: XCTestCase {
         client.handleFrameString(#"""
         {"type":"run_status","project_key":"default","payload":{"status":"cancelling"}}
         """#)
-        try await Task.sleep(nanoseconds: 90_000_000)
+        // Cancelling suspends the stale timer, so no timeout fire remains armed.
+        XCTAssertFalse(scheduler.hasPendingTimeout)
 
         XCTAssertEqual(client.runStatus, .cancelling)
         XCTAssertEqual(client.progressActivity?.events.filter { $0.kind == "timeout" }.count, 0)
@@ -5523,19 +5559,55 @@ private final class RecordingPairingCredentialExchanger: PairingCredentialExchan
     }
 }
 
+/// Test double for `StaleTimeoutScheduling` that records scheduling activity and
+/// fires the pending stale-timeout synchronously, so timeout behavior can be
+/// asserted deterministically without sleeping against a real timer.
+@MainActor
+final class ManualStaleTimeoutScheduler: StaleTimeoutScheduling {
+    private(set) var scheduleCount = 0
+    private(set) var lastInterval: TimeInterval?
+    private var pendingFire: (@MainActor () -> Void)?
+
+    /// Whether a fire is currently armed (scheduled and not yet fired or cancelled).
+    var hasPendingTimeout: Bool { pendingFire != nil }
+
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void) {
+        scheduleCount += 1
+        lastInterval = interval
+        pendingFire = fire
+    }
+
+    func cancel() {
+        pendingFire = nil
+    }
+
+    /// Synchronously invoke the currently-armed timeout, mimicking the real timer
+    /// firing. The repeat-reschedule that happens inside the fire installs a fresh
+    /// pending fire. Returns whether a fire was armed.
+    @discardableResult
+    func fireStaleTimeout() -> Bool {
+        guard let fire = pendingFire else { return false }
+        pendingFire = nil
+        fire()
+        return true
+    }
+}
+
 @MainActor
 private func makeSocketBackedClient(
     socket: RecordingWebSocketTask,
     autoConnect: Bool = true,
     store: SQLiteMessageStore? = nil,
     audioPlayback: AudioPlaybackController = AudioPlaybackController(),
-    staleTimeoutInterval: TimeInterval = 45
+    staleTimeoutInterval: TimeInterval = 45,
+    staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil
 ) -> LogosClient {
     let client = LogosClient(
         store: store ?? SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
         socketFactory: RecordingWebSocketTaskFactory(socket: socket),
         audioPlayback: audioPlayback,
-        staleTimeoutInterval: staleTimeoutInterval
+        staleTimeoutInterval: staleTimeoutInterval,
+        staleTimeoutScheduler: staleTimeoutScheduler
     )
     client.settings.urlString = "ws://127.0.0.1:8765"
     client.settings.deviceID = "ios-simulator"

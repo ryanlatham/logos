@@ -119,6 +119,40 @@ struct URLSessionWebSocketTaskFactory: WebSocketTaskMaking {
     }
 }
 
+/// Schedules the single-shot fire that surfaces a stale-progress notice when
+/// Hermes goes quiet. Production sleeps in real wall-clock time; tests inject a
+/// manual scheduler so the timeout can be fired synchronously instead of racing
+/// a real timer (which is flaky on a loaded CI runner).
+@MainActor
+protocol StaleTimeoutScheduling: AnyObject {
+    /// Schedule `fire` to run after `interval` seconds, replacing any pending fire.
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void)
+    /// Cancel any pending fire.
+    func cancel()
+}
+
+@MainActor
+final class TaskStaleTimeoutScheduler: StaleTimeoutScheduling {
+    private var task: Task<Void, Never>?
+
+    func schedule(after interval: TimeInterval, fire: @escaping @MainActor () -> Void) {
+        task?.cancel()
+        task = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0.001, interval) * 1_000_000_000))
+            } catch {
+                return
+            }
+            fire()
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 struct FastAckState: Equatable {
     let id: String
     let projectKey: String
@@ -286,7 +320,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
     private var ackClearTask: Task<Void, Never>?
-    private var staleTimeoutTask: Task<Void, Never>?
+    private let staleTimeoutScheduler: any StaleTimeoutScheduling
     private var localNoticeMessages: [LogosMessage] = []
     private var localNoticeSequence = 0
     private var pendingCancelRequestID: String?
@@ -327,13 +361,15 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         socketFactory: any WebSocketTaskMaking = URLSessionWebSocketTaskFactory(),
         pairingExchanger: any PairingCredentialExchanging = WebSocketPairingCredentialExchanger(),
         audioPlayback: AudioPlaybackController = AudioPlaybackController(),
-        staleTimeoutInterval: TimeInterval = 900
+        staleTimeoutInterval: TimeInterval = 900,
+        staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil
     ) {
         self.store = store
         self.socketFactory = socketFactory
         self.pairingExchanger = pairingExchanger
         self.audioPlayback = audioPlayback
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
+        self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
         messages = visibleMessages(from: store.loadMessages(projectKey: activeProjectKey))
         audioPlayback.onPlaybackFinished = { [weak self] audioID, succeeded in
             Task { @MainActor in
@@ -1551,17 +1587,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         guard projectKey == activeProjectKey else { return }
         guard runStatus != .cancelling, runStatus != .awaitingApproval, runStatus != .awaitingClarification else { return }
         guard isActiveRunRequestID(requestID) else { return }
-        staleTimeoutTask?.cancel()
-        let interval = staleTimeoutInterval
-        staleTimeoutTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: UInt64(max(0.001, interval) * 1_000_000_000))
-            } catch {
-                return
-            }
-            await MainActor.run {
-                self?.handleStaleTimeout(requestID: requestID, projectKey: projectKey)
-            }
+        staleTimeoutScheduler.schedule(after: staleTimeoutInterval) { [weak self] in
+            self?.handleStaleTimeout(requestID: requestID, projectKey: projectKey)
         }
     }
 
@@ -1597,8 +1624,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func suspendStaleTimeout() {
-        staleTimeoutTask?.cancel()
-        staleTimeoutTask = nil
+        staleTimeoutScheduler.cancel()
     }
 
     private func clearProgressActivity(requestID: String? = nil) {
