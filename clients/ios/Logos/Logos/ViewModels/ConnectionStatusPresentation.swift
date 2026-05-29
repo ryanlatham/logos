@@ -41,4 +41,26 @@ enum ConnectionStatusPresentation {
         case .error: return .error
         }
     }
+
+    /// User-facing transport posture (WS3 goal: make "encrypted vs transport-only" visible).
+    /// Distinguishes Tailscale, direct WSS (with/without a pinned cert), Simulator loopback, and
+    /// otherwise echoes the URL. App-layer AEAD applies to all of these independently.
+    static func transportDescription(urlString: String, isPinned: Bool) -> String {
+        let lower = urlString.lowercased()
+        if lower.contains("tail") || lower.contains(".ts.net") {
+            return "via Tailscale"
+        }
+        if let host = URL(string: urlString)?.host, isLoopbackHost(host) {
+            return "Local (Simulator)"
+        }
+        if lower.hasPrefix("wss://") {
+            return isPinned ? "Direct WSS · pinned" : "Direct WSS"
+        }
+        return urlString
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "localhost" || h == "ip6-localhost" || h == "::1" || h.hasPrefix("127.")
+    }
 }

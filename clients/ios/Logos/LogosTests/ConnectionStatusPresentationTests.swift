@@ -24,4 +24,23 @@ final class ConnectionStatusPresentationTests: XCTestCase {
         XCTAssertEqual(ConnectionStatusPresentation.indicator(for: .disconnected), .idle)
         XCTAssertEqual(ConnectionStatusPresentation.indicator(for: .error), .error)
     }
+
+    func testTransportDescriptionSurfacesPosture() {
+        XCTAssertEqual(
+            ConnectionStatusPresentation.transportDescription(urlString: "wss://mac.my-tailnet.ts.net/", isPinned: false),
+            "via Tailscale"
+        )
+        XCTAssertEqual(
+            ConnectionStatusPresentation.transportDescription(urlString: "ws://127.0.0.1:8765/", isPinned: false),
+            "Local (Simulator)"
+        )
+        XCTAssertEqual(
+            ConnectionStatusPresentation.transportDescription(urlString: "wss://logos.example:8765/logos", isPinned: true),
+            "Direct WSS · pinned"
+        )
+        XCTAssertEqual(
+            ConnectionStatusPresentation.transportDescription(urlString: "wss://logos.example:8765/logos", isPinned: false),
+            "Direct WSS"
+        )
+    }
 }

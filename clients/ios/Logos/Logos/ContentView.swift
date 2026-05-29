@@ -2622,11 +2622,10 @@ struct ContentView: View {
     }
 
     private var connectionDetail: String {
-        if client.settings.urlString.contains("tail")
-            || client.settings.urlString.contains(".ts.net") {
-            return "via Tailscale"
-        }
-        return client.settings.urlString
+        ConnectionStatusPresentation.transportDescription(
+            urlString: client.settings.urlString,
+            isPinned: client.settings.certSPKISHA256.isEmpty == false
+        )
     }
 
     private var autoConnectDetail: String {
