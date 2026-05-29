@@ -5247,6 +5247,41 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(factory.player.stopCalls, 1)
     }
 
+    // WS1 P5 prerequisite (cont.): scene background/foreground pause+resume of active playback.
+    @MainActor
+    func testAudioPlaybackSceneLifecyclePauseResumeThroughClient() throws {
+        let socket = RecordingWebSocketTask()
+        let factory = RecordingAudioPlayerFactory()
+        let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1, -0.1], sampleRate: 24_000))
+        let audio = AudioPlaybackController(sessionManager: RecordingAudioSessionManager(), playerFactory: factory, sampleDecoder: decoder)
+        let client = makeSocketBackedClient(socket: socket, audioPlayback: audio)
+        client.activeProjectKey = "default"
+
+        let message = LogosMessage(
+            projectKey: "default", sessionID: "s1", messageID: "m1", serverSeq: 5,
+            role: "assistant", content: "hello", timestamp: 1, status: "persisted"
+        )
+        client.playback(message: message)
+        let audioID = try XCTUnwrap(client.audioPlaybackOverlay?.audioID)
+        client.handleFrameString(
+            "{\"type\":\"audio_chunk\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_index\":0,\"data\":\"AQID\"}}"
+        )
+        client.handleFrameString(
+            "{\"type\":\"audio_end\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_count\":1}}"
+        )
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
+
+        // Backgrounding the scene pauses the active player and reflects it in the overlay.
+        client.pauseAudioForSceneBackground()
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .paused)
+        XCTAssertEqual(factory.player.pauseCalls, 1)
+
+        // Returning to foreground resumes it.
+        client.resumeAudioForSceneActive()
+        XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
+        XCTAssertGreaterThanOrEqual(factory.player.playCalls, 2)
+    }
+
     func testAudioPlaybackRejectsOversizedChunkBeforeDecode() throws {
         let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1], sampleRate: 24_000))
         let controller = AudioPlaybackController(
