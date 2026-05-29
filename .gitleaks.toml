@@ -21,3 +21,8 @@ regexes = [
   '''openssl rand -hex 32''',
   '''<your\.reverse\.dns\.logos>''',
 ]
+paths = [
+  # Deterministic crypto known-answer vectors (derived keys, ciphertext) — not secrets.
+  '''tests/test_crypto_roundtrip\.py''',
+  '''clients/ios/Logos/LogosTests/LogosCryptoTests\.swift''',
+]
