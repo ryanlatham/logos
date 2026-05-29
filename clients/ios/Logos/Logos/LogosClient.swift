@@ -2128,7 +2128,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func handleProjectsList(_ root: [String: Any]) {
         guard let payload = root["payload"] as? [String: Any] else { return }
         let rawProjects = payload["projects"] as? [[String: Any]] ?? []
-        projects = rawProjects.compactMap(LogosProject.from(dictionary:))
+        let projectDecode = LogosWireDecoder.decodeList(rawProjects, LogosProject.from(dictionary:))
+        if projectDecode.hasDrops {
+            LogosConnectionLog.logger.warning("Dropped \(projectDecode.droppedCount, privacy: .public) malformed project entries in projects_list")
+        }
+        projects = projectDecode.decoded
         let hasCurrentProject = projects.contains(where: { $0.projectKey == activeProjectKey })
         if let active = payload["active_project_key"] as? String, !active.isEmpty {
             if active == activeProjectKey || hasCurrentProject == false {
@@ -2168,7 +2172,11 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private func handleMessagesBatch(_ root: [String: Any]) {
         guard let payload = root["payload"] as? [String: Any] else { return }
         let rawMessages = payload["messages"] as? [[String: Any]] ?? []
-        let decodedMessages = rawMessages.compactMap(LogosMessage.from(dictionary:))
+        let messageDecode = LogosWireDecoder.decodeList(rawMessages, LogosMessage.from(dictionary:))
+        if messageDecode.hasDrops {
+            LogosConnectionLog.logger.warning("Dropped \(messageDecode.droppedCount, privacy: .public) malformed message entries in messages_batch")
+        }
+        let decodedMessages = messageDecode.decoded
         var persistedMessages: [LogosMessage] = []
         let batchRequestID = root["request_id"] as? String
         let isReconnectReplay = batchRequestID != nil && batchRequestID == pendingReconnectReplayRequestID
