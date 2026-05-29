@@ -31,7 +31,7 @@ struct FastAckState: Equatable {
 }
 
 @MainActor
-final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
+final class LogosClient: ObservableObject {
     @Published var settings = LogosSettings() {
         didSet {
             settings.persist()
@@ -43,7 +43,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             }
         }
     }
-    @Published private(set) var connectionState: LogosConnectionState = .disconnected
     @Published private(set) var projects: [LogosProject] = []
     @Published var activeProjectKey: String = "default" {
         didSet {
@@ -66,10 +65,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     @Published internal(set) var slashCommandCatalog: SlashCommandCatalog = .fallback
     @Published internal(set) var slashCommandCompletion: SlashCommandCompletionResult = .empty
 
-    var task: (any WebSocketTasking)?
-    private var connectionLifecycle = LogosConnectionLifecycle()
+    let logosConnection: LogosConnection
+    private var connectionCancellable: AnyCancellable?
     private let store: SQLiteMessageStore
-    private let socketFactory: any WebSocketTaskMaking
     let audioCoordinator: AudioCoordinator
     private var audioCancellable: AnyCancellable?
     let progressActivityManager: ProgressActivityManager
@@ -80,7 +78,6 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     private var notificationCancellable: AnyCancellable?
     private var staleTimeoutInterval: TimeInterval
     private let pairingExchanger: any PairingCredentialExchanging
-    var isWebSocketOpen = false
     private var pendingMessages = PendingMessageBuffer()
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
@@ -112,7 +109,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         ackClearScheduler: (any AckClearScheduling)? = nil
     ) {
         self.store = store
-        self.socketFactory = socketFactory
+        self.logosConnection = LogosConnection(socketFactory: socketFactory)
         self.pairingExchanger = pairingExchanger
         self.audioCoordinator = AudioCoordinator(audioPlayback: audioPlayback)
         self.progressActivityManager = ProgressActivityManager()
@@ -122,10 +119,16 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
         self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
         messages = visibleMessages(from: store.loadMessages(projectKey: activeProjectKey))
+        logosConnection.host = self
         audioCoordinator.host = self
         progressActivityManager.host = self
         interactionController.host = self
         notificationRouter.host = self
+        // Re-emit the connection's published `connectionState` changes as our own so SwiftUI views
+        // observing `LogosClient` refresh when the (forwarded) connection state changes (WS1 P5).
+        connectionCancellable = logosConnection.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         // Re-emit the coordinator's published audio-state changes as our own so SwiftUI views
         // observing `LogosClient` refresh when the (forwarded) overlay/status change.
         audioCancellable = audioCoordinator.objectWillChange.sink { [weak self] _ in
@@ -149,87 +152,24 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     func connectIfRequestedByEnvironment() {
-        LogosConnectionLog.logger.info("connectIfRequestedByEnvironment called")
-        connectIfAutoConnectEnabled()
+        logosConnection.connectIfRequestedByEnvironment()
     }
 
     func connectIfAutoConnectEnabled() {
-        let shouldAttempt = LogosAutoConnectPolicy.shouldAttempt(
-            autoConnect: settings.autoConnect,
-            hasCompletedFirstConnection: settings.hasCompletedFirstConnection,
-            connectionState: connectionState
-        )
-        LogosConnectionLog.logger.info("Auto-connect evaluated should_attempt=\(shouldAttempt, privacy: .public) auto_connect=\(self.settings.autoConnect, privacy: .public) has_completed_first_connection=\(self.settings.hasCompletedFirstConnection, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public)")
-        guard shouldAttempt else { return }
-        connect(isAutomaticRetry: true)
+        logosConnection.connectIfAutoConnectEnabled()
     }
 
     func connect() {
-        connect(isAutomaticRetry: false)
-    }
-
-    private func connect(isAutomaticRetry: Bool) {
-        LogosConnectionLog.logger.info("Connect requested url=\(LogosConnectionLog.urlDescription(self.settings.urlString), privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) has_secret=\(!self.settings.secret.isEmpty, privacy: .public)")
-        if isAutomaticRetry == false {
-            progressActivityManager.clearConnectionRetryState()
-        }
-        cancelCurrentSocket()
-        lastError = nil
-        progressActivityManager.resetRunErrorIfNoActiveProgress()
-        guard let url = URL(string: settings.urlString) else {
-            LogosConnectionLog.logger.error("Connect failed before socket creation: invalid adapter URL value=\(self.settings.urlString, privacy: .public)")
-            progressActivityManager.clearConnectionRetryState()
-            recordError("Invalid adapter URL")
-            connectionState = .error
-            return
-        }
-        guard settings.secret.isEmpty == false else {
-            LogosConnectionLog.logger.error("Connect failed before socket creation: missing Logos device secret")
-            progressActivityManager.clearConnectionRetryState()
-            recordError("Missing Logos device secret")
-            connectionState = .error
-            return
-        }
-        let connectionID = connectionLifecycle.startConnection()
-        isWebSocketOpen = false
-        connectionState = .connecting
-        LogosConnectionLog.logger.info("Connection lifecycle started connection_id=\(connectionID.uuidString, privacy: .public) url=\(LogosConnectionLog.urlDescription(url), privacy: .public)")
-        let pinnedSPKI = settings.certSPKISHA256.trimmingCharacters(in: .whitespacesAndNewlines)
-        let task = socketFactory.webSocketTask(
-            with: url,
-            lifecycleObserver: self,
-            pinnedSPKISHA256: pinnedSPKI.isEmpty ? nil : pinnedSPKI
-        )
-        self.task = task
-        LogosConnectionLog.logger.info("WebSocket task assigned task_id=\(LogosConnectionLog.taskIDDescription(task), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-        task.resume()
+        logosConnection.connect()
     }
 
     func disconnect() {
-        LogosConnectionLog.logger.info("Disconnect requested state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) has_task=\(self.task != nil, privacy: .public)")
-        progressActivityManager.clearConnectionRetryState()
-        cancelCurrentSocket()
-        lastError = nil
-        clearRunScopedStateForSocketClosure(runStatus: .idle)
-        connectionState = .disconnected
-        LogosConnectionLog.logger.info("Disconnect complete state=\(self.connectionState.rawValue, privacy: .public)")
+        logosConnection.disconnect()
     }
 
-    // App-layer encryption session (negotiated during hello); nil = cleartext / not negotiated.
-    private var sessionCrypto: LogosSessionCrypto?
-    private var pendingEncClientNonce: Data?
-
-    private func cancelCurrentSocket() {
-        let oldTask = task
-        LogosConnectionLog.logger.info("Cancelling current socket has_task=\(oldTask != nil, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) in_flight_final_speech=\(self.inFlightFinalSpeechDrafts.count, privacy: .public)")
-        task = nil
-        isWebSocketOpen = false
-        sessionCrypto = nil
-        pendingEncClientNonce = nil
-        connectionLifecycle.invalidate()
-        restoreInFlightFinalSpeechDrafts(reason: "The socket closed before Logos confirmed the final speech frame was sent.")
-        oldTask?.cancel(with: .goingAway, reason: nil)
-    }
+    /// Re-exposes the connection's published state so existing views/tests reading
+    /// `client.connectionState` keep working (get-only, matching the original `@Published private(set)`).
+    var connectionState: LogosConnectionState { logosConnection.connectionState }
 
     fileprivate var canAutoRetryConnection: Bool {
         settings.autoConnect
@@ -368,14 +308,14 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     func applyPairingRoute(_ route: LogosPairingRoute) async {
         LogosConnectionLog.logger.info("Applying Logos pairing route host=\(route.adapterHostDescription, privacy: .public) device_id=\(route.deviceID, privacy: .public) autoconnect=\(route.autoConnect, privacy: .public)")
         let previousState = connectionState
-        let hadUsableConnection = previousState == .connected && task != nil && isWebSocketOpen
+        let hadUsableConnection = previousState == .connected && logosConnection.hasOpenSocket
         lastError = nil
         do {
             if route.isExpired {
                 throw LogosPairingExchangeError.expired
             }
             let credential = try await pairingExchanger.exchange(route: route)
-            cancelCurrentSocket()
+            logosConnection.cancelSocketForPairing()
             settings.urlString = credential.adapterURL
             settings.deviceID = credential.deviceID
             settings.secret = LogosSettings.normalizedSecret(credential.deviceSecret)
@@ -387,16 +327,12 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             if route.autoConnect {
                 connect()
             } else {
-                connectionState = .disconnected
+                logosConnection.markDisconnectedForPairing()
             }
         } catch {
             LogosConnectionLog.logger.error("Pairing route failed error=\(error.localizedDescription, privacy: .public)")
             recordError("Logos pairing failed: \(error.localizedDescription)")
-            if hadUsableConnection {
-                connectionState = .connected
-            } else {
-                connectionState = .error
-            }
+            logosConnection.restoreStateAfterFailedPairing(hadUsableConnection: hadUsableConnection)
         }
     }
 
@@ -536,8 +472,8 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func ensureConnectedForUserAction(_ action: String) -> Bool {
-        guard task != nil, connectionState == .connected else {
-            LogosConnectionLog.logger.warning("User action blocked because Logos is not connected action=\(action, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) has_task=\(self.task != nil, privacy: .public)")
+        guard logosConnection.hasTask, connectionState == .connected else {
+            LogosConnectionLog.logger.warning("User action blocked because Logos is not connected action=\(action, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) open=\(self.logosConnection.hasOpenSocket, privacy: .public) has_task=\(self.logosConnection.hasTask, privacy: .public)")
             recordError("Cannot \(action): Logos is not connected.")
             return false
         }
@@ -587,283 +523,18 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         staleTimeoutScheduler.cancel()
     }
 
-    nonisolated func webSocketDidOpen(taskID: ObjectIdentifier) {
-        Task { @MainActor [weak self] in
-            self?.handleSocketOpen(taskID: taskID)
-        }
-    }
-
-    nonisolated func webSocketDidClose(taskID: ObjectIdentifier, closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        Task { @MainActor [weak self] in
-            self?.handleSocketClose(taskID: taskID, closeCode: closeCode, reason: reason)
-        }
-    }
-
-    nonisolated func webSocketDidFail(taskID: ObjectIdentifier, message: String) {
-        Task { @MainActor [weak self] in
-            self?.handleSocketFailure(taskID: taskID, message: message)
-        }
-    }
-
-    private func handleSocketOpen(taskID: ObjectIdentifier) {
-        guard let task, ObjectIdentifier(task) == taskID else {
-            LogosConnectionLog.logger.warning("Ignoring stale WebSocket open callback task_id=\(String(describing: taskID), privacy: .public) current_task=\(LogosConnectionLog.taskIDDescription(self.task), privacy: .public)")
-            return
-        }
-        isWebSocketOpen = true
-        let connectionID = connectionLifecycle.activeConnectionID
-        LogosConnectionLog.logger.info("WebSocket open accepted task_id=\(String(describing: taskID), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public); starting receive loop and signed hello")
-        receiveLoop(connectionID: connectionID)
-        sendHello()
-    }
-
-    private func handleSocketClose(taskID: ObjectIdentifier, closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        guard let task, ObjectIdentifier(task) == taskID else {
-            LogosConnectionLog.logger.warning("Ignoring stale WebSocket close callback task_id=\(String(describing: taskID), privacy: .public) close_code=\(closeCode.rawValue, privacy: .public) current_task=\(LogosConnectionLog.taskIDDescription(self.task), privacy: .public)")
-            return
-        }
-        let message = socketCloseMessage(closeCode: closeCode, reason: reason)
-        LogosConnectionLog.logger.warning("WebSocket close accepted task_id=\(String(describing: taskID), privacy: .public) close_code=\(closeCode.rawValue, privacy: .public) reason=\(LogosConnectionLog.closeReasonDescription(reason), privacy: .public)")
-        failCurrentSocket(message: message, retryable: true)
-    }
-
-    private func handleSocketFailure(taskID: ObjectIdentifier, message: String) {
-        guard let task, ObjectIdentifier(task) == taskID else {
-            LogosConnectionLog.logger.warning("Ignoring stale WebSocket failure callback task_id=\(String(describing: taskID), privacy: .public) message=\(message, privacy: .public) current_task=\(LogosConnectionLog.taskIDDescription(self.task), privacy: .public)")
-            return
-        }
-        LogosConnectionLog.logger.error("WebSocket failure accepted task_id=\(String(describing: taskID), privacy: .public) message=\(message, privacy: .public)")
-        failCurrentSocket(message: message, retryable: true)
-    }
-
-    private func failCurrentSocket(message: String, retryable: Bool, clearInteractionCards: Bool = true) {
-        LogosConnectionLog.logger.error("Failing current socket message=\(message, privacy: .public) previous_state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) in_flight_final_speech=\(self.inFlightFinalSpeechDrafts.count, privacy: .public)")
-        self.task = nil
-        isWebSocketOpen = false
-        restoreInFlightFinalSpeechDrafts(reason: message)
-        audioCoordinator.failInterruptedRemoteAudioStream()
-        if connectionState != .disconnected || retryable {
-            logError(message, source: .connection)
-            clearAck()
-            if progressActivity?.isComplete != false {
-                runStatus = .idle
-            }
-            interactionController.failInterruptedInteraction(clearCards: clearInteractionCards)
-            connectionState = .error
-            if retryable {
-                progressActivityManager.noteConnectionRetryFailure(message)
-            } else {
-                progressActivityManager.clearConnectionRetryState()
-            }
-        }
-        LogosConnectionLog.logger.error("Socket failure state updated state=\(self.connectionState.rawValue, privacy: .public) last_error=\(self.lastError ?? "<none>", privacy: .public)")
-    }
-
-    private func socketCloseMessage(closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) -> String {
-        if let reason, let text = String(data: reason, encoding: .utf8), text.isEmpty == false {
-            return "Logos socket closed: \(text)"
-        }
-        return "Logos socket closed with code \(closeCode.rawValue)."
-    }
-
-    private func sendHello() {
-        let requestID = UUID().uuidString
-        let timestampMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
-        let nonce = UUID().uuidString
-        // Offer app-layer encryption: send a fresh client nonce (bound into the signed v2
-        // canonical) and the AEADs we support. The adapter chooses whether to negotiate.
-        let encClientNonce = LogosSessionCrypto.randomNonce()
-        let encClientNonceB64 = encClientNonce.base64EncodedString()
-        pendingEncClientNonce = encClientNonce
-        let signature = LogosAuthentication.signHello(
-            secret: LogosSettings.normalizedSecret(settings.secret),
-            deviceID: settings.deviceID,
-            requestID: requestID,
-            projectKey: activeProjectKey,
-            timestampMilliseconds: timestampMilliseconds,
-            nonce: nonce,
-            encClientNonce: encClientNonceB64
-        )
-        let afterServerSeq = latestServerSeq()
-        pendingReconnectReplayRequestID = requestID
-        LogosConnectionLog.logger.info("Sending hello request_id=\(requestID, privacy: .public) device_id=\(self.settings.deviceID, privacy: .public) project_key=\(self.activeProjectKey, privacy: .public) after_server_seq=\(afterServerSeq, privacy: .public) timestamp_ms=\(timestampMilliseconds, privacy: .public)")
-        let sent = sendFrame([
-            "type": "hello",
-            "request_id": requestID,
-            "device_id": settings.deviceID,
-            "project_key": activeProjectKey,
-            "payload": [
-                "timestamp_ms": timestampMilliseconds,
-                "nonce": nonce,
-                "signature": signature,
-                "after_server_seq": afterServerSeq,
-                "capabilities": ["text", "speech", "projects", "approval", "clarification", "playback_audio"],
-                "enc_supported": ["chacha20-poly1305", "aes-256-gcm"],
-                "enc_client_nonce": encClientNonceB64
-            ]
-        ], requiresAuthentication: false)
-        LogosConnectionLog.logger.info("Hello send requested sent=\(sent, privacy: .public) request_id=\(requestID, privacy: .public)")
-    }
-
-    /// Derive the per-connection encryption session from the adapter's hello `enc` block, if it
-    /// negotiated one. Absent `enc` (older adapter or LOGOS_ENC_MODE=off) keeps the session cleartext.
-    private func setupSessionCrypto(from root: [String: Any]) {
-        guard
-            let payload = root["payload"] as? [String: Any],
-            let enc = payload["enc"] as? [String: Any],
-            let aeadName = enc["aead"] as? String,
-            let aead = LogosAEAD(rawValue: aeadName),
-            let serverNonceB64 = enc["enc_server_nonce"] as? String,
-            let serverNonce = Data(base64Encoded: serverNonceB64),
-            let clientNonce = pendingEncClientNonce
-        else {
-            sessionCrypto = nil
-            pendingEncClientNonce = nil
-            return
-        }
-        do {
-            sessionCrypto = try LogosSessionCrypto.deriveSession(
-                deviceSecret: LogosSettings.normalizedSecret(settings.secret),
-                clientNonce: clientNonce,
-                serverNonce: serverNonce,
-                role: .client,
-                aead: aead
-            )
-            LogosConnectionLog.logger.info("Logos session encryption negotiated aead=\(aeadName, privacy: .public)")
-        } catch {
-            sessionCrypto = nil
-            LogosConnectionLog.logger.error("Failed to derive Logos session crypto")
-        }
-        pendingEncClientNonce = nil
-    }
-
+    /// Forward an outbound frame to the connection's transport (WS1 P5). Every internal send path
+    /// (`sendText`/`sendSpeech`/`requestProjects`/`cancelRun`/…) and every manager-host `send*Frame`
+    /// delegation routes through here so the seal/auth/counter behavior lives in one place. Matches
+    /// the former `LogosClient.sendFrame` visibility/signature (internal) so the `+Commands` extension
+    /// can keep calling it.
     @discardableResult
     func sendFrame(
         _ frame: [String: Any],
         requiresAuthentication: Bool = true,
         onCompletion: ((Result<Void, Error>) -> Void)? = nil
     ) -> Bool {
-        let summary = LogosConnectionLog.frameSummary(frame)
-        guard let task, isWebSocketOpen else {
-            LogosConnectionLog.logger.warning("Frame send blocked \(summary, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public) has_task=\(self.task != nil, privacy: .public)")
-            if connectionState != .connecting {
-                recordError("Not connected to Logos adapter. Reconnect before sending.")
-                connectionState = .disconnected
-            }
-            return false
-        }
-        guard requiresAuthentication == false || connectionState == .connected else {
-            LogosConnectionLog.logger.warning("Frame send blocked until signed hello is authenticated \(summary, privacy: .public) state=\(self.connectionState.rawValue, privacy: .public) open=\(self.isWebSocketOpen, privacy: .public)")
-            return false
-        }
-        let connectionID = connectionLifecycle.activeConnectionID
-        var workingFrame = frame
-        if requiresAuthentication, let crypto = sessionCrypto, let payload = workingFrame["payload"] as? [String: Any] {
-            // Seal the payload; routing fields stay cleartext for the adapter to route on.
-            let header = workingFrame.filter { $0.key != "payload" }
-            do {
-                workingFrame["payload"] = try crypto.seal(header: header, payload: payload)
-            } catch {
-                LogosConnectionLog.logger.error("Failed to seal outbound Logos frame \(summary, privacy: .public)")
-                return false
-            }
-        }
-        do {
-            let data = try JSONSerialization.data(withJSONObject: workingFrame, options: [])
-            let string = String(decoding: data, as: UTF8.self)
-            LogosConnectionLog.logger.info("Frame send queued \(summary, privacy: .public) bytes=\(data.count, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-            task.send(.string(string)) { [weak self, weak task] error in
-                Task { @MainActor in
-                    guard let self else { return }
-                    guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else {
-                        LogosConnectionLog.logger.warning("Frame send completed on stale connection \(summary, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                        onCompletion?(.failure(LogosSocketSendError.staleConnection))
-                        return
-                    }
-                    if let error {
-                        LogosConnectionLog.logger.error("Frame send failed \(summary, privacy: .public) error=\(LogosConnectionLog.errorDescription(error), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                        let frameType = frame["type"] as? String
-                        let shouldKeepInteractionCards = frameType == "approval_response" || frameType == "clarify_response"
-                        self.failCurrentSocket(message: error.localizedDescription, retryable: true, clearInteractionCards: shouldKeepInteractionCards == false)
-                        onCompletion?(.failure(error))
-                    } else {
-                        LogosConnectionLog.logger.info("Frame send completed \(summary, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                        self.lastError = nil
-                        onCompletion?(.success(()))
-                    }
-                }
-            }
-            return true
-        } catch {
-            LogosConnectionLog.logger.error("Frame serialization failed \(summary, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            recordError(error.localizedDescription)
-            return false
-        }
-    }
-
-    private func receiveLoop(connectionID: UUID) {
-        guard let task else {
-            LogosConnectionLog.logger.warning("Receive loop not started because task is nil connection_id=\(connectionID.uuidString, privacy: .public)")
-            return
-        }
-        LogosConnectionLog.logger.info("Receive loop waiting connection_id=\(connectionID.uuidString, privacy: .public) task_id=\(LogosConnectionLog.taskIDDescription(task), privacy: .public)")
-        task.receive { [weak self, weak task] result in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else {
-                    LogosConnectionLog.logger.warning("Receive result ignored for stale connection connection_id=\(connectionID.uuidString, privacy: .public)")
-                    return
-                }
-                switch result {
-                case .success(let message):
-                    LogosConnectionLog.logger.info("Receive loop got message \(LogosConnectionLog.messageSummary(message), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                    self.handleSocketMessage(message)
-                    self.receiveLoop(connectionID: connectionID)
-                case .failure(let error):
-                    LogosConnectionLog.logger.error("Receive loop failed error=\(LogosConnectionLog.errorDescription(error), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                    self.failCurrentSocket(message: error.localizedDescription, retryable: true)
-                }
-            }
-        }
-    }
-
-    private func isCurrentTask(_ candidate: any WebSocketTasking) -> Bool {
-        guard let task else { return false }
-        return ObjectIdentifier(candidate) == ObjectIdentifier(task)
-    }
-
-    private func markConnected() {
-        let previousState = connectionState
-        let hadCompletedFirstConnection = settings.hasCompletedFirstConnection
-        isWebSocketOpen = true
-        if settings.hasCompletedFirstConnection == false {
-            settings.hasCompletedFirstConnection = true
-        }
-        progressActivityManager.clearConnectionRetryState()
-        connectionState = .connected
-        lastError = nil
-        progressActivityManager.resetRunErrorIfNoActiveProgress()
-        LogosConnectionLog.logger.info("Marked connected previous_state=\(previousState.rawValue, privacy: .public) had_completed_first_connection=\(hadCompletedFirstConnection, privacy: .public) active_project=\(self.activeProjectKey, privacy: .public)")
-    }
-
-    private func handleSocketMessage(_ message: URLSessionWebSocketTask.Message) {
-        switch message {
-        case .string(let string):
-            handleFrameString(string)
-        case .data(let data):
-            guard data.count <= Self.maxInboundFrameBytes else {
-                LogosConnectionLog.logger.error("Inbound binary frame rejected because it exceeded size limit bytes=\(data.count, privacy: .public)")
-                return
-            }
-            if let string = String(data: data, encoding: .utf8) {
-                handleFrameString(string)
-            } else {
-                LogosConnectionLog.logger.error("Inbound data frame was not valid UTF-8 bytes=\(data.count, privacy: .public)")
-            }
-        @unknown default:
-            LogosConnectionLog.logger.warning("Inbound WebSocket message used an unknown message case")
-            break
-        }
+        logosConnection.sendFrame(frame, requiresAuthentication: requiresAuthentication, onCompletion: onCompletion)
     }
 
     func handleFrameString(_ string: String) {
@@ -884,12 +555,15 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         if type != "error" {
             lastError = nil
         }
-        if let crypto = sessionCrypto,
-           let payload = root["payload"] as? [String: Any],
+        if let payload = root["payload"] as? [String: Any],
            payload["enc"] as? Int == 1 {
-            // Sealed frame: decrypt using the cleartext routing fields as the AAD header.
+            // Sealed frame: ask the connection to open it using the cleartext routing fields as the
+            // AAD header (the connection owns the negotiated session crypto). A nil result means no
+            // session was negotiated, so the (still-sealed) payload is left untouched.
             do {
-                root["payload"] = try crypto.open(header: root, encPayload: payload)
+                if let opened = try logosConnection.openInboundPayload(header: root, encPayload: payload) {
+                    root["payload"] = opened
+                }
             } catch {
                 LogosConnectionLog.logger.error("Failed to open encrypted Logos frame type=\(type, privacy: .public)")
                 return
@@ -897,21 +571,9 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
         }
         switch type {
         case "hello":
-            setupSessionCrypto(from: root)
-            applyClientConfig(from: root)
-            markConnected()
-            if task != nil {
-                notificationRouter.registerDeviceWithPendingToken()
-                requestProjects()
-                notificationRouter.processPendingNotificationRouteIfReady()
-                notificationRouter.processPendingFinalAutoPlayIfReady()
-            }
+            logosConnection.handleHelloFrame(root)
         case "registered":
-            applyClientConfig(from: root)
-            markConnected()
-            notificationRouter.clearPendingAPNSToken()
-            notificationRouter.processPendingNotificationRouteIfReady()
-            notificationRouter.processPendingFinalAutoPlayIfReady()
+            logosConnection.handleRegisteredFrame(root)
         case "projects_list":
             handleProjectsList(root)
         case "commands_list":
@@ -940,7 +602,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
             let message = adapterErrorMessage(payload: payload)
             LogosConnectionLog.logger.error("Inbound adapter error code=\(code, privacy: .public) reason=\(payload?["reason"] as? String ?? "<none>", privacy: .public) message=\(message, privacy: .public)")
             if code == "auth_failed" {
-                failCurrentSocket(message: message, retryable: false)
+                logosConnection.failForAuthFailure(message: message)
             } else {
                 handleAdapterError(root: root, code: code, message: message)
             }
@@ -1417,7 +1079,7 @@ final class LogosClient: ObservableObject, WebSocketLifecycleObserving {
     }
 
     private func maybeAutoPlayLiveAssistantMessage(_ message: LogosMessage, op: String?, requestID: String?, matchedCurrentRun: Bool = false) {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return }
+        guard connectionState == .connected, logosConnection.hasOpenSocket else { return }
         guard message.projectKey == activeProjectKey else { return }
         guard runStatus != .cancelling else { return }
         guard progressActivityManager.isSuppressedRunRequestID(requestID) == false else { return }
@@ -1624,7 +1286,7 @@ extension LogosClient: ProgressActivityManagerHost {
 
     var progressIsConnected: Bool { connectionState == .connected }
 
-    var progressHasOpenSocket: Bool { task != nil && isWebSocketOpen }
+    var progressHasOpenSocket: Bool { logosConnection.hasOpenSocket }
 
     var progressCanAutoRetryConnection: Bool { canAutoRetryConnection }
 
@@ -1686,8 +1348,7 @@ extension LogosClient: ProgressActivityManagerHost {
     }
 
     func reconnectForRetry() {
-        guard connectionState == .error || connectionState == .disconnected else { return }
-        connect(isAutomaticRetry: true)
+        logosConnection.reconnectForRetry()
     }
 
     func progressFrameProjectKey(_ root: [String: Any]) -> String? {
@@ -1777,7 +1438,7 @@ extension LogosClient: NotificationRouterHost {
 
     var notificationIsConnected: Bool { connectionState == .connected }
 
-    var notificationHasOpenSocket: Bool { task != nil && isWebSocketOpen }
+    var notificationHasOpenSocket: Bool { logosConnection.hasOpenSocket }
 
     func notificationConnect() {
         connect()
@@ -1816,7 +1477,109 @@ extension LogosClient: NotificationRouterHost {
     }
 }
 
-private enum LogosSocketSendError: LocalizedError {
+// MARK: - Connection forwarding (WS1 P5)
+
+extension LogosClient: LogosConnectionHost {
+    var connectionURLString: String { settings.urlString }
+
+    var connectionDeviceSecret: String { settings.secret }
+
+    var connectionDeviceID: String { settings.deviceID }
+
+    var connectionActiveProjectKey: String { activeProjectKey }
+
+    var connectionPinnedSPKISHA256: String? { settings.certSPKISHA256 }
+
+    var connectionAutoConnect: Bool { settings.autoConnect }
+
+    var connectionHasCompletedFirstConnection: Bool {
+        get { settings.hasCompletedFirstConnection }
+        set { settings.hasCompletedFirstConnection = newValue }
+    }
+
+    var connectionRunStatus: LogosRunStatus {
+        get { runStatus }
+        set { runStatus = newValue }
+    }
+
+    var connectionLastError: String? {
+        get { lastError }
+        set { lastError = newValue }
+    }
+
+    var connectionHasIncompleteProgressActivity: Bool { progressActivity?.isComplete == false }
+
+    func handleInboundFrameString(_ string: String) {
+        handleFrameString(string)
+    }
+
+    func noteReconnectReplayRequestID(_ requestID: String) {
+        pendingReconnectReplayRequestID = requestID
+    }
+
+    func connectionLatestServerSeq() -> Int {
+        latestServerSeq()
+    }
+
+    func connectionDidCompleteHello() {
+        notificationRouter.registerDeviceWithPendingToken()
+        requestProjects()
+        notificationRouter.processPendingNotificationRouteIfReady()
+        notificationRouter.processPendingFinalAutoPlayIfReady()
+    }
+
+    func connectionDidRegister() {
+        notificationRouter.clearPendingAPNSToken()
+        notificationRouter.processPendingNotificationRouteIfReady()
+        notificationRouter.processPendingFinalAutoPlayIfReady()
+    }
+
+    func connectionApplyClientConfig(from root: [String: Any]) {
+        applyClientConfig(from: root)
+    }
+
+    func connectionClearConnectionRetryState() {
+        progressActivityManager.clearConnectionRetryState()
+    }
+
+    func connectionNoteRetryFailure(_ message: String) {
+        progressActivityManager.noteConnectionRetryFailure(message)
+    }
+
+    func connectionResetRunErrorIfNoActiveProgress() {
+        progressActivityManager.resetRunErrorIfNoActiveProgress()
+    }
+
+    func connectionRecordError(_ message: String) {
+        recordError(message)
+    }
+
+    func connectionLogConnectionError(_ message: String) {
+        logError(message, source: .connection)
+    }
+
+    func connectionClearAck() {
+        clearAck()
+    }
+
+    func connectionRestoreInFlightFinalSpeechDrafts(reason: String) {
+        restoreInFlightFinalSpeechDrafts(reason: reason)
+    }
+
+    func connectionFailInterruptedRemoteAudioStream() {
+        audioCoordinator.failInterruptedRemoteAudioStream()
+    }
+
+    func connectionFailInterruptedInteraction(clearCards: Bool) {
+        interactionController.failInterruptedInteraction(clearCards: clearCards)
+    }
+
+    func connectionClearRunScopedStateForSocketClosure(runStatus: LogosRunStatus) {
+        clearRunScopedStateForSocketClosure(runStatus: runStatus)
+    }
+}
+
+enum LogosSocketSendError: LocalizedError {
     case staleConnection
 
     var errorDescription: String? {

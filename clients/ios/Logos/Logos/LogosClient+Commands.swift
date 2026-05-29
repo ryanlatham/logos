@@ -5,7 +5,7 @@ import Foundation
 extension LogosClient {
     @discardableResult
     func requestCommandCatalog(includeUnavailable: Bool = true) -> Bool {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
+        guard connectionState == .connected, logosConnection.hasOpenSocket else { return false }
         let requestID = UUID().uuidString
         pendingCommandCatalogRequestID = requestID
         return sendFrame([
@@ -19,7 +19,7 @@ extension LogosClient {
 
     @discardableResult
     func requestSlashCommandCompletion(text: String) -> Bool {
-        guard connectionState == .connected, task != nil, isWebSocketOpen else { return false }
+        guard connectionState == .connected, logosConnection.hasOpenSocket else { return false }
         guard text.hasPrefix("/"), text.count <= 500, text.rangeOfCharacter(from: .controlCharacters) == nil else { return false }
         let requestID = UUID().uuidString
         pendingCommandCompletionRequestID = requestID
