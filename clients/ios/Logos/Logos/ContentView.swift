@@ -53,6 +53,23 @@ struct ThreadAutoFollowPolicy {
     }
 }
 
+/// Counts thread messages that arrived after the user detached from the bottom, for the
+/// jump-to-latest pill's unseen badge (WS1 P7). server_seq is monotonic from the adapter;
+/// local/pending messages carry 0 and are naturally excluded once detached past real traffic.
+struct ThreadUnseenPolicy {
+    static func unseenCount(serverSeqs: [Int], since lastSeenSeq: Int) -> Int {
+        serverSeqs.reduce(into: 0) { count, seq in
+            if seq > lastSeenSeq { count += 1 }
+        }
+    }
+
+    /// The pill's label: a count when known (>0), otherwise the generic prompt.
+    static func label(unseenCount: Int) -> String {
+        guard unseenCount > 0 else { return "New updates" }
+        return unseenCount == 1 ? "1 new message" : "\(unseenCount) new messages"
+    }
+}
+
 struct ThreadTimelineSnapshot: Equatable {
     struct Message: Equatable {
         let id: String
@@ -235,6 +252,7 @@ struct ContentView: View {
     @State private var shouldFollowThread = true
     @State private var isThreadNearBottom = true
     @State private var hasUnseenThreadUpdates = false
+    @State private var detachedThreadMaxServerSeq: Int?
     @State private var threadScrollPhase: ScrollPhase = .idle
     @State private var isThreadUserDetached = false
     @State private var userInitiatedThreadScrollObserved = false
@@ -738,7 +756,7 @@ struct ContentView: View {
         Button {
             scrollThreadToBottom(animated: true)
         } label: {
-            Label("New updates", systemImage: "arrow.down.circle.fill")
+            Label(ThreadUnseenPolicy.label(unseenCount: unseenThreadUpdateCount), systemImage: "arrow.down.circle.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.logosAmberOn)
                 .padding(.horizontal, 13)
@@ -748,6 +766,9 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("threadNewUpdatesButton")
+        .accessibilityLabel(unseenThreadUpdateCount > 0
+            ? "Jump to latest, \(unseenThreadUpdateCount) new messages"
+            : "Jump to latest")
     }
 
     private var timePill: some View {
@@ -1937,7 +1958,15 @@ struct ContentView: View {
     private func recordDetachedThreadContentIfNeeded() {
         if detachedThreadContentFingerprint == nil {
             detachedThreadContentFingerprint = threadContentFingerprint
+            detachedThreadMaxServerSeq = client.messages.map(\.serverSeq).max() ?? 0
         }
+    }
+
+    /// Number of server-delivered messages that arrived since the user detached from the bottom.
+    /// Gated on the detachment fingerprint so it resets to 0 whenever the thread re-attaches.
+    private var unseenThreadUpdateCount: Int {
+        guard detachedThreadContentFingerprint != nil, let base = detachedThreadMaxServerSeq else { return 0 }
+        return ThreadUnseenPolicy.unseenCount(serverSeqs: client.messages.map(\.serverSeq), since: base)
     }
 
     private func handleThreadBottomProximityChangedAfterLayout(_ isNearBottom: Bool) {
