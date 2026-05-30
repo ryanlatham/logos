@@ -113,10 +113,7 @@ struct ProjectSwitcherOverlay: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: dropdownMaxHeight, alignment: .top)
-        .background(Color.logosGlass)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosHairline, lineWidth: 0.5))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: .black.opacity(0.42), radius: 24, x: 0, y: 14)
     }
 
@@ -260,10 +257,7 @@ struct AttachSheetOverlay: View {
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
             }
             .padding(14)
-            .background(Color.logosGlass)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.logosHairline, lineWidth: 0.5))
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .padding(.horizontal, 12)
             .padding(.bottom, 106)
             .shadow(color: .black.opacity(0.45), radius: 24, x: 0, y: 12)

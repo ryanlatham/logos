@@ -249,8 +249,6 @@ extension Color {
     static let logosBG2 = Color(hex: 0x1C1C1E)
     static let logosBG3 = Color(hex: 0x2C2C2E)
     static let logosBG4 = Color(hex: 0x3A3A3C)
-    static let logosGlass = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255, opacity: 0.72)
-    static let logosGlassThin = Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255, opacity: 0.45)
     static let logosSep = Color(red: 84 / 255, green: 84 / 255, blue: 88 / 255, opacity: 0.65)
     static let logosSepFaint = Color(red: 84 / 255, green: 84 / 255, blue: 88 / 255, opacity: 0.35)
     static let logosHairline = Color.white.opacity(0.08)

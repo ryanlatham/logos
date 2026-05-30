@@ -55,9 +55,7 @@ struct AudioPlaybackOverlayView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.logosGlass.opacity(0.96), in: RoundedRectangle(cornerRadius: 18))
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.28), radius: 16, x: 0, y: 8)
         .accessibilityIdentifier("audioPlaybackOverlay")
         // The overlay is a tightly packed horizontal pill (spectrum + status text +
@@ -120,7 +118,6 @@ struct SpectrumAnalyzerView: View {
                 Capsule()
                     .fill(Color.logosAmber.opacity(isActive ? 0.95 : 0.45))
                     .frame(width: 4, height: max(4, CGFloat(value) * 28))
-                    .animation(.easeOut(duration: 0.05), value: value)
             }
         }
         .frame(maxHeight: .infinity)
