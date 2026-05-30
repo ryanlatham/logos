@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Client-side dependencies the WebSocket connection/transport subsystem needs from its owner
 /// (WS1 P5, mirroring `AudioCoordinatorHost`/`ProgressActivityManagerHost`/`InteractionControllerHost`/
@@ -84,10 +85,11 @@ protocol LogosConnectionHost: AnyObject {
 /// behind `host.connectionDidCompleteHello()`/`connectionDidRegister()`. All client-side
 /// dependencies are routed through `host` (held `weak`).
 @MainActor
-final class LogosConnection: ObservableObject, WebSocketLifecycleObserving {
-    @Published private(set) var connectionState: LogosConnectionState = .disconnected
+@Observable
+final class LogosConnection: WebSocketLifecycleObserving {
+    private(set) var connectionState: LogosConnectionState = .disconnected
 
-    weak var host: LogosConnectionHost?
+    @ObservationIgnored weak var host: LogosConnectionHost?
 
     private let socketFactory: any WebSocketTaskMaking
     private(set) var task: (any WebSocketTasking)?

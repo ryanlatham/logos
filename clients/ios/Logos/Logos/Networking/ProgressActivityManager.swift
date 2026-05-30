@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Client-side dependencies the progress-activity subsystem needs from its owner (WS1 P5,
 /// mirroring `AudioCoordinatorHost`). The `ProgressActivityManager` reaches back through this
@@ -83,11 +84,12 @@ protocol ProgressActivityManagerHost: AnyObject {
 /// forwarding, and routes inbound frames through the manager so views/tests are unchanged. All
 /// client-side dependencies are routed through `host` (held `weak`).
 @MainActor
-final class ProgressActivityManager: ObservableObject {
-    @Published private(set) var progressActivity: ProgressActivityState?
-    @Published private(set) var connectionRetryState: ConnectionRetryState?
+@Observable
+final class ProgressActivityManager {
+    private(set) var progressActivity: ProgressActivityState?
+    private(set) var connectionRetryState: ConnectionRetryState?
 
-    weak var host: ProgressActivityManagerHost?
+    @ObservationIgnored weak var host: ProgressActivityManagerHost?
 
     private var suppressedRunRequestIDs = Set<String>()
     private var connectionRetryAttemptCount = 0

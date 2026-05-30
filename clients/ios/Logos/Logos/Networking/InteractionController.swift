@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Client-side dependencies the approval/clarify interaction subsystem needs from its owner (WS1 P5,
 /// mirroring `AudioCoordinatorHost` + `ProgressActivityManagerHost`). The `InteractionController`
@@ -38,12 +39,13 @@ protocol InteractionControllerHost: AnyObject {
 /// through the controller so views/tests are unchanged. All client-side dependencies are routed
 /// through `host` (held `weak`).
 @MainActor
-final class InteractionController: ObservableObject {
-    @Published private(set) var approvalCard: ApprovalCard?
-    @Published private(set) var clarifyCard: ClarifyCard?
-    @Published private(set) var pendingInteractionResponseID: String?
+@Observable
+final class InteractionController {
+    private(set) var approvalCard: ApprovalCard?
+    private(set) var clarifyCard: ClarifyCard?
+    private(set) var pendingInteractionResponseID: String?
 
-    weak var host: InteractionControllerHost?
+    @ObservationIgnored weak var host: InteractionControllerHost?
 
     // MARK: - Inbound interaction frames
 

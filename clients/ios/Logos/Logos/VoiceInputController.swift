@@ -1,44 +1,46 @@
 import AVFoundation
 import Foundation
+import Observation
 import Speech
 
 @MainActor
-final class VoiceInputController: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+@Observable
+final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
     enum Mode: String {
         case idle
         case hold
         case tap
     }
 
-    @Published private(set) var mode: Mode = .idle
-    @Published private(set) var statusText: String = "Voice idle"
-    @Published private(set) var partialTranscript: String = ""
-    @Published private(set) var availabilityMessage: String = "Checking speech support"
-    @Published private(set) var voiceEnabled: Bool = false
-    @Published private(set) var transportAvailable: Bool = false
-    @Published private(set) var permissionDenied: Bool = false
-    @Published private(set) var isFinalizingTranscript: Bool = false
+    private(set) var mode: Mode = .idle
+    private(set) var statusText: String = "Voice idle"
+    private(set) var partialTranscript: String = ""
+    private(set) var availabilityMessage: String = "Checking speech support"
+    private(set) var voiceEnabled: Bool = false
+    private(set) var transportAvailable: Bool = false
+    private(set) var permissionDenied: Bool = false
+    private(set) var isFinalizingTranscript: Bool = false
 
-    var onPartialTranscript: ((String, String, Int, Int64) -> Void)?
-    var onFinalTranscript: ((String, String, Int, Int64) -> Bool)?
+    @ObservationIgnored var onPartialTranscript: ((String, String, Int, Int64) -> Void)?
+    @ObservationIgnored var onFinalTranscript: ((String, String, Int, Int64) -> Bool)?
 
     private let recognizer: SFSpeechRecognizer?
     private let audioEngine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private var inputID = UUID().uuidString
-    private var partialSeq = 0
-    private var startedAtMilliseconds: Int64 = 0
-    private var lastSentPartialTranscript = ""
-    private var bestTranscript = ""
-    private var silenceDetector = TapToTalkSilenceDetector()
-    private var startIntent = VoiceStartIntentTracker<Mode>()
-    private var didInstallTap = false
-    private var shouldSendFinalAfterRecognition = false
-    private var finalizationState = VoiceFinalizationState()
-    private var bestTranscriptFallbackTask: Task<Void, Never>?
-    private var finalizationTask: Task<Void, Never>?
-    private var recognitionGeneration = UUID()
+    @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
+    @ObservationIgnored private var recognitionTask: SFSpeechRecognitionTask?
+    @ObservationIgnored private var inputID = UUID().uuidString
+    @ObservationIgnored private var partialSeq = 0
+    @ObservationIgnored private var startedAtMilliseconds: Int64 = 0
+    @ObservationIgnored private var lastSentPartialTranscript = ""
+    @ObservationIgnored private var bestTranscript = ""
+    @ObservationIgnored private var silenceDetector = TapToTalkSilenceDetector()
+    @ObservationIgnored private var startIntent = VoiceStartIntentTracker<Mode>()
+    @ObservationIgnored private var didInstallTap = false
+    @ObservationIgnored private var shouldSendFinalAfterRecognition = false
+    @ObservationIgnored private var finalizationState = VoiceFinalizationState()
+    @ObservationIgnored private var bestTranscriptFallbackTask: Task<Void, Never>?
+    @ObservationIgnored private var finalizationTask: Task<Void, Never>?
+    @ObservationIgnored private var recognitionGeneration = UUID()
     private let audioSessionManager: any AudioSessionManaging
     private static let bestTranscriptGraceNanoseconds = VoiceFinalizationPolicy.bestTranscriptGraceNanoseconds
     private static let finalizationTimeoutNanoseconds = VoiceFinalizationPolicy.hardTimeoutNanoseconds

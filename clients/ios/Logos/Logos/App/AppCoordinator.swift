@@ -11,7 +11,8 @@ import SwiftUI
 /// `onDeviceSpeech`/`pushEnabled` flags, or handing a final voice transcript back to the
 /// composer) are expressed as closures injected via `attach`, so the @State stays in the view.
 @MainActor
-final class AppCoordinator: ObservableObject {
+@Observable
+final class AppCoordinator {
     private var client: LogosClient?
     private var voiceInput: VoiceInputController?
     private var notifications: NotificationCoordinator?

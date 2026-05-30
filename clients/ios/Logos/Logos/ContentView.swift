@@ -214,14 +214,14 @@ struct ThreadProgressPlacement {
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var client: LogosClient
-    @EnvironmentObject private var notifications: NotificationCoordinator
+    @Environment(LogosClient.self) private var client
+    @Environment(NotificationCoordinator.self) private var notifications
 
     @State private var draft = ""
     @State private var clarifyAnswer = ""
     @State private var threadBubbleWidthBasis: CGFloat = 0
-    @StateObject private var voiceInput = VoiceInputController()
-    @StateObject private var appCoordinator = AppCoordinator()
+    @State private var voiceInput = VoiceInputController()
+    @State private var appCoordinator = AppCoordinator()
     @AppStorage("logos.slashCommandRecents") private var slashCommandRecentsStorage = ""
 
     @State private var composerMode: ComposerMode = .paused
@@ -2785,6 +2785,6 @@ struct PickerOption: Identifiable, Hashable {
 
 #Preview {
     ContentView()
-        .environmentObject(LogosClient())
-        .environmentObject(NotificationCoordinator.shared)
+        .environment(LogosClient())
+        .environment(NotificationCoordinator.shared)
 }

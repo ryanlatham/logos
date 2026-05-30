@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import OSLog
 import UIKit
 
@@ -50,10 +51,11 @@ protocol NotificationRouterHost: AnyObject {
 /// names as delegating forwarders, and routes the run-reconciled auto-play tail through the router so
 /// views/tests are unchanged. All client-side dependencies are routed through `host` (held `weak`).
 @MainActor
-final class NotificationRouter: ObservableObject {
-    @Published private(set) var threadFocusRequest: ThreadFocusRequest?
+@Observable
+final class NotificationRouter {
+    private(set) var threadFocusRequest: ThreadFocusRequest?
 
-    weak var host: NotificationRouterHost?
+    @ObservationIgnored weak var host: NotificationRouterHost?
 
     private var autoPlayedMessageKeys = Set<String>()
     private var pendingAPNSToken: String?
