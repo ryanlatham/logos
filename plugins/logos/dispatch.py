@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import commands as command_catalog
 from .config import _optional_nonempty_str
 from .schema import Envelope, error_frame
 
+if TYPE_CHECKING:
+    from ._adapter_core import LogosAdapterCore
+
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
+
 logger = logging.getLogger(__name__)
 
 
-class DispatchMixin:
+class DispatchMixin(_MixinBase):
     """The WebSocket envelope router + the commands/register/final-text handlers (from adapter.py).
 
     Mixed into LogosAdapter; handle_ws_envelope switches on envelope.type and delegates to
@@ -20,7 +27,8 @@ class DispatchMixin:
 
     async def handle_ws_envelope(self, envelope: Envelope) -> dict[str, Any] | None:
         if envelope.type in {"text_input", "text_message"}:
-            return await self._handle_final_text(envelope)
+            await self._handle_final_text(envelope)
+            return None
         if envelope.type == "speech":
             if not bool(envelope.payload.get("is_final", False)):
                 return self._state_update(
@@ -31,7 +39,8 @@ class DispatchMixin:
                         "partial_seq": envelope.payload.get("partial_seq"),
                     },
                 )
-            return await self._handle_final_text(envelope)
+            await self._handle_final_text(envelope)
+            return None
         if envelope.type == "messages_get":
             return self._handle_messages_get(envelope)
         if envelope.type == "commands_get":
@@ -60,7 +69,11 @@ class DispatchMixin:
                 "request_id": envelope.request_id,
                 "device_id": envelope.device_id,
                 "project_key": envelope.project_key,
-                "payload": {"authenticated": True, "server": "logos", "client_config": self.client_config_payload()},
+                "payload": {
+                    "authenticated": True,
+                    "server": "logos",
+                    "client_config": self.client_config_payload(),
+                },
             }
         if envelope.type == "register_device":
             return self._handle_register_device(envelope)
@@ -93,7 +106,9 @@ class DispatchMixin:
                 config_extra={},
             )
             payload["fallback_used"] = True
-            payload.setdefault("warnings", []).append("Command catalog failed; using fallback catalog.")
+            payload.setdefault("warnings", []).append(
+                "Command catalog failed; using fallback catalog."
+            )
         payload["request_id"] = envelope.request_id
         return {
             "type": "commands_list",
@@ -136,7 +151,9 @@ class DispatchMixin:
             )
             payload = command_catalog.complete_slash_command(text, catalog=fallback_catalog)
             payload["fallback_used"] = True
-            payload.setdefault("warnings", []).append("Command completion failed; using fallback catalog.")
+            payload.setdefault("warnings", []).append(
+                "Command completion failed; using fallback catalog."
+            )
         payload["request_id"] = envelope.request_id
         return {
             "type": "commands_complete_result",
@@ -157,7 +174,9 @@ class DispatchMixin:
                 project_key=envelope.project_key,
             )
         capabilities_raw = envelope.payload.get("capabilities") or []
-        capabilities = [str(item) for item in capabilities_raw] if isinstance(capabilities_raw, list) else []
+        capabilities = (
+            [str(item) for item in capabilities_raw] if isinstance(capabilities_raw, list) else []
+        )
         shared_hash = None
         device = self.store.upsert_device(
             device_id=device_id,

@@ -18,6 +18,10 @@ import os
 import ssl
 import stat
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import datetime
 from pathlib import Path
 
 from cryptography import x509
@@ -64,12 +68,14 @@ def spki_sha256_b64(certificate: x509.Certificate) -> str:
     return base64.b64encode(hashlib.sha256(spki_der).digest()).decode("ascii")
 
 
-def _build_self_signed(common_name: str, *, now=None) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+def _build_self_signed(
+    common_name: str, *, now: datetime.datetime | None = None
+) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     import datetime
 
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
-    not_before = datetime.datetime.now(datetime.timezone.utc) if now is None else now
+    not_before = datetime.datetime.now(datetime.UTC) if now is None else now
     not_after = not_before + datetime.timedelta(days=_CERT_VALIDITY_DAYS)
     san = x509.SubjectAlternativeName([x509.DNSName(common_name)])
     certificate = (
@@ -104,7 +110,9 @@ def load_or_create_tls_material(
 
     if cert_path.exists() and key_path.exists():
         certificate = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        return TLSMaterial(cert_path=cert_path, key_path=key_path, spki_sha256=spki_sha256_b64(certificate))
+        return TLSMaterial(
+            cert_path=cert_path, key_path=key_path, spki_sha256=spki_sha256_b64(certificate)
+        )
 
     certificate, key = _build_self_signed(common_name)
     cert_pem = certificate.public_bytes(serialization.Encoding.PEM)
@@ -116,7 +124,9 @@ def load_or_create_tls_material(
     cert_path.write_bytes(cert_pem)
     key_path.write_bytes(key_pem)
     os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-    return TLSMaterial(cert_path=cert_path, key_path=key_path, spki_sha256=spki_sha256_b64(certificate))
+    return TLSMaterial(
+        cert_path=cert_path, key_path=key_path, spki_sha256=spki_sha256_b64(certificate)
+    )
 
 
 def build_server_ssl_context(material: TLSMaterial) -> ssl.SSLContext:

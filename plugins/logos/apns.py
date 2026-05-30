@@ -4,10 +4,11 @@ import base64
 import json
 import os
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 
 class PrivateNotificationKind(str, Enum):
@@ -26,7 +27,7 @@ class APNSConfig:
     timeout_seconds: float = 10.0
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "APNSConfig":
+    def from_env(cls, env: Mapping[str, str] | None = None) -> APNSConfig:
         source: Mapping[str, str] = env if env is not None else os.environ
         return cls(
             key_id=source.get("LOGOS_APNS_KEY_ID") or None,
@@ -93,7 +94,10 @@ def build_private_apns_payload(
     title_body = {
         PrivateNotificationKind.FINISHED: ("Hermes finished", "Open Logos to view the result."),
         PrivateNotificationKind.APPROVAL: ("Hermes needs approval", "Open Logos to continue."),
-        PrivateNotificationKind.CLARIFICATION: ("Hermes needs clarification", "Open Logos to continue."),
+        PrivateNotificationKind.CLARIFICATION: (
+            "Hermes needs clarification",
+            "Open Logos to continue.",
+        ),
     }[parsed]
     title, body = title_body
     payload: dict[str, Any] = {
@@ -129,10 +133,12 @@ class APNSClient:
         self._clients: dict[str, Any] = {}
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "APNSClient":
+    def from_env(cls, env: Mapping[str, str] | None = None) -> APNSClient:
         return cls(APNSConfig.from_env(env))
 
-    async def send(self, device_token: str, payload: dict[str, Any], *, environment: str | None = None) -> APNSSendResult:
+    async def send(
+        self, device_token: str, payload: dict[str, Any], *, environment: str | None = None
+    ) -> APNSSendResult:
         resolved_environment = _normalize_environment(environment or self.config.environment)
         host = apns_host_for_environment(resolved_environment)
         if not self.config.configured:
@@ -207,7 +213,9 @@ class APNSClient:
         client = self._clients.get(environment)
         if client is None:
             host = apns_host_for_environment(environment)
-            client = self._http_client_factory(host=host, timeout=self.config.timeout_seconds, http2=True)
+            client = self._http_client_factory(
+                host=host, timeout=self.config.timeout_seconds, http2=True
+            )
             self._clients[environment] = client
         return client
 

@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .schema import Envelope, error_frame
+
+if TYPE_CHECKING:
+    from ._adapter_core import LogosAdapterCore
+
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
 
 logger = logging.getLogger(__name__)
 
 
-class AudioMixin:
+class AudioMixin(_MixinBase):
     """playback_audio frame handling + TTS audio streaming (from adapter.py).
 
     Mixed into LogosAdapter; uses self.{store, ws_server, tts, _project_key_for,
@@ -19,7 +26,9 @@ class AudioMixin:
     async def _handle_playback_audio(self, envelope: Envelope) -> dict[str, Any] | None:
         project_key = self._project_key_for(envelope)
         payload = envelope.payload
-        session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
+        session_id = str(
+            envelope.session_id or payload.get("session_id") or f"project:{project_key}"
+        )
         message_id = payload.get("message_id")
         requested_mode = str(payload.get("mode") or "summary").strip().lower() or "summary"
         selected_mode = requested_mode
@@ -60,7 +69,9 @@ class AudioMixin:
                 text = summary.summary_text
             else:
                 selected_mode = requested_mode
-                selection_reason = "requested_full" if requested_mode == "full" else f"requested_{requested_mode}"
+                selection_reason = (
+                    "requested_full" if requested_mode == "full" else f"requested_{requested_mode}"
+                )
                 text = message.content
         else:
             text = payload.get("text") or payload.get("summary_text")

@@ -38,7 +38,7 @@ def derive_device_secret(master_secret: str, device_id: str) -> str:
         raise ValueError("device_id is required")
     return hmac.new(
         normalized_master.encode("utf-8"),
-        f"{PAIRING_CONTEXT}{normalized_device}".encode("utf-8"),
+        f"{PAIRING_CONTEXT}{normalized_device}".encode(),
         hashlib.sha256,
     ).hexdigest()
 
@@ -47,7 +47,7 @@ def pairing_token_hash(pair_token: str) -> str:
     token = str(pair_token or "").strip()
     if not token:
         raise ValueError("pair_token is required")
-    return hashlib.sha256(f"{PAIRING_TOKEN_CONTEXT}{token}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{PAIRING_TOKEN_CONTEXT}{token}".encode()).hexdigest()
 
 
 def generate_pairing_token() -> str:
@@ -138,7 +138,12 @@ def render_qr_png(data: str, output_path: str | Path) -> Path:
 
 
 def new_device_id(prefix: str = "ios") -> str:
-    clean_prefix = "".join(ch for ch in str(prefix or "ios").lower() if ch.isalnum() or ch in {"-", "_"}).strip("-_") or "ios"
+    clean_prefix = (
+        "".join(
+            ch for ch in str(prefix or "ios").lower() if ch.isalnum() or ch in {"-", "_"}
+        ).strip("-_")
+        or "ios"
+    )
     return f"{clean_prefix}-{secrets.token_hex(4)}"
 
 
@@ -191,7 +196,9 @@ def _normalized_adapter_url(value: Any) -> str:
 
 
 def _base64url_encode_json(payload: dict[str, Any]) -> str:
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 

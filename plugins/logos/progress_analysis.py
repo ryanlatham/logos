@@ -5,8 +5,12 @@ import re
 # Gateway-status / tool-progress / terminal-error text detection, extracted from adapter.py.
 # Pure regex + string logic (no Hermes/adapter dependency).
 
-GATEWAY_STILL_WORKING_RE = re.compile(r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE)
-GATEWAY_RETRY_STATUS_RE = re.compile(r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE)
+GATEWAY_STILL_WORKING_RE = re.compile(
+    r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE
+)
+GATEWAY_RETRY_STATUS_RE = re.compile(
+    r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE
+)
 GATEWAY_NON_RETRYABLE_STATUS_RE = re.compile(
     r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*Non-retryable error\s+\(HTTP\s+[^)]*\)"
     r"(?:\s*[—-]\s*trying fallback(?:\.\.\.|…)?|:\s+.+)\s*$",
@@ -18,7 +22,7 @@ GATEWAY_PROVIDER_STATUS_RE = re.compile(
 )
 GATEWAY_CONTEXT_STATUS_RE = re.compile(
     r"^\s*(?:⏳\s*)?(?:"
-    r"(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:"
+    r"(?:preflight\s+compression|context\s+(?:compaction|compression))\s*[:\-–—]\s*(?:"  # noqa: RUF001
     r"(?:started|starting|running|complete|completed|in progress)(?:\.\.\.|[.!…])?\s*$"
     r"|(?:compact(?:ing)?|compress(?:ing)?)\s+context(?:\s*(?:\.\.\.|…)|\s+(?:before\s+continuing|to\s+continue|for\s+continuation|now|started|starting|running|complete|completed|in\s+progress)(?:\.\.\.|[.!…])?)\s*$"
     r"|context(?:\.\.\.|[.!…])?\s*$"
@@ -27,7 +31,9 @@ GATEWAY_CONTEXT_STATUS_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-GATEWAY_LIFECYCLE_STATUS_RE = re.compile(r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE)
+GATEWAY_LIFECYCLE_STATUS_RE = re.compile(
+    r"^\s*(?:⚠️?|⚠\ufe0f?)?\s*Gateway\s+(?:restarting|shutting down)\b", re.IGNORECASE
+)
 RAW_TERMINAL_ERROR_RE = re.compile(
     r"^\s*(?:⚠️?|⚠\ufe0f?|❌)?\s*(?:"
     r"'[^']+'\s+object\s+(?:is\s+not\s+\w+|has\s+no\s+attribute\s+'[^']+')"

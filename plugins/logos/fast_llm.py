@@ -6,9 +6,11 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any
 
+from .providers import FastLLMProvider
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{6,}"),
@@ -81,7 +83,9 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
         data = raw
     else:
         try:
-            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
+            data = json.loads(
+                _extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            )
         except json.JSONDecodeError as exc:
             raise ValueError(f"fast model output is not valid JSON: {exc.msg}") from exc
     if not isinstance(data, dict):
@@ -91,8 +95,12 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     if not isinstance(ack, bool):
         raise ValueError("fast model field ack must be a boolean")
     ack_text = _optional_nonempty_str(data.get("ack_text"), "ack_text")
-    direct_response_text = sanitize_direct_response_text(_optional_nonempty_str(data.get("direct_response_text"), "direct_response_text"))
-    direct_response_kind = _optional_nonempty_str(data.get("direct_response_kind"), "direct_response_kind")
+    direct_response_text = sanitize_direct_response_text(
+        _optional_nonempty_str(data.get("direct_response_text"), "direct_response_text")
+    )
+    direct_response_kind = _optional_nonempty_str(
+        data.get("direct_response_kind"), "direct_response_kind"
+    )
     if direct_response_kind is not None:
         direct_response_kind = direct_response_kind.lower()
         if direct_response_kind not in DIRECT_RESPONSE_KINDS:
@@ -113,7 +121,9 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     switch_intent = _optional_str_dict(data.get("switch_intent"), "switch_intent")
     create_intent = _optional_str_dict(data.get("create_intent"), "create_intent")
     resume_intent = _optional_str_dict(data.get("resume_intent"), "resume_intent")
-    if direct_response_text and any([switch_intent, create_intent, resume_intent, cancel_intent, approval_decision]):
+    if direct_response_text and any(
+        [switch_intent, create_intent, resume_intent, cancel_intent, approval_decision]
+    ):
         raise ValueError("direct_response_text cannot be combined with control or approval intents")
 
     return FastModelResult(
@@ -130,12 +140,16 @@ def parse_fast_model_json(raw: str | bytes | dict[str, Any]) -> FastModelResult:
     )
 
 
-def parse_summary_json(raw: str | bytes | dict[str, Any], *, source_text: str, summary_max_chars: int) -> SummaryResult:
+def parse_summary_json(
+    raw: str | bytes | dict[str, Any], *, source_text: str, summary_max_chars: int
+) -> SummaryResult:
     if isinstance(raw, dict):
         data = raw
     else:
         try:
-            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
+            data = json.loads(
+                _extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            )
         except json.JSONDecodeError as exc:
             raise ValueError(f"summary model output is not valid JSON: {exc.msg}") from exc
     if not isinstance(data, dict):
@@ -154,17 +168,25 @@ def parse_summary_json(raw: str | bytes | dict[str, Any], *, source_text: str, s
     )
 
 
-def parse_error_explanation_json(raw: str | bytes | dict[str, Any], *, source_text: str) -> ErrorExplanationResult:
+def parse_error_explanation_json(
+    raw: str | bytes | dict[str, Any], *, source_text: str
+) -> ErrorExplanationResult:
     if isinstance(raw, dict):
         data = raw
     else:
         try:
-            data = json.loads(_extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)))
+            data = json.loads(
+                _extract_json_object(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+            )
         except json.JSONDecodeError as exc:
-            raise ValueError(f"error explanation model output is not valid JSON: {exc.msg}") from exc
+            raise ValueError(
+                f"error explanation model output is not valid JSON: {exc.msg}"
+            ) from exc
     if not isinstance(data, dict):
         raise ValueError("error explanation model output must be a JSON object")
-    message_text = sanitize_error_explanation_text(_optional_nonempty_str(data.get("message_text"), "message_text"))
+    message_text = sanitize_error_explanation_text(
+        _optional_nonempty_str(data.get("message_text"), "message_text")
+    )
     if not message_text:
         raise ValueError("message_text is required")
     original = str(source_text or "")
@@ -178,7 +200,9 @@ def parse_error_explanation_json(raw: str | bytes | dict[str, Any], *, source_te
 def sanitize_summary_text(text: str) -> str:
     sanitized = str(text or "")
     for pattern in _SECRET_PATTERNS:
-        sanitized = pattern.sub(lambda match: (match.group(1) if match.lastindex else "") + "[REDACTED]", sanitized)
+        sanitized = pattern.sub(
+            lambda match: (match.group(1) if match.lastindex else "") + "[REDACTED]", sanitized
+        )
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
     return sanitized
 
@@ -262,7 +286,10 @@ def _deterministic_direct_response(normalized: str) -> tuple[str, str] | None:
             "what can you do here",
             "help",
         }:
-            return "I can send requests to Hermes, switch projects, handle approvals, and play responses back.", "app_help"
+            return (
+                "I can send requests to Hermes, switch projects, handle approvals, and play responses back.",
+                "app_help",
+            )
         if re.fullmatch(r"how (?:do|can) i (?:stop|cancel)(?: a| the)? run\??", normalized):
             return "Tap Stop, or say “stop”.", "app_help"
     if allowed_kind == "simple_text" and normalized in {"say hello", "say hello back"}:
@@ -324,9 +351,15 @@ def _direct_response_text_is_safe(text: str | None) -> bool:
     return not normalized.startswith(privileged_starts)
 
 
-def is_safe_direct_response_for_request(text: str, response_kind: str | None, response_text: str | None) -> bool:
+def is_safe_direct_response_for_request(
+    text: str, response_kind: str | None, response_text: str | None
+) -> bool:
     allowed_kind = direct_response_kind_for_request(text)
-    return allowed_kind is not None and response_kind == allowed_kind and _direct_response_text_is_safe(response_text)
+    return (
+        allowed_kind is not None
+        and response_kind == allowed_kind
+        and _direct_response_text_is_safe(response_text)
+    )
 
 
 def _is_direct_response_request_safe(text: str) -> bool:
@@ -349,7 +382,7 @@ class DeterministicFastModel:
     def analyze_input(self, text: str, *, projects: list[str] | None = None) -> FastModelResult:
         raw_text = str(text or "").strip()
         normalized = re.sub(r"\s+", " ", raw_text.lower()).strip()
-        ack_text = natural_ack_for(raw_text)
+        ack_text: str | None = natural_ack_for(raw_text)
         direct_response_text: str | None = None
         direct_response_kind: str | None = None
         switch_intent: dict[str, str] | None = None
@@ -367,19 +400,30 @@ class DeterministicFastModel:
             approval_decision = "approve"
             ack_text = "Approved."
             confidence = 0.97
-        elif normalized in {"deny", "denied", "reject", "no deny", "do not approve", "don't approve"} or normalized.startswith("deny "):
+        elif normalized in {
+            "deny",
+            "denied",
+            "reject",
+            "no deny",
+            "do not approve",
+            "don't approve",
+        } or normalized.startswith("deny "):
             approval_decision = "deny"
             ack_text = "Denied."
             confidence = 0.97
         else:
-            match = re.fullmatch(r"(?:switch|change|move) (?:to|into) (?:project )?(.+)", normalized)
+            match = re.fullmatch(
+                r"(?:switch|change|move) (?:to|into) (?:project )?(.+)", normalized
+            )
             if match:
                 title = _clean_title(match.group(1))
                 if title:
                     switch_intent = {"project_title": title}
                     ack_text = f"Switching to {title}."
                     confidence = 0.88
-            match = re.fullmatch(r"(?:create|new|start) (?:a )?(?:new )?project(?: called| named)? (.+)", normalized)
+            match = re.fullmatch(
+                r"(?:create|new|start) (?:a )?(?:new )?project(?: called| named)? (.+)", normalized
+            )
             if match:
                 title = _clean_title(match.group(1))
                 if title:
@@ -433,7 +477,7 @@ class DeterministicFastModel:
     def explain_error(self, text: str) -> ErrorExplanationResult:
         original = str(text or "")
         source_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
-        raw = sanitize_summary_text(original).lstrip("⚠️⚠❌ ").strip()
+        raw = sanitize_summary_text(original).lstrip("⚠️⚠❌ ").strip()  # noqa: B005
         if not raw:
             raw = "an internal error"
         message = (
@@ -442,7 +486,8 @@ class DeterministicFastModel:
             "Please retry, or switch models if it keeps happening."
         )
         return ErrorExplanationResult(
-            message_text=sanitize_error_explanation_text(message) or "Hermes hit an unrecoverable error before it could answer.",
+            message_text=sanitize_error_explanation_text(message)
+            or "Hermes hit an unrecoverable error before it could answer.",
             source_hash=source_hash,
             source_chars=len(original),
         )
@@ -475,11 +520,23 @@ class OllamaFastModel:
         transport: OllamaTransport | None = None,
         fallback: DeterministicFastModel | None = None,
     ) -> None:
-        self.endpoint = (endpoint or os.getenv("OLLAMA_HOST") or os.getenv("LOGOS_FAST_MODEL_ENDPOINT") or "http://127.0.0.1:11434").rstrip("/")
-        self.model = model or os.getenv("LOGOS_FAST_MODEL_MODEL") or os.getenv("OLLAMA_MODEL") or "gemma3:12b"
+        self.endpoint = (
+            endpoint
+            or os.getenv("OLLAMA_HOST")
+            or os.getenv("LOGOS_FAST_MODEL_ENDPOINT")
+            or "http://127.0.0.1:11434"
+        ).rstrip("/")
+        self.model = (
+            model
+            or os.getenv("LOGOS_FAST_MODEL_MODEL")
+            or os.getenv("OLLAMA_MODEL")
+            or "gemma3:12b"
+        )
         self.timeout_seconds = max(0.1, float(timeout_seconds))
         self.min_confidence = min(1.0, max(0.0, float(min_confidence)))
-        self.direct_response_min_confidence = min(1.0, max(0.0, float(direct_response_min_confidence)))
+        self.direct_response_min_confidence = min(
+            1.0, max(0.0, float(direct_response_min_confidence))
+        )
         self.summary_max_chars = max(40, int(summary_max_chars))
         self.transport = transport or ollama_generate
         self.fallback = fallback or DeterministicFastModel(summary_max_chars=self.summary_max_chars)
@@ -496,7 +553,9 @@ class OllamaFastModel:
             )
             result = parse_fast_model_json(raw)
             if result.confidence < self.min_confidence:
-                raise ValueError(f"fast model confidence {result.confidence:.2f} below threshold {self.min_confidence:.2f}")
+                raise ValueError(
+                    f"fast model confidence {result.confidence:.2f} below threshold {self.min_confidence:.2f}"
+                )
             result = self._apply_direct_response_policy(result, text)
             result = self._ensure_ack_text(result, text)
             self.last_error = None
@@ -514,7 +573,9 @@ class OllamaFastModel:
                 prompt=prompt,
                 timeout_seconds=self.timeout_seconds,
             )
-            result = parse_summary_json(raw, source_text=text, summary_max_chars=self.summary_max_chars)
+            result = parse_summary_json(
+                raw, source_text=text, summary_max_chars=self.summary_max_chars
+            )
             self.last_error = None
             return result
         except Exception as exc:
@@ -542,9 +603,17 @@ class OllamaFastModel:
             return result
         if (
             result.confidence < self.direct_response_min_confidence
-            or not is_safe_direct_response_for_request(text, result.direct_response_kind, result.direct_response_text)
+            or not is_safe_direct_response_for_request(
+                text, result.direct_response_kind, result.direct_response_text
+            )
         ):
-            return replace(result, direct_response_text=None, direct_response_kind=None, ack=True, ack_text=None)
+            return replace(
+                result,
+                direct_response_text=None,
+                direct_response_kind=None,
+                ack=True,
+                ack_text=None,
+            )
         return replace(result, ack=False, ack_text=None)
 
     def _ensure_ack_text(self, result: FastModelResult, text: str) -> FastModelResult:
@@ -558,19 +627,38 @@ class OllamaFastModel:
         return replace(result, ack_text=sanitize_ack_text(ack_text))
 
 
-def build_fast_model(extra: dict[str, Any] | None = None):
+def build_fast_model(extra: dict[str, Any] | None = None) -> FastLLMProvider:
     extra = dict(extra or {})
-    provider = str(os.getenv("LOGOS_FAST_MODEL_PROVIDER") or extra.get("fast_model_provider") or "deterministic").strip().lower()
-    summary_max_chars = int(os.getenv("LOGOS_SUMMARY_MAX_CHARS") or extra.get("summary_max_chars") or 240)
+    provider = (
+        str(
+            os.getenv("LOGOS_FAST_MODEL_PROVIDER")
+            or extra.get("fast_model_provider")
+            or "deterministic"
+        )
+        .strip()
+        .lower()
+    )
+    summary_max_chars = int(
+        os.getenv("LOGOS_SUMMARY_MAX_CHARS") or extra.get("summary_max_chars") or 240
+    )
     fallback = DeterministicFastModel(summary_max_chars=summary_max_chars)
     if provider in {"", "deterministic", "stub", "test"}:
         return fallback
     if provider in {"ollama", "local", "auto"}:
         return OllamaFastModel(
-            endpoint=_optional_text(os.getenv("LOGOS_FAST_MODEL_ENDPOINT") or extra.get("fast_model_endpoint")),
-            model=_optional_text(os.getenv("LOGOS_FAST_MODEL_MODEL") or extra.get("fast_model_model")),
-            timeout_seconds=float(os.getenv("LOGOS_FAST_MODEL_TIMEOUT") or extra.get("fast_model_timeout", 2.5)),
-            min_confidence=float(os.getenv("LOGOS_FAST_MODEL_MIN_CONFIDENCE") or extra.get("fast_model_min_confidence", 0.55)),
+            endpoint=_optional_text(
+                os.getenv("LOGOS_FAST_MODEL_ENDPOINT") or extra.get("fast_model_endpoint")
+            ),
+            model=_optional_text(
+                os.getenv("LOGOS_FAST_MODEL_MODEL") or extra.get("fast_model_model")
+            ),
+            timeout_seconds=float(
+                os.getenv("LOGOS_FAST_MODEL_TIMEOUT") or extra.get("fast_model_timeout", 2.5)
+            ),
+            min_confidence=float(
+                os.getenv("LOGOS_FAST_MODEL_MIN_CONFIDENCE")
+                or extra.get("fast_model_min_confidence", 0.55)
+            ),
             direct_response_min_confidence=float(
                 os.getenv("LOGOS_FAST_DIRECT_RESPONSE_MIN_CONFIDENCE")
                 or extra.get("fast_direct_response_min_confidence", 0.86)
@@ -625,7 +713,7 @@ def _analysis_prompt(text: str, *, projects: list[str] | None = None) -> str:
         "For every other request, including facts, math, coding, project state, control actions, approvals, denials, switching, resuming, files, logs, memory, or current information, set direct_response_text=null and provide a short natural ack. "
         "Avoid generic ack_text such as Got it, Sure, or Okay when a contextual ack fits. "
         "Never combine direct_response_text with a control or approval intent. "
-        "switch_intent shape: {\"project_title\":\"...\"}; create_intent: {\"title\":\"...\"}; resume_intent: {\"target\":\"...\"}. "
+        'switch_intent shape: {"project_title":"..."}; create_intent: {"title":"..."}; resume_intent: {"target":"..."}. '
         f"Known projects: {projects_text}. User text: {json.dumps(str(text or ''))}"
     )
 
@@ -633,7 +721,7 @@ def _analysis_prompt(text: str, *, projects: list[str] | None = None) -> str:
 def _summary_prompt(text: str, *, summary_max_chars: int) -> str:
     return (
         "Summarize this Hermes assistant response for notification metadata and compact surfaces. Return only strict JSON: "
-        "{\"summary_text\":\"...\"}. One sentence, no secrets, no markdown, "
+        '{"summary_text":"..."}. One sentence, no secrets, no markdown, '
         f"maximum {summary_max_chars} characters. Text: {json.dumps(str(text or ''))}"
     )
 
@@ -641,7 +729,7 @@ def _summary_prompt(text: str, *, summary_max_chars: int) -> str:
 def _error_explanation_prompt(text: str) -> str:
     return (
         "Rewrite this raw Hermes/provider failure into one short, user-facing final message. "
-        "Return only strict JSON: {\"message_text\":\"...\"}. Explain that Hermes could not complete the request, "
+        'Return only strict JSON: {"message_text":"..."}. Explain that Hermes could not complete the request, '
         "include the useful provider error in plain language, suggest retrying or switching models if it repeats, "
         "and do not include secrets, stack traces, markdown, or blame. Raw error: "
         f"{json.dumps(str(text or ''))}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -14,11 +15,12 @@ from typing import Any
 try:
     from gateway.config import PlatformConfig
     from gateway.platforms.base import MessageEvent
+    from websockets.exceptions import ConnectionClosed
+
     from logos.adapter import LogosAdapter
     from logos.commands import complete_slash_command
     from logos.schema import Envelope, error_frame
     from logos.ws_server import LogosWebSocketServer
-    from websockets.exceptions import ConnectionClosed
 except ModuleNotFoundError as exc:
     RUNTIME_IMPORT_ERROR: ModuleNotFoundError | None = exc
     PlatformConfig = None  # type: ignore[assignment]
@@ -97,7 +99,13 @@ STAGE_F_COMMAND_CATALOG: dict[str, Any] = {
         _stage_f_command("mock_clarify", "Render the mock clarification fixture"),
         _stage_f_command("mock_delayed_thread_updates", "Send delayed thread updates"),
         _stage_f_command("mock_gateway_restart", "Interrupt the current run and force reconnect"),
-        _stage_f_command("sessions", "Browse previous sessions", source="builtin", available=False, unavailable_reason="not available in the Stage F mock"),
+        _stage_f_command(
+            "sessions",
+            "Browse previous sessions",
+            source="builtin",
+            available=False,
+            unavailable_reason="not available in the Stage F mock",
+        ),
     ],
 }
 
@@ -109,7 +117,9 @@ def _allow_transcript_logging() -> bool:
 
 def _is_traffic_secret_key(key: str) -> bool:
     lowered = key.lower()
-    return lowered in TRAFFIC_SECRET_EXACT_KEYS or any(marker in lowered for marker in TRAFFIC_SECRET_KEY_MARKERS)
+    return lowered in TRAFFIC_SECRET_EXACT_KEYS or any(
+        marker in lowered for marker in TRAFFIC_SECRET_KEY_MARKERS
+    )
 
 
 def _summarize_text(value: Any) -> Any:
@@ -121,8 +131,10 @@ def _summarize_text(value: Any) -> Any:
 def _redact_traffic(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key): "[REDACTED]" if _is_traffic_secret_key(str(key))
-            else _summarize_text(item) if str(key).lower() in TRAFFIC_TEXT_KEYS
+            str(key): "[REDACTED]"
+            if _is_traffic_secret_key(str(key))
+            else _summarize_text(item)
+            if str(key).lower() in TRAFFIC_TEXT_KEYS
             else _redact_traffic(item)
             for key, item in value.items()
         }
@@ -149,7 +161,9 @@ def _traffic_payload(frame: Any) -> Any:
 
 def format_traffic_log_line(direction: str, frame: Any) -> str:
     payload = _traffic_payload(frame)
-    rendered = json.dumps(payload, default=str, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    rendered = json.dumps(
+        payload, default=str, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return f"TRAFFIC {direction} {rendered}"
 
 
@@ -277,7 +291,10 @@ class StageFMockLogosAdapter(LogosAdapter):
                     "⚠️ Gateway restarting — Your current task will be interrupted. "
                     "Send any message after restart and I'll try to resume where you left off."
                 ),
-                metadata={"request_id": request_id, "session_id": "stage-f-gateway-restart-session"},
+                metadata={
+                    "request_id": request_id,
+                    "session_id": "stage-f-gateway-restart-session",
+                },
             )
             await asyncio.sleep(0.2)
             await self._close_mock_clients(code=1012, reason="gateway_restarting")
@@ -288,7 +305,10 @@ class StageFMockLogosAdapter(LogosAdapter):
                 command="echo stage-f",
                 session_key="stage-f-session",
                 description="Stage F fixture approval",
-                metadata={"approval_id": "stage-f-approval", "risk": "Fixture only; no command is executed."},
+                metadata={
+                    "approval_id": "stage-f-approval",
+                    "risk": "Fixture only; no command is executed.",
+                },
             )
             return
         if content == "/mock_clarify":
@@ -322,10 +342,10 @@ class StageFMockLogosAdapter(LogosAdapter):
             )
             return
         if content == "/mock_slow_thread_updates":
-            asyncio.create_task(self._send_slow_thread_updates(chat_id))
+            asyncio.create_task(self._send_slow_thread_updates(chat_id))  # noqa: RUF006
             return
         if content == "/mock_slow_keepalive":
-            asyncio.create_task(self._send_slow_keepalive(chat_id))
+            asyncio.create_task(self._send_slow_keepalive(chat_id))  # noqa: RUF006
             return
         if content == "/mock_post_final_progress":
             request_id = "stage-f-post-final-progress"
@@ -341,7 +361,7 @@ class StageFMockLogosAdapter(LogosAdapter):
             await asyncio.sleep(0.4)
             await self._broadcast_progress_text(
                 chat_id=chat_id,
-                content="🔧 terminal: \"post-final-progress\"",
+                content='🔧 terminal: "post-final-progress"',
                 metadata={"request_id": request_id, "session_id": "stage-f-post-final-session"},
                 request_id="stage-f-post-final-progress-tool",
                 kind="tool_progress",
@@ -374,7 +394,10 @@ class StageFMockLogosAdapter(LogosAdapter):
             await self._broadcast_progress_text(
                 chat_id=chat_id,
                 content="Run control shrink progress is visible before final response.",
-                metadata={"request_id": request_id, "session_id": "stage-f-run-control-shrink-session"},
+                metadata={
+                    "request_id": request_id,
+                    "session_id": "stage-f-run-control-shrink-session",
+                },
                 request_id=request_id,
                 kind="tool_progress",
             )
@@ -442,23 +465,34 @@ class StageFMockLogosAdapter(LogosAdapter):
         else:
             clients = list(getattr(self.ws_server, "_clients", {}).keys())
         for websocket in clients:
-            try:
+            with contextlib.suppress(Exception):
                 await websocket.close(code=code, reason=reason)
-            except Exception:
-                pass
 
 
 async def amain() -> int:
-    parser = argparse.ArgumentParser(description="Run a Stage F Logos mock adapter for iOS Simulator validation")
+    parser = argparse.ArgumentParser(
+        description="Run a Stage F Logos mock adapter for iOS Simulator validation"
+    )
     parser.add_argument("--host", default=os.getenv("LOGOS_WS_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("LOGOS_WS_PORT", "8765")))
     parser.add_argument("--secret", default=os.getenv("LOGOS_DEVICE_SECRET", "stage-f-secret"))
-    parser.add_argument("--store", default=os.getenv("LOGOS_STORE_PATH", "/tmp/logos-stage-f-simulator.db"))
-    parser.add_argument("--timeout-seconds", type=int, default=None, help="Override client_config.stale_timeout_seconds for iOS stale-notice testing")
+    parser.add_argument(
+        "--store", default=os.getenv("LOGOS_STORE_PATH", "/tmp/logos-stage-f-simulator.db")
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        help="Override client_config.stale_timeout_seconds for iOS stale-notice testing",
+    )
     args = parser.parse_args()
 
     if RUNTIME_IMPORT_ERROR is not None:
-        print(f"ERROR: missing Logos mock adapter dependency: {RUNTIME_IMPORT_ERROR}", file=sys.stderr, flush=True)
+        print(
+            f"ERROR: missing Logos mock adapter dependency: {RUNTIME_IMPORT_ERROR}",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
 
     store = Path(args.store)
@@ -473,22 +507,27 @@ async def amain() -> int:
                 "host": args.host,
                 "port": args.port,
                 "store_path": str(store),
-                **({"timeout_seconds": args.timeout_seconds} if args.timeout_seconds is not None else {}),
+                **(
+                    {"timeout_seconds": args.timeout_seconds}
+                    if args.timeout_seconds is not None
+                    else {}
+                ),
             },
         )
     )
     connected = await adapter.connect()
     if not connected:
         return 1
-    print(f"READY ws://{args.host}:{adapter.ws_server.actual_port} secret=[REDACTED] store={store}", flush=True)
+    print(
+        f"READY ws://{args.host}:{adapter.ws_server.actual_port} secret=[REDACTED] store={store}",
+        flush=True,
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            pass
     await stop.wait()
     await adapter.disconnect()
     return 0

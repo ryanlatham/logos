@@ -1,0 +1,50 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["plugins", "scripts", "tests"]
+
+[tool.ruff.lint]
+# Pyflakes (F) + pycodestyle (E/W) + isort (I) + pyupgrade (UP) + bugbear (B)
+# + comprehensions (C4) + simplify (SIM) + Ruff-native (RUF). A strong, modern
+# baseline; the code is already PEP 585/604-clean so this should be near-green.
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+# Line width is owned by `ruff format` (line-length above). E501 conflicts with the
+# formatter on unsplittable lines (long string literals, asserts), so leave it off.
+# UP038 (isinstance(x, A | B)) is deprecated by ruff — the union form is slower at
+# runtime than the tuple form — so keep the tuple isinstance calls.
+ignore = ["E501", "UP038"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favor readability over some lint niceties.
+"tests/**" = ["B011", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["plugins/logos"]
+# `logos` is the package under plugins/ — put it on mypy's search path so `mypy`
+# resolves intra-package imports without needing PYTHONPATH set in the environment.
+mypy_path = "plugins"
+# Pretty output, but keep error codes visible for targeted, honest ignores.
+show_error_codes = true
+warn_unused_ignores = true
+
+# The Hermes `gateway` package is private and absent in the blocking (Hermes-free)
+# CI tier, so it cannot be type-checked here. Treat it as the external boundary it
+# is: its symbols become untyped. The adapter's coupling to it is the genuine
+# wire/runtime edge.
+[[tool.mypy.overrides]]
+module = ["gateway.*"]
+ignore_missing_imports = true
+
+# qrcode ships no type information.
+[[tool.mypy.overrides]]
+module = ["qrcode.*"]
+ignore_missing_imports = true
+
+# `tools.approval` / `tools.clarify_gateway` are gateway-side modules (Hermes core), absent in
+# the blocking Hermes-free CI tier. interactions.py imports them lazily, inside try/except, only
+# when a real gateway is present — so treat them as the same external boundary as `gateway.*`.
+[[tool.mypy.overrides]]
+module = ["tools.*"]
+ignore_missing_imports = true

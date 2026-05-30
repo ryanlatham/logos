@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping, MutableMapping
+from typing import Any
 
 
 class ProtocolError(ValueError):
@@ -84,7 +85,7 @@ class Envelope:
     payload: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "Envelope":
+    def from_dict(cls, data: Mapping[str, Any]) -> Envelope:
         msg_type = data.get("type")
         if not isinstance(msg_type, str) or not msg_type.strip():
             raise ProtocolError("frame type is required")
@@ -146,10 +147,7 @@ def parse_frame(raw: str | bytes | bytearray | Mapping[str, Any]) -> Envelope:
 
 
 def serialize_frame(frame: Envelope | Mapping[str, Any]) -> str:
-    if isinstance(frame, Envelope):
-        data = frame.to_dict()
-    else:
-        data = dict(frame)
+    data = frame.to_dict() if isinstance(frame, Envelope) else dict(frame)
     return json.dumps(redact_secrets(data), ensure_ascii=False, separators=(",", ":"))
 
 
@@ -196,7 +194,9 @@ def redact_secrets(value: Any) -> Any:
 
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower()
-    return any(marker in lowered for marker in ("secret", "token", "password", "auth_key", "api_key"))
+    return any(
+        marker in lowered for marker in ("secret", "token", "password", "auth_key", "api_key")
+    )
 
 
 def _secret_values(value: Any) -> list[str]:

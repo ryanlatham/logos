@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
@@ -71,7 +72,9 @@ def _device_secret_ikm(device_secret: str) -> bytes:
     return str(device_secret or "").strip().encode("utf-8")
 
 
-def derive_session_keys(*, device_secret: str, client_nonce: bytes, server_nonce: bytes) -> tuple[bytes, bytes]:
+def derive_session_keys(
+    *, device_secret: str, client_nonce: bytes, server_nonce: bytes
+) -> tuple[bytes, bytes]:
     """Return (c2s_key, s2c_key) for a session. Pure function — the KAT anchor."""
     if not client_nonce or not server_nonce:
         raise CryptoError("client_nonce and server_nonce are required")
@@ -85,7 +88,9 @@ def derive_session_keys(*, device_secret: str, client_nonce: bytes, server_nonce
 class LogosSessionCrypto:
     """Per-connection sealer/opener for one role (client or server)."""
 
-    def __init__(self, *, c2s_key: bytes, s2c_key: bytes, role: str, aead: str = AEAD_CHACHA20_POLY1305) -> None:
+    def __init__(
+        self, *, c2s_key: bytes, s2c_key: bytes, role: str, aead: str = AEAD_CHACHA20_POLY1305
+    ) -> None:
         if role not in (ROLE_CLIENT, ROLE_SERVER):
             raise CryptoError(f"invalid role: {role!r}")
         if aead not in SUPPORTED_AEADS:
@@ -113,7 +118,7 @@ class LogosSessionCrypto:
         server_nonce: bytes,
         role: str,
         aead: str = AEAD_CHACHA20_POLY1305,
-    ) -> "LogosSessionCrypto":
+    ) -> LogosSessionCrypto:
         c2s_key, s2c_key = derive_session_keys(
             device_secret=device_secret, client_nonce=client_nonce, server_nonce=server_nonce
         )
@@ -157,7 +162,9 @@ class LogosSessionCrypto:
         ciphertext = self._cipher(self._send_key).encrypt(nonce, plaintext, aad)
         return {"enc": 1, "n": counter, "ct": base64.b64encode(ciphertext).decode("ascii")}
 
-    def open_payload(self, header: Mapping[str, Any], enc_payload: Mapping[str, Any]) -> dict[str, Any]:
+    def open_payload(
+        self, header: Mapping[str, Any], enc_payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
         """Decrypt an `{enc, n, ct}` payload, enforcing monotonic counters."""
         counter = enc_payload.get("n")
         if not isinstance(counter, int) or isinstance(counter, bool):
@@ -169,13 +176,13 @@ class LogosSessionCrypto:
             raise CryptoError("encrypted payload is missing ciphertext")
         try:
             ciphertext = base64.b64decode(ct_b64, validate=True)
-        except Exception as exc:  # noqa: BLE001 - normalize to a protocol error
+        except Exception as exc:
             raise CryptoError("invalid ciphertext encoding") from exc
         aad = self._aad(header, counter)
         nonce = self._nonce(self._recv_dir, counter)
         try:
             plaintext = self._cipher(self._recv_key).decrypt(nonce, ciphertext, aad)
-        except Exception as exc:  # noqa: BLE001 - InvalidTag and friends
+        except Exception as exc:
             raise CryptoError("AEAD authentication failed") from exc
         self._recv_last = counter
         try:

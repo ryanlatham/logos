@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gateway.platforms.base import SendResult
 
@@ -10,12 +10,19 @@ from .apns import PrivateNotificationKind
 from .config import _safe_filename_component
 from .store import LogosMessage
 
+if TYPE_CHECKING:
+    from ._adapter_core import LogosAdapterCore
+
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
+
 # Transient/durable tool-progress rows carry this message-id prefix so the receiver and store
 # can distinguish them from final assistant messages.
 PROGRESS_MESSAGE_ID_PREFIX = "progress-"
 
 
-class MessageStateMixin:
+class MessageStateMixin(_MixinBase):
     """Outbound message lifecycle moved verbatim from adapter.py (the highest-fidelity logic).
 
     Progress-text rollup, send / edit_message, transient->final promotion, and the
@@ -39,12 +46,23 @@ class MessageStateMixin:
         metadata = dict(metadata or {})
         project_key = self._project_key_from_chat_id(chat_id)
         provided_progress_id = request_id or metadata.get("message_id")
-        context_key = (project_key, str(provided_progress_id)) if provided_progress_id is not None else None
-        previous_context = self._transient_progress_context.get(context_key, {}) if context_key is not None else {}
+        context_key = (
+            (project_key, str(provided_progress_id)) if provided_progress_id is not None else None
+        )
+        previous_context = (
+            self._transient_progress_context.get(context_key, {}) if context_key is not None else {}
+        )
         previous_metadata = dict(previous_context.get("metadata") or {})
-        session_id = str(metadata.get("session_id") or metadata.get("session") or previous_context.get("session_id") or chat_id)
+        session_id = str(
+            metadata.get("session_id")
+            or metadata.get("session")
+            or previous_context.get("session_id")
+            or chat_id
+        )
         if provided_progress_id is None and kind == "gateway_status":
-            provided_progress_id = f"{PROGRESS_MESSAGE_ID_PREFIX}gateway-status-{_safe_filename_component(session_id)}"
+            provided_progress_id = (
+                f"{PROGRESS_MESSAGE_ID_PREFIX}gateway-status-{_safe_filename_component(session_id)}"
+            )
         progress_id = str(provided_progress_id or f"{PROGRESS_MESSAGE_ID_PREFIX}{uuid.uuid4()}")
         progress_metadata = {**previous_metadata, **metadata}
         root_request_id = str(progress_metadata.get("request_id") or progress_id)
@@ -90,18 +108,24 @@ class MessageStateMixin:
                     metadata=progress_metadata,
                 )
             if stored_progress is None:
-                return SendResult(success=False, message_id=progress_id, error="progress message not found")
+                return SendResult(
+                    success=False, message_id=progress_id, error="progress message not found"
+                )
             existing_project = self.store.get_project(project_key)
             self.store.upsert_project(
                 project_key=project_key,
                 title=existing_project.title if existing_project else project_key,
                 current_session_id=session_id,
-                lineage_root_session_id=str(progress_metadata.get("lineage_root_session_id") or progress_metadata.get("root_session_id") or session_id),
+                lineage_root_session_id=str(
+                    progress_metadata.get("lineage_root_session_id")
+                    or progress_metadata.get("root_session_id")
+                    or session_id
+                ),
             )
             server_seq = stored_progress.server_seq
         else:
             server_seq = self.store.next_server_seq()
-        frame = {
+        frame: dict[str, Any] = {
             "type": "tool_progress",
             "request_id": root_request_id,
             "project_key": project_key,
@@ -132,10 +156,14 @@ class MessageStateMixin:
         metadata = dict(metadata or {})
         project_key = self._project_key_from_chat_id(chat_id)
         session_id = str(metadata.get("session_id") or metadata.get("session") or chat_id)
-        metadata = self._metadata_with_current_request_id(project_key=project_key, session_id=session_id, metadata=metadata)
+        metadata = self._metadata_with_current_request_id(
+            project_key=project_key, session_id=session_id, metadata=metadata
+        )
         session_id = str(metadata.get("session_id") or metadata.get("session") or session_id)
         if self._looks_like_terminal_error_text(content):
-            await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind="gateway_status")
+            await self._broadcast_progress_text(
+                chat_id=chat_id, content=content, metadata=metadata, kind="gateway_status"
+            )
             explanation, explanation_protocol = self._human_readable_error_response(content)
             metadata = dict(metadata)
             metadata.update(
@@ -152,7 +180,9 @@ class MessageStateMixin:
             content = explanation
         progress_kind = self._progress_kind_for_text(content)
         if progress_kind is not None:
-            sent = await self._broadcast_progress_text(chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind)
+            sent = await self._broadcast_progress_text(
+                chat_id=chat_id, content=content, metadata=metadata, kind=progress_kind
+            )
             lifecycle_reason = self._gateway_lifecycle_interruption_reason(content)
             if lifecycle_reason is not None:
                 await self._broadcast_run_status(
@@ -201,7 +231,11 @@ class MessageStateMixin:
             project_key=project_key,
             title=existing_project.title if existing_project else project_key,
             current_session_id=session_id,
-            lineage_root_session_id=str(final_metadata.get("lineage_root_session_id") or final_metadata.get("root_session_id") or session_id),
+            lineage_root_session_id=str(
+                final_metadata.get("lineage_root_session_id")
+                or final_metadata.get("root_session_id")
+                or session_id
+            ),
             last_seen_message_id=stored.message_id,
             last_seen_server_seq=stored.server_seq,
             last_preview=content[:240],
@@ -243,7 +277,9 @@ class MessageStateMixin:
         message_id_str = str(message_id)
         progress_kind = self._progress_kind_for_text(content)
         existing = self.store.get_message_by_project(project_key, message_id_str)
-        if not finalize and (progress_kind is not None or message_id_str.startswith(PROGRESS_MESSAGE_ID_PREFIX)):
+        if not finalize and (
+            progress_kind is not None or message_id_str.startswith(PROGRESS_MESSAGE_ID_PREFIX)
+        ):
             progress_metadata: dict[str, Any] = {}
             if existing is not None:
                 progress_metadata.update(existing.metadata)
@@ -353,16 +389,32 @@ class MessageStateMixin:
         final_metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         context = self._transient_progress_context.pop((project_key, message_id), {})
-        session_id = str((progress_message.session_id if progress_message is not None else None) or context.get("session_id") or chat_id)
-        metadata = dict((progress_message.metadata if progress_message is not None else None) or context.get("metadata") or {})
+        session_id = str(
+            (progress_message.session_id if progress_message is not None else None)
+            or context.get("session_id")
+            or chat_id
+        )
+        metadata = dict(
+            (progress_message.metadata if progress_message is not None else None)
+            or context.get("metadata")
+            or {}
+        )
         if final_metadata:
             metadata.update(dict(final_metadata))
         root_request_id = str(metadata.get("request_id") or message_id)
-        for progress_key in ("progress_kind", "kind", "transient", "message_id", "hermes_message_id"):
+        for progress_key in (
+            "progress_kind",
+            "kind",
+            "transient",
+            "message_id",
+            "hermes_message_id",
+        ):
             metadata.pop(progress_key, None)
         if metadata.get("source") in {"tool_progress", "progress"}:
             metadata.pop("source", None)
-        metadata.update({"edited_at": time.time(), "finalized": True, "request_id": root_request_id})
+        metadata.update(
+            {"edited_at": time.time(), "finalized": True, "request_id": root_request_id}
+        )
         metadata.setdefault("source", "hermes")
         final_message_id = str(metadata.pop("final_message_id", "") or f"{message_id}-final")
         stored = self.store.append_message(
@@ -381,7 +433,11 @@ class MessageStateMixin:
             project_key=project_key,
             title=existing_project.title if existing_project else project_key,
             current_session_id=session_id,
-            lineage_root_session_id=str(metadata.get("lineage_root_session_id") or metadata.get("root_session_id") or session_id),
+            lineage_root_session_id=str(
+                metadata.get("lineage_root_session_id")
+                or metadata.get("root_session_id")
+                or session_id
+            ),
             last_seen_message_id=stored.message_id,
             last_seen_server_seq=stored.server_seq,
             last_preview=content[:240],
@@ -424,7 +480,9 @@ class MessageStateMixin:
             },
         }
 
-    def _summary_ready_update(self, message: LogosMessage, summary: dict[str, Any]) -> dict[str, Any]:
+    def _summary_ready_update(
+        self, message: LogosMessage, summary: dict[str, Any]
+    ) -> dict[str, Any]:
         return {
             "type": "state_update",
             "project_key": message.project_key,

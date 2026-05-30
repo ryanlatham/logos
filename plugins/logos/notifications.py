@@ -47,11 +47,16 @@ class PrivateNotifier:
             if "notifications" not in {str(item).lower() for item in device.capabilities}:
                 continue
             environment = (
-                str(device.apns_environment or apns.config.environment or "").strip().lower() or None
+                str(device.apns_environment or apns.config.environment or "").strip().lower()
+                or None
             )
             try:
                 result_or_awaitable = apns.send(device.apns_token, payload, environment=environment)
-                result = await result_or_awaitable if inspect.isawaitable(result_or_awaitable) else result_or_awaitable
+                result = (
+                    await result_or_awaitable
+                    if inspect.isawaitable(result_or_awaitable)
+                    else result_or_awaitable
+                )
             except Exception as exc:  # pragma: no cover - exercised with injected clients
                 logger.warning(
                     "Logos APNS send raised for device_id=%s environment=%s error_type=%s",
