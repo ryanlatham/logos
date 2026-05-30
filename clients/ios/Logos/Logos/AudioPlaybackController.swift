@@ -61,16 +61,20 @@ struct SystemAudioPlayerFactory: AudioPlayerMaking {
     }
 }
 
-struct DecodedAudioSamples: Equatable {
+struct DecodedAudioSamples: Equatable, Sendable {
     let samples: [Float]
     let sampleRate: Double
 }
 
-protocol AudioSampleDecoding {
+protocol AudioSampleDecoding: Sendable {
     func decodeSamples(from data: Data) throws -> DecodedAudioSamples
 }
 
-struct AVAudioFileSampleDecoder: AudioSampleDecoding {
+// Runs on a background decode queue (AudioPlaybackController.scheduleSpectrumDecode), so it must be
+// Sendable. Its only non-Sendable stored member is `fileManager`; FileManager is thread-safe for the
+// per-call operations used here (each decode writes/reads/removes its own UUID-named temp file), so
+// the cross-actor sharing is safe. @unchecked documents that hand-verified guarantee.
+struct AVAudioFileSampleDecoder: AudioSampleDecoding, @unchecked Sendable {
     private static let temporaryFilePrefix = "logos-spectrum-"
 
     private let fileManager: FileManager
@@ -239,6 +243,7 @@ struct AudioPlaybackResumeResult: Equatable {
     let started: Bool
 }
 
+@MainActor
 final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
     var onPlaybackFinished: ((String, Bool) -> Void)?
 
@@ -352,24 +357,26 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         }
     }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+    // AVAudioPlayerDelegate is nonisolated. AVAudioPlayer invokes these on the thread that started
+    // playback, which for this controller is always the main actor (it creates and plays on main).
+    // Assume that isolation so cleanup runs synchronously, preserving the pre-Swift-6 timing.
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         let playerID = ObjectIdentifier(player)
-        guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
-        playersByAudioID.removeValue(forKey: audioID)
-        cancelSpectrumDecode(audioID: audioID)
-        lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
-        try? sessionManager.finishPlayback()
-        onPlaybackFinished?(audioID, flag)
+        MainActor.assumeIsolated { self.finishPlayback(playerID: playerID, succeeded: flag) }
     }
 
-    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         let playerID = ObjectIdentifier(player)
+        MainActor.assumeIsolated { self.finishPlayback(playerID: playerID, succeeded: false) }
+    }
+
+    private func finishPlayback(playerID: ObjectIdentifier, succeeded: Bool) {
         guard let audioID = audioIDByPlayerID.removeValue(forKey: playerID) else { return }
         playersByAudioID.removeValue(forKey: audioID)
         cancelSpectrumDecode(audioID: audioID)
         lifecycleSnapshotsByAudioID.removeValue(forKey: audioID)
         try? sessionManager.finishPlayback()
-        onPlaybackFinished?(audioID, false)
+        onPlaybackFinished?(audioID, succeeded)
     }
 
     @discardableResult
@@ -467,7 +474,7 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         let decoder = sampleDecoder
         spectrumDecodeQueue.async { [weak self] in
             let decodedSamples = try? decoder.decodeSamples(from: data)
-            DispatchQueue.main.async { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self,
                       self.spectrumDecodeTokensByAudioID[audioID] == token else { return }
                 self.spectrumDecodeTokensByAudioID.removeValue(forKey: audioID)

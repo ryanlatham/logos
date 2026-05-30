@@ -3,7 +3,7 @@ import Observation
 import UIKit
 import UserNotifications
 
-struct LogosNotificationRoute: Equatable {
+struct LogosNotificationRoute: Equatable, Sendable {
     let kind: String
     let projectKey: String
     let sessionID: String?
@@ -132,13 +132,11 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let userInfo = response.notification.request.content.userInfo
-        Task { @MainActor in
-            if let route = LogosNotificationRoute.from(userInfo: userInfo) {
-                self.route(route)
-            }
-            completionHandler()
+        let route = LogosNotificationRoute.from(userInfo: response.notification.request.content.userInfo)
+        if let route {
+            Task { @MainActor in self.route(route) }
         }
+        completionHandler()
     }
 }
 

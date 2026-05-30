@@ -491,7 +491,7 @@ final class LogosClient {
     func sendFrame(
         _ frame: [String: Any],
         requiresAuthentication: Bool = true,
-        onCompletion: ((Result<Void, Error>) -> Void)? = nil
+        onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)? = nil
     ) -> Bool {
         logosConnection.sendFrame(frame, requiresAuthentication: requiresAuthentication, onCompletion: onCompletion)
     }
@@ -1137,7 +1137,7 @@ extension LogosClient: MessageManagerHost {
     var messageDeviceID: String { settings.deviceID }
 
     @discardableResult
-    func sendMessageFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+    func sendMessageFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
         sendFrame(frame, onCompletion: onCompletion)
     }
 
@@ -1171,7 +1171,7 @@ extension LogosClient: AudioCoordinatorHost {
     }
 
     @discardableResult
-    func sendAudioFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+    func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
         sendFrame(frame, onCompletion: onCompletion)
     }
 
@@ -1333,7 +1333,7 @@ extension LogosClient: InteractionControllerHost {
     }
 
     @discardableResult
-    func sendInteractionFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+    func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
         sendFrame(frame, onCompletion: onCompletion)
     }
 
@@ -1379,7 +1379,7 @@ extension LogosClient: NotificationRouterHost {
     }
 
     @discardableResult
-    func sendNotificationFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool {
+    func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
         sendFrame(frame, onCompletion: onCompletion)
     }
 

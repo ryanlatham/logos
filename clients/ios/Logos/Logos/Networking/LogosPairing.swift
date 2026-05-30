@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-struct LogosPairingRoute: Equatable, Identifiable {
+struct LogosPairingRoute: Equatable, Identifiable, Sendable {
     var id: String { "\(adapterURL)|\(deviceID)|\(Int(expiresAt?.timeIntervalSince1970 ?? 0))" }
     let adapterURL: String
     let deviceID: String
@@ -82,13 +82,13 @@ struct LogosPairingRoute: Equatable, Identifiable {
     }
 }
 
-struct LogosPairingCredential: Equatable {
+struct LogosPairingCredential: Equatable, Sendable {
     let adapterURL: String
     let deviceID: String
     let deviceSecret: String
 }
 
-protocol PairingCredentialExchanging {
+protocol PairingCredentialExchanging: Sendable {
     func exchange(route: LogosPairingRoute) async throws -> LogosPairingCredential
 }
 
@@ -118,7 +118,7 @@ enum LogosPairingExchangeError: LocalizedError {
     }
 }
 
-final class WebSocketPairingCredentialExchanger: PairingCredentialExchanging {
+final class WebSocketPairingCredentialExchanger: PairingCredentialExchanging, Sendable {
     func exchange(route: LogosPairingRoute) async throws -> LogosPairingCredential {
         guard route.isExpired == false else { throw LogosPairingExchangeError.expired }
         guard route.allowsPairingTransport else { throw LogosPairingExchangeError.insecureAdapterURL }

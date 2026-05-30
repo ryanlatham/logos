@@ -395,7 +395,7 @@ final class LogosConnection: WebSocketLifecycleObserving {
     func sendFrame(
         _ frame: [String: Any],
         requiresAuthentication: Bool = true,
-        onCompletion: ((Result<Void, Error>) -> Void)? = nil
+        onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)? = nil
     ) -> Bool {
         let summary = LogosConnectionLog.frameSummary(frame)
         guard let task, isWebSocketOpen else {
@@ -425,18 +425,19 @@ final class LogosConnection: WebSocketLifecycleObserving {
         do {
             let data = try JSONSerialization.data(withJSONObject: workingFrame, options: [])
             let string = String(decoding: data, as: UTF8.self)
+            let frameType = frame["type"] as? String
+            let taskID = ObjectIdentifier(task)
             LogosConnectionLog.logger.info("Frame send queued \(summary, privacy: .public) bytes=\(data.count, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-            task.send(.string(string)) { [weak self, weak task] error in
+            task.send(.string(string)) { [weak self] error in
                 Task { @MainActor in
                     guard let self else { return }
-                    guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else {
+                    guard self.connectionLifecycle.accepts(connectionID), self.isCurrentTaskID(taskID) else {
                         LogosConnectionLog.logger.warning("Frame send completed on stale connection \(summary, privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
                         onCompletion?(.failure(LogosSocketSendError.staleConnection))
                         return
                     }
                     if let error {
                         LogosConnectionLog.logger.error("Frame send failed \(summary, privacy: .public) error=\(LogosConnectionLog.errorDescription(error), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
-                        let frameType = frame["type"] as? String
                         let shouldKeepInteractionCards = frameType == "approval_response" || frameType == "clarify_response"
                         self.failCurrentSocket(message: error.localizedDescription, retryable: true, clearInteractionCards: shouldKeepInteractionCards == false)
                         onCompletion?(.failure(error))
@@ -463,10 +464,11 @@ final class LogosConnection: WebSocketLifecycleObserving {
             return
         }
         LogosConnectionLog.logger.info("Receive loop waiting connection_id=\(connectionID.uuidString, privacy: .public) task_id=\(LogosConnectionLog.taskIDDescription(task), privacy: .public)")
-        task.receive { [weak self, weak task] result in
+        let taskID = ObjectIdentifier(task)
+        task.receive { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
-                guard self.connectionLifecycle.accepts(connectionID), let task, self.isCurrentTask(task) else {
+                guard self.connectionLifecycle.accepts(connectionID), self.isCurrentTaskID(taskID) else {
                     LogosConnectionLog.logger.warning("Receive result ignored for stale connection connection_id=\(connectionID.uuidString, privacy: .public)")
                     return
                 }
@@ -483,9 +485,9 @@ final class LogosConnection: WebSocketLifecycleObserving {
         }
     }
 
-    private func isCurrentTask(_ candidate: any WebSocketTasking) -> Bool {
+    private func isCurrentTaskID(_ id: ObjectIdentifier) -> Bool {
         guard let task else { return false }
-        return ObjectIdentifier(candidate) == ObjectIdentifier(task)
+        return ObjectIdentifier(task) == id
     }
 
     private func handleSocketMessage(_ message: URLSessionWebSocketTask.Message) {

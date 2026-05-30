@@ -15,7 +15,7 @@ protocol MessageManagerHost: AnyObject {
     /// The device id stamped onto outbound `messages_get` frames (mirrors `LogosClient.settings.deviceID`).
     var messageDeviceID: String { get }
     /// Send a message-subsystem frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendMessageFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendMessageFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
     /// The notification-route anchors merged into the visible thread when re-deriving `messages`
     /// (mirrors the former inline `notificationRouter.anchoredMessages(forProjectKey:)` read).
     func messageAnchoredMessages(forProjectKey projectKey: String) -> [LogosMessage]
