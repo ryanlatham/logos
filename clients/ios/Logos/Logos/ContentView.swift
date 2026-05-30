@@ -292,16 +292,29 @@ struct ContentView: View {
         ZStack(alignment: .top) {
             Color.logosBG.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                navBar
-                thread
-            }
-            .safeAreaInset(edge: .bottom) {
-                composerBar
-            }
+            // Group the persistent floating chrome (nav bar, audio overlay, the thread's
+            // jump-to-latest pill, and the composer cluster) under one GlassEffectContainer so
+            // their system Liquid Glass surfaces sample and blend against a shared backdrop. The
+            // modal overlays below stay outside this container — they should not merge with the
+            // composer pill.
+            GlassEffectContainer(spacing: 8) {
+                // Keep the overlay layout explicit (matching the outer ZStack's .top
+                // alignment) so the audio overlay still floats over the nav/thread cluster
+                // exactly as before — GlassEffectContainer only coordinates the shared glass
+                // backdrop; it must not redefine how these siblings stack.
+                ZStack(alignment: .top) {
+                    VStack(spacing: 0) {
+                        navBar
+                        thread
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        composerBar
+                    }
 
-            AudioOverlayLayer()
-                .zIndex(6)
+                    AudioOverlayLayer()
+                        .zIndex(6)
+                }
+            }
 
             if showProjectSwitcher {
                 ProjectSwitcherOverlay(
@@ -454,14 +467,13 @@ struct ContentView: View {
                         .foregroundStyle(Color.logosLabel)
                         .frame(width: 44, height: 44)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
                 .accessibilityLabel("Settings")
             }
         }
         .frame(height: 56)
         .padding(.horizontal, 14)
-        .background(Color.logosGlass)
-        .background(.ultraThinMaterial)
+        .glassEffect(.regular, in: .rect)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Color.logosHairline)
@@ -782,10 +794,7 @@ struct ContentView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.logosGlass)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.logosHairline, lineWidth: 0.5))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.34), radius: 18, x: 0, y: 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("slashCommandMenu")

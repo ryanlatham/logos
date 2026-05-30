@@ -248,8 +248,7 @@ struct SettingsOverlay: View {
             }
             .frame(height: 56)
             .padding(.horizontal, 14)
-            .background(Color.logosGlass)
-            .background(.ultraThinMaterial)
+            .glassEffect(.regular, in: .rect)
             .overlay(alignment: .bottom) {
                 Rectangle().fill(Color.logosHairline).frame(height: 0.5)
             }
