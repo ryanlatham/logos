@@ -8,6 +8,15 @@ import re
 GATEWAY_STILL_WORKING_RE = re.compile(
     r"^\s*(?:⏳\s*)?Still working(?:\.\.\.|…)(?:\s*\(|\s|$)", re.IGNORECASE
 )
+# Hermes' long-run heartbeat. Two observed phrasings:
+#   "⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"
+#   "⏳ Working — 3 min — iteration 2/1000, API call #2 completed"
+# The first also matches GATEWAY_STILL_WORKING_RE; the second ("Working —", no "...") does
+# not, so it would otherwise fall through to a final assistant bubble. The "iteration N/M"
+# token keeps this anchored to heartbeats and off ordinary replies.
+GATEWAY_WORKING_HEARTBEAT_RE = re.compile(
+    r"^\s*(?:⏳\s*)?(?:Still\s+)?Working\b.*?\biteration\s+\d+\s*/\s*\d+\b", re.IGNORECASE
+)
 GATEWAY_RETRY_STATUS_RE = re.compile(
     r"^\s*(?:⏳\s*)?Retrying\s+in\s+.+?\battempt\s+\d+/\d+\b", re.IGNORECASE
 )
@@ -103,6 +112,7 @@ class ProgressAnalyzer:
             return False
         return bool(
             GATEWAY_STILL_WORKING_RE.match(text)
+            or GATEWAY_WORKING_HEARTBEAT_RE.match(text)
             or GATEWAY_RETRY_STATUS_RE.match(text)
             or GATEWAY_NON_RETRYABLE_STATUS_RE.match(text)
             or GATEWAY_PROVIDER_STATUS_RE.match(text)
