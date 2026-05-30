@@ -4639,7 +4639,7 @@ final class LogosModelTests: XCTestCase {
         let playCallsBeforeFinish = factory.player.playCalls
 
         controller.onPlaybackFinished?(audioID, true)
-        try await Task.sleep(nanoseconds: 1_000_000)
+        try await Task.sleep(for: .milliseconds(1))
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .finished)
         await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_index":1,"data":"\(Data([4, 5, 6]).base64EncodedString())"}}
@@ -5557,7 +5557,7 @@ final class LogosModelTests: XCTestCase {
                 if let maximum, index <= maximum { return }
                 if let minimum, index >= minimum { return }
             }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            try await Task.sleep(for: .milliseconds(20))
         } while Date() < deadline
         XCTFail("Timed out waiting for spectrum dominant index. latest=\(latestIndex.map(String.init) ?? "<none>") max=\(maximum.map(String.init) ?? "<none>") min=\(minimum.map(String.init) ?? "<none>")")
     }
@@ -5750,11 +5750,11 @@ private final class RecordingPairingCredentialExchanger: PairingCredentialExchan
     }
 }
 
-/// Test double for `StaleTimeoutScheduling` that records scheduling activity and
+/// Test double for `DelayedFireScheduling` that records scheduling activity and
 /// fires the pending stale-timeout synchronously, so timeout behavior can be
 /// asserted deterministically without sleeping against a real timer.
 @MainActor
-final class ManualStaleTimeoutScheduler: StaleTimeoutScheduling {
+final class ManualStaleTimeoutScheduler: DelayedFireScheduling {
     private(set) var scheduleCount = 0
     private(set) var lastInterval: TimeInterval?
     private var pendingFire: (@MainActor () -> Void)?
@@ -5784,11 +5784,11 @@ final class ManualStaleTimeoutScheduler: StaleTimeoutScheduling {
     }
 }
 
-/// Test double for `AckClearScheduling` that records scheduling activity and
+/// Test double for `DelayedFireScheduling` that records scheduling activity and
 /// fires the pending fast-ack clear synchronously, so TTL-expiry behavior can be
 /// asserted deterministically without sleeping against a real timer.
 @MainActor
-final class ManualAckClearScheduler: AckClearScheduling {
+final class ManualAckClearScheduler: DelayedFireScheduling {
     private(set) var scheduleCount = 0
     private(set) var lastInterval: TimeInterval?
     /// The currently-armed clear, exposed so a test can fire a superseded timer
@@ -5836,7 +5836,7 @@ private func makeSocketBackedClient(
     store: SQLiteMessageStore? = nil,
     audioPlayback: AudioPlaybackController = AudioPlaybackController(),
     staleTimeoutInterval: TimeInterval = 45,
-    staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil
+    staleTimeoutScheduler: (any DelayedFireScheduling)? = nil
 ) async -> LogosClient {
     let client = LogosClient(
         store: store ?? SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),

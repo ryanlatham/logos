@@ -23,7 +23,7 @@ final class SpectrumAnimator {
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(nanoseconds: UInt64(SpectrumAnimator.interval * 1_000_000_000))
+                    try await Task.sleep(for: .seconds(SpectrumAnimator.interval))
                 } catch {
                     return
                 }

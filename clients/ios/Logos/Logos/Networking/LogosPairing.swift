@@ -149,7 +149,7 @@ final class WebSocketPairingCredentialExchanger: PairingCredentialExchanging, Se
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: frame, options: [])
-        try await send(task: task, string: String(decoding: data, as: UTF8.self))
+        try await task.send(.string(String(decoding: data, as: UTF8.self)))
         let response = try await receiveDictionary(task: task)
         if response["type"] as? String == "error" {
             let payload = response["payload"] as? [String: Any]
@@ -172,24 +172,8 @@ final class WebSocketPairingCredentialExchanger: PairingCredentialExchanging, Se
         )
     }
 
-    private func send(task: URLSessionWebSocketTask, string: String) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.send(.string(string)) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            }
-        }
-    }
-
     private func receiveDictionary(task: URLSessionWebSocketTask) async throws -> [String: Any] {
-        let message = try await withCheckedThrowingContinuation { continuation in
-            task.receive { result in
-                continuation.resume(with: result)
-            }
-        }
+        let message = try await task.receive()
         let data: Data
         switch message {
         case .string(let string):
