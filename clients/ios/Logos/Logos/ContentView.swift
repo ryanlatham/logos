@@ -203,6 +203,61 @@ struct ThreadTimelineSnapshot: Equatable {
         ]
         return parts.joined(separator: "|")
     }
+
+    /// A cheap change signature for the hot follow / "new updates" path (read on every `body` pass via
+    /// `threadContentFingerprint`). Mirrors `contentFingerprint`'s change-sensitivity but hashes only
+    /// per-message *metadata* plus the *last* message's content — history is append-only (the streaming
+    /// tail is the only message whose content mutates; `MessageManager.refreshMessages` upserts it), so
+    /// this is behavior-equivalent without the O(total-content) string build. `contentFingerprint` is
+    /// retained for the on-change diff in `handleThreadTimelineSnapshotChanged`.
+    var threadContentSignature: Int {
+        var hasher = Hasher()
+        hasher.combine(activeProjectKey)
+        hasher.combine(messages.count)
+        for message in messages {
+            hasher.combine(message.id)
+            hasher.combine(message.role)
+            hasher.combine(message.status)
+            hasher.combine(message.isFinal)
+            hasher.combine(message.isProgressUpdate)
+        }
+        hasher.combine(messages.last?.content ?? "no-last-content")
+        if let progress {
+            hasher.combine(progress.id)
+            hasher.combine(progress.updateCount)
+            hasher.combine(progress.adapterUpdateCount)
+            hasher.combine(progress.isExpanded)
+            hasher.combine(progress.isComplete)
+            hasher.combine(progress.timedOut)
+            hasher.combine(progress.finalStatus)
+            hasher.combine(progress.canRetry)
+            hasher.combine(progress.completedFinalMessageID)
+        } else {
+            hasher.combine("no-progress")
+        }
+        if let connectionRetry {
+            hasher.combine(connectionRetry.id)
+            hasher.combine(connectionRetry.attemptCount)
+            hasher.combine(connectionRetry.eventCount)
+            hasher.combine(connectionRetry.nextRetryAt)
+        } else {
+            hasher.combine("no-connection-retry")
+        }
+        hasher.combine(isRunControlVisible)
+        hasher.combine(approvalCardID)
+        hasher.combine(clarifyCardID)
+        hasher.combine(pendingInteractionResponseID)
+        hasher.combine(ackText)
+        hasher.combine(errorText)
+        hasher.combine(voiceDraftText)
+        hasher.combine(composerMode)
+        hasher.combine(composerBottomPadding)
+        hasher.combine(connectionState)
+        hasher.combine(runStatus)
+        hasher.combine(focusRequest?.id)
+        hasher.combine(focusRequest?.targetMessageID)
+        return hasher.finalize()
+    }
 }
 
 struct ThreadProgressPlacement {
@@ -258,8 +313,8 @@ struct ContentView: View {
     @State private var threadScrollPhase: ScrollPhase = .idle
     @State private var isThreadUserDetached = false
     @State private var userInitiatedThreadScrollObserved = false
-    @State private var detachedThreadContentFingerprint: String?
-    @State private var lastFollowedThreadContentFingerprint = ""
+    @State private var detachedThreadContentFingerprint: Int?
+    @State private var lastFollowedThreadContentFingerprint: Int?
     @State private var lastForceFollowedThreadContentFingerprint: String?
     @State private var lastHandledThreadFocusRequestID: String?
     @State private var slashCommandDismissedDraft: String?
@@ -607,7 +662,7 @@ struct ContentView: View {
         if let detachedThreadContentFingerprint {
             return detachedThreadContentFingerprint != threadContentFingerprint
         }
-        if lastFollowedThreadContentFingerprint.isEmpty == false {
+        if lastFollowedThreadContentFingerprint != nil {
             return lastFollowedThreadContentFingerprint != threadContentFingerprint
         }
         if let lastForceFollowedThreadContentFingerprint {
@@ -620,8 +675,8 @@ struct ContentView: View {
         threadTimelineSnapshot.messageFingerprint
     }
 
-    private var threadContentFingerprint: String {
-        threadTimelineSnapshot.contentFingerprint
+    private var threadContentFingerprint: Int {
+        threadTimelineSnapshot.threadContentSignature
     }
 
     private var voiceDraftText: String? {
@@ -2045,7 +2100,7 @@ struct ContentView: View {
     private func scrollThreadToBottom(
         animated: Bool,
         recordFollowedSnapshot: Bool = true,
-        followedFingerprint: String? = nil
+        followedFingerprint: Int? = nil
     ) {
         let action = {
             threadScrollPosition.scrollTo(id: "thread-bottom", anchor: .bottom)
@@ -2070,7 +2125,7 @@ struct ContentView: View {
         anchor: UnitPoint,
         animated: Bool,
         recordFollowedSnapshot: Bool = true,
-        followedFingerprint: String? = nil
+        followedFingerprint: Int? = nil
     ) {
         let action = {
             threadScrollPosition.scrollTo(id: targetID, anchor: anchor)
@@ -2093,7 +2148,7 @@ struct ContentView: View {
     private func scrollThreadToBottomAfterLayout(
         animated: Bool,
         recordFollowedSnapshot: Bool = true,
-        followedFingerprint: String? = nil,
+        followedFingerprint: Int? = nil,
         force: Bool = false
     ) {
         cancelPendingThreadFollow()

@@ -147,6 +147,51 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(base.contentFingerprint, makeThreadTimelineSnapshot(slashCommandMenuHeight: 236).contentFingerprint)
     }
 
+    func testThreadContentSignatureChangesWhenLastMessageContentGrows() {
+        // The load-bearing guarantee: while the last assistant message streams (its id/status/isFinal
+        // and the message count are unchanged) its content grows — the cheap signature MUST change so
+        // auto-follow keeps following the tail. This is what makes hashing only the last content sound.
+        let streaming = makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "streaming", isFinal: false, content: "Hel")])
+        let grown = makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "streaming", isFinal: false, content: "Hello")])
+        XCTAssertNotEqual(streaming.threadContentSignature, grown.threadContentSignature)
+    }
+
+    func testThreadContentSignatureIgnoresSlashCommandChrome() {
+        // Parity with contentFingerprint: slash-command menu chrome must not flip the thread signature.
+        let base = makeThreadTimelineSnapshot()
+        XCTAssertEqual(base.threadContentSignature, makeThreadTimelineSnapshot(slashCommandMenuState: "browsing").threadContentSignature)
+        XCTAssertEqual(base.threadContentSignature, makeThreadTimelineSnapshot(slashCommandCatalogFingerprint: "commands-v2").threadContentSignature)
+        XCTAssertEqual(base.threadContentSignature, makeThreadTimelineSnapshot(slashCommandMenuHeight: 236).threadContentSignature)
+    }
+
+    func testThreadContentSignatureTracksEveryVisibleThreadSignal() {
+        // Behavior-preservation: the cheap signature flips for the same visible-thread signals the
+        // (retained) contentFingerprint does — new/changed message metadata, a second streaming
+        // message, progress, cards, ack/error, connection-retry, voice draft, composer, run/connection
+        // state, focus.
+        let base = makeThreadTimelineSnapshot()
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(messages: [.init(id: "m2", status: "persisted", isFinal: true, content: "New")]).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello", role: "user")]).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "streaming", isFinal: true, content: "Hello")]).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: false, content: "Hello", isProgressUpdate: true)]).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(messages: [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello"), .init(id: "m2", status: "streaming", isFinal: false, content: "More")]).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(progress: .init(id: "progress", updateCount: 2, adapterUpdateCount: 1, isExpanded: false, isComplete: false, timedOut: false, finalStatus: nil, canRetry: false, completedFinalMessageID: nil)).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(progress: nil).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(isRunControlVisible: true).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(approvalCardID: "approval-1").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(clarifyCardID: "clarify-1").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(pendingInteractionResponseID: "approval-1").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(ackText: "Thinking").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(errorText: "Error").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(connectionRetry: .init(id: "retry", attemptCount: 1, eventCount: 1, nextRetryAt: 100)).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(voiceDraftText: "Listening").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(composerMode: "text").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(composerBottomPadding: 16).threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(connectionState: "disconnected").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(runStatus: "cancelling").threadContentSignature)
+        XCTAssertNotEqual(base.threadContentSignature, makeThreadTimelineSnapshot(focusRequest: .init(id: "focus-1", targetMessageID: "session:final")).threadContentSignature)
+    }
+
     private func makeThreadTimelineSnapshot(
         activeProjectKey: String = "default",
         messages: [ThreadTimelineSnapshot.Message] = [.init(id: "m1", status: "persisted", isFinal: true, content: "Hello")],
