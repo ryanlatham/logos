@@ -5,23 +5,47 @@ import inspect
 import ipaddress
 import logging
 import os
-import re
 import shlex
 import socket
 import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
 from gateway.session import SessionSource
 
-from .apns import APNSClient, PrivateNotificationKind, build_private_apns_payload
-from . import commands as command_catalog
-from .fast_llm import FastModelResult, build_fast_model, is_safe_direct_response_for_request
+from .apns import APNSClient, PrivateNotificationKind
+from .audio import AudioMixin
+from .config import (
+    DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS,
+    DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
+    DEFAULT_HOST,
+    DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS,
+    DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS,
+    DEFAULT_PORT,
+    LOGOS_HOME_CHANNEL_ENV,
+    LOGOS_TIMEOUT_SECONDS_ENV,
+    MAX_LOGOS_STALE_TIMEOUT_SECONDS,
+    _configured_positive_int,
+    _ensure_home_channel_env,
+    _is_loopback_adapter_url,
+    _is_plaintext_non_loopback_adapter_url,
+    _nonnegative_int,
+    _optional_nonempty_str,
+    _safe_filename_component,
+    _string_set,
+    _truthy,
+    _validate_config,
+)
+from .dispatch import DispatchMixin
+from .fast_llm import build_fast_model
+from .fast_routing import FastRoutingMixin
+from .interactions import InteractionsMixin
+from .message_state import MessageStateMixin
+from .notifications import PrivateNotifier
 from .pairing import (
     DEFAULT_PAIRING_TTL_SECONDS,
     PairingInvite,
@@ -30,58 +54,29 @@ from .pairing import (
     pairing_token_hash,
     render_qr_png,
 )
-from .config import (
-    DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS,
-    DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
-    DEFAULT_HOST,
-    DEFAULT_LOGOS_HOME_CHANNEL,
-    DEFAULT_LOGOS_HOME_CHANNEL_NAME,
-    DEFAULT_LOGOS_KEEPALIVE_THROTTLE_SECONDS,
-    DEFAULT_LOGOS_STALE_TIMEOUT_SECONDS,
-    DEFAULT_PORT,
-    LOGOS_HOME_CHANNEL_ENV,
-    LOGOS_HOME_CHANNEL_NAME_ENV,
-    LOGOS_TIMEOUT_SECONDS_ENV,
-    MAX_LOGOS_STALE_TIMEOUT_SECONDS,
-    _configured_home_channel,
-    _configured_positive_int,
-    _ensure_home_channel_env,
-    _is_loopback_adapter_url,
-    _is_plaintext_non_loopback_adapter_url,
-    _nonnegative_int,
-    _optional_nonempty_str,
-    _positive_int_or_none,
-    _project_chat_id,
-    _safe_filename_component,
-    _string_set,
-    _truthy,
-    _validate_config,
-)
-from .notifications import APNS_STALE_DEVICE_REASONS, PrivateNotifier
 from .progress_analysis import ProgressAnalyzer
 from .providers import FastLLMProvider, TTSProvider
-from .audio import AudioMixin
-from .dispatch import DispatchMixin
-from .fast_routing import FastRoutingMixin
-from .interactions import InteractionsMixin
-from .message_state import MessageStateMixin
 from .request_context import current_request_context, request_scope
 from .run_state import RunStateMixin
 from .schema import Envelope, ProtocolError, error_frame, parse_frame
+from .store import (
+    LogosMessage,
+    LogosPendingInteraction,
+    LogosProject,
+    LogosStore,
+    LogosSummary,
+)
+from .telemetry import TelemetryLog
 from .tls import (
     TLS_MODE_SELF_SIGNED,
     build_server_ssl_context,
     load_or_create_tls_material,
     tls_mode_from_env,
 )
-from .telemetry import TelemetryLog
-from .store import LogosMessage, LogosProject, LogosStore, LogosSummary
 from .tts import build_tts
 from .ws_server import LogosWebSocketServer
 
 logger = logging.getLogger(__name__)
-
-
 
 
 def _platform() -> Platform:
@@ -115,7 +110,7 @@ class LogosAdapter(
     InteractionsMixin,
     FastRoutingMixin,
     AudioMixin,
-    BasePlatformAdapter,
+    BasePlatformAdapter,  # type: ignore[misc]  # gateway base is unstubbed (Any) in the Hermes-free tier
 ):
     """Hermes platform adapter for the Logos iPhone WebSocket bridge."""
 
@@ -123,15 +118,23 @@ class LogosAdapter(
         super().__init__(config=config, platform=_platform())
         extra = getattr(config, "extra", {}) or {}
         self.host = os.getenv("LOGOS_HOST") or str(extra.get("host") or DEFAULT_HOST)
-        port_value = os.getenv("LOGOS_PORT")
+        port_value: Any = os.getenv("LOGOS_PORT")
         if port_value is None:
             port_value = extra.get("port", DEFAULT_PORT)
         if port_value in (None, ""):
             port_value = DEFAULT_PORT
         self.port = int(port_value)
-        self.device_secret = str(os.getenv("LOGOS_DEVICE_SECRET") or extra.get("device_secret") or "").strip()
-        self.allow_all_users = _truthy(os.getenv("LOGOS_ALLOW_ALL_USERS")) or _truthy(extra.get("allow_all_users"))
-        self.allowed_users = _string_set(os.getenv("LOGOS_ALLOWED_USERS")) | _string_set(extra.get("allowed_users")) | _string_set(extra.get("allowed_devices"))
+        self.device_secret = str(
+            os.getenv("LOGOS_DEVICE_SECRET") or extra.get("device_secret") or ""
+        ).strip()
+        self.allow_all_users = _truthy(os.getenv("LOGOS_ALLOW_ALL_USERS")) or _truthy(
+            extra.get("allow_all_users")
+        )
+        self.allowed_users = (
+            _string_set(os.getenv("LOGOS_ALLOWED_USERS"))
+            | _string_set(extra.get("allowed_users"))
+            | _string_set(extra.get("allowed_devices"))
+        )
         self.ws_server: LogosWebSocketServer | None = None
         self.store = LogosStore(self._store_path(extra))
         self.store.interrupt_active_run_states(reason="adapter_restarted")
@@ -141,11 +144,15 @@ class LogosAdapter(
         final_audio_full_max_chars = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_CHARS")
         final_audio_full_max_words = os.getenv("LOGOS_FINAL_AUDIO_FULL_MAX_WORDS")
         self.final_audio_full_max_chars = _nonnegative_int(
-            final_audio_full_max_chars if final_audio_full_max_chars is not None else extra.get("final_audio_full_max_chars"),
+            final_audio_full_max_chars
+            if final_audio_full_max_chars is not None
+            else extra.get("final_audio_full_max_chars"),
             DEFAULT_FINAL_AUDIO_FULL_MAX_CHARS,
         )
         self.final_audio_full_max_words = _nonnegative_int(
-            final_audio_full_max_words if final_audio_full_max_words is not None else extra.get("final_audio_full_max_words"),
+            final_audio_full_max_words
+            if final_audio_full_max_words is not None
+            else extra.get("final_audio_full_max_words"),
             DEFAULT_FINAL_AUDIO_FULL_MAX_WORDS,
         )
         self.stale_timeout_seconds = _configured_positive_int(
@@ -210,7 +217,9 @@ class LogosAdapter(
                 addresses.add(ipaddress.ip_address(str(sockaddr[0])))
             except ValueError:
                 return False
-        return bool(addresses) and all(LogosAdapter._is_safe_ip_address(address) for address in addresses)
+        return bool(addresses) and all(
+            LogosAdapter._is_safe_ip_address(address) for address in addresses
+        )
 
     @staticmethod
     def _is_safe_ip_address(address: Any) -> bool:
@@ -257,7 +266,9 @@ class LogosAdapter(
             return []
         return [(self.device_secret, "shared_master")]
 
-    def _approve_gateway_pairing_for_device(self, device_id: str | None, display_name: str | None = None) -> bool:
+    def _approve_gateway_pairing_for_device(
+        self, device_id: str | None, display_name: str | None = None
+    ) -> bool:
         """Bridge Logos QR/device auth into Hermes' generic gateway authorization store."""
 
         normalized_device = str(device_id or "").strip()
@@ -266,19 +277,26 @@ class LogosAdapter(
         try:
             from gateway.pairing import PairingStore
         except Exception:
-            logger.debug("Logos: gateway pairing store unavailable for device authorization", exc_info=True)
+            logger.debug(
+                "Logos: gateway pairing store unavailable for device authorization", exc_info=True
+            )
             return False
 
         platform_name = self.platform.value if self.platform else "logos"
         try:
             store = PairingStore()
-            with store._lock:  # noqa: SLF001 - plugin bridge uses Hermes' existing gateway-pairing persistence.
+            with store._lock:
                 if store.is_approved(platform_name, normalized_device):
                     return False
-                store._approve_user(platform_name, normalized_device, display_name or normalized_device)  # noqa: SLF001
+                store._approve_user(
+                    platform_name, normalized_device, display_name or normalized_device
+                )
                 return True
         except Exception:
-            logger.warning("Logos: failed to authorize QR-paired device in gateway pairing store", exc_info=True)
+            logger.warning(
+                "Logos: failed to authorize QR-paired device in gateway pairing store",
+                exc_info=True,
+            )
             return False
 
     def create_pairing_invite(
@@ -319,7 +337,9 @@ class LogosAdapter(
         now: float | None = None,
     ) -> str:
         options = self._parse_pairing_args(raw_args)
-        ttl_seconds = int(options.get("ttl") or options.get("ttl_seconds") or DEFAULT_PAIRING_TTL_SECONDS)
+        ttl_seconds = int(
+            options.get("ttl") or options.get("ttl_seconds") or DEFAULT_PAIRING_TTL_SECONDS
+        )
         device_id = options.get("device_id") or options.get("device")
         adapter_url = options.get("adapter_url") or options.get("url") or None
         invite = self.create_pairing_invite(
@@ -329,9 +349,16 @@ class LogosAdapter(
             now=now,
             autoconnect=not _truthy(options.get("no_autoconnect")),
         )
-        output_dir = Path(image_dir).expanduser() if image_dir else Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes") / "cache" / "logos"
+        output_dir = (
+            Path(image_dir).expanduser()
+            if image_dir
+            else Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes") / "cache" / "logos"
+        )
         safe_device_id = _safe_filename_component(invite.device_id)
-        png_path = render_qr_png(invite.pairing_url, output_dir / f"pairing-{safe_device_id}-{int(invite.expires_at)}.png")
+        png_path = render_qr_png(
+            invite.pairing_url,
+            output_dir / f"pairing-{safe_device_id}-{int(invite.expires_at)}.png",
+        )
         remaining = max(0, int(invite.expires_at - (time.time() if now is None else float(now))))
         warnings: list[str] = []
         if _is_loopback_adapter_url(invite.adapter_url):
@@ -368,7 +395,9 @@ class LogosAdapter(
             return self._pairing_error(envelope, "token_not_found", "Pairing token was not found")
         now = time.time()
         if record.device_id != device_id:
-            return self._pairing_error(envelope, "device_mismatch", "Pairing token was issued for a different device")
+            return self._pairing_error(
+                envelope, "device_mismatch", "Pairing token was issued for a different device"
+            )
         if record.is_consumed:
             return self._pairing_error(envelope, "token_consumed", "Pairing token was already used")
         if record.is_expired(now):
@@ -376,10 +405,18 @@ class LogosAdapter(
         device_secret = derive_device_secret(self.device_secret, device_id)
         device_secret_hash = hashlib.sha256(device_secret.encode("utf-8")).hexdigest()
         if record.shared_secret_hash != device_secret_hash:
-            return self._pairing_error(envelope, "credential_mismatch", "Pairing token credential binding does not match this adapter")
-        consumed = self.store.mark_pairing_token_consumed(token_hash, consumed_at=now, expires_after=now)
+            return self._pairing_error(
+                envelope,
+                "credential_mismatch",
+                "Pairing token credential binding does not match this adapter",
+            )
+        consumed = self.store.mark_pairing_token_consumed(
+            token_hash, consumed_at=now, expires_after=now
+        )
         if consumed is None:
-            return self._pairing_error(envelope, "token_consumed", "Pairing token was already used or expired")
+            return self._pairing_error(
+                envelope, "token_consumed", "Pairing token was already used or expired"
+            )
         self.store.upsert_device(
             device_id=device_id,
             display_name=display_name,
@@ -450,7 +487,9 @@ class LogosAdapter(
             port=self.port,
             device_secret=self.device_secret,
             enc_mode=os.getenv("LOGOS_ENC_MODE", "negotiate").strip().lower() or "negotiate",
-            ssl_context=build_server_ssl_context(tls_material) if tls_material is not None else None,
+            ssl_context=build_server_ssl_context(tls_material)
+            if tls_material is not None
+            else None,
         )
         try:
             await self.ws_server.start()
@@ -472,7 +511,6 @@ class LogosAdapter(
             if inspect.isawaitable(result):
                 await result
         self._mark_disconnected()
-
 
     async def _mirror_user_message(
         self,
@@ -505,7 +543,9 @@ class LogosAdapter(
             last_preview=text[:240],
         )
         if self.ws_server is not None:
-            await self.ws_server.broadcast(self._message_state_update(stored_user), project_key=project_key)
+            await self.ws_server.broadcast(
+                self._message_state_update(stored_user), project_key=project_key
+            )
         return stored_user
 
     def _client_session_id_for(self, envelope: Envelope, project_key: str) -> str:
@@ -518,7 +558,11 @@ class LogosAdapter(
         for project in self.store.list_projects(limit=500):
             if project.project_key == project_key:
                 continue
-            if requested in {project.current_session_id, project.lineage_root_session_id, f"project:{project.project_key}"}:
+            if requested in {
+                project.current_session_id,
+                project.lineage_root_session_id,
+                f"project:{project.project_key}",
+            }:
                 return default_session_id
         return requested
 
@@ -527,17 +571,23 @@ class LogosAdapter(
         request_id = str(raw_message.get("request_id") or "").strip()
         if not request_id:
             return None
-        project_key = str(raw_message.get("project_key") or self._project_key_from_chat_id(event.source.chat_id)).strip()
+        project_key = str(
+            raw_message.get("project_key") or self._project_key_from_chat_id(event.source.chat_id)
+        ).strip()
         session_id = str(raw_message.get("session_id") or event.source.chat_id).strip()
         return {"project_key": project_key, "session_id": session_id, "request_id": request_id}
 
-    async def handle_message(self, event: MessageEvent) -> None:  # type: ignore[override]
+    async def handle_message(self, event: MessageEvent) -> None:
         with request_scope(self._request_context_for_event(event)):
-            await super().handle_message(event)
+            # super() resolves to BasePlatformAdapter (gateway-Any) at runtime, not the
+            # type-only LogosAdapterCore stub mypy sees through the TYPE_CHECKING base.
+            await super().handle_message(event)  # type: ignore[safe-super]
 
-    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:  # type: ignore[override]
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         with request_scope(self._request_context_for_event(event)):
-            await super()._process_message_background(event, session_key)
+            # super() resolves to BasePlatformAdapter (gateway-Any) at runtime, not the
+            # type-only LogosAdapterCore stub mypy sees through the TYPE_CHECKING base.
+            await super()._process_message_background(event, session_key)  # type: ignore[safe-super]
 
     def _metadata_with_current_request_id(
         self,
@@ -568,7 +618,6 @@ class LogosAdapter(
             metadata["request_id"] = request_id
         return metadata
 
-
     def _find_project_by_title(self, title: str) -> LogosProject | None:
         normalized = str(title or "").strip().lower()
         if not normalized:
@@ -582,21 +631,33 @@ class LogosAdapter(
             return matches[0]
         return None
 
-    def _latest_pending_interaction(self, *, project_key: str, kind: str):
-        matches = [item for item in self.store.list_pending_interactions(project_key) if item.kind == kind]
+    def _latest_pending_interaction(
+        self, *, project_key: str, kind: str
+    ) -> LogosPendingInteraction | None:
+        matches = [
+            item for item in self.store.list_pending_interactions(project_key) if item.kind == kind
+        ]
         return matches[-1] if matches else None
 
-    async def _dispatch_gateway_text(self, envelope: Envelope, text_override: str | None = None, *, mirror_user: bool = True) -> str:
+    async def _dispatch_gateway_text(
+        self, envelope: Envelope, text_override: str | None = None, *, mirror_user: bool = True
+    ) -> str:
         text = text_override if text_override is not None else envelope.payload.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ProtocolError("gateway text dispatch requires non-empty text")
         project_key = self._project_key_for(envelope)
-        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
+        project = self.store.get_project(project_key) or self.store.upsert_project(
+            project_key=project_key, title=project_key
+        )
         if envelope.device_id:
             self.store.set_active_project(device_id=envelope.device_id, project_key=project_key)
         device_id = envelope.device_id or str(envelope.payload.get("device_id") or "logos-device")
-        self._approve_gateway_pairing_for_device(device_id, _optional_nonempty_str(envelope.payload.get("display_name")))
-        client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
+        self._approve_gateway_pairing_for_device(
+            device_id, _optional_nonempty_str(envelope.payload.get("display_name"))
+        )
+        client_msg_id = str(
+            envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()
+        )
         session_id = self._client_session_id_for(envelope, project_key)
         if mirror_user:
             await self._mirror_user_message(
@@ -661,7 +722,6 @@ class LogosAdapter(
         )
         return summary, "regenerated" if existing is not None else "generated"
 
-
     # Progress/gateway-status classification delegates to ProgressAnalyzer (progress_analysis.py).
     def _looks_like_tool_progress_text(self, content: str) -> bool:
         return self._progress._looks_like_tool_progress_text(content)
@@ -689,13 +749,12 @@ class LogosAdapter(
                     return message_text, dict(protocol or {})
             except Exception:
                 logger.warning("Logos fast model failed to explain Hermes error", exc_info=True)
-        raw = str(content or "").strip().lstrip("⚠️⚠❌ ").strip() or "an internal error"
+        raw = str(content or "").strip().lstrip("⚠️⚠❌ ").strip() or "an internal error"  # noqa: B005
         return (
             "Hermes hit an unrecoverable error before it could answer. "
             f"The underlying error was: {raw}. Please retry, or switch models if it keeps happening.",
             {},
         )
-
 
     async def _send_private_notification(
         self,
@@ -720,8 +779,6 @@ class LogosAdapter(
             sensitive_context=sensitive_context,
         )
 
-
-
     def _handle_list_projects(self, envelope: Envelope) -> dict[str, Any]:
         limit = self._bounded_limit(envelope.payload.get("limit", 50))
         projects = [project.to_protocol() for project in self.store.list_projects(limit=limit)]
@@ -738,30 +795,54 @@ class LogosAdapter(
         }
 
     def _handle_new_project(self, envelope: Envelope) -> dict[str, Any]:
-        title = str(envelope.payload.get("title") or envelope.payload.get("project_key") or "").strip()
+        title = str(
+            envelope.payload.get("title") or envelope.payload.get("project_key") or ""
+        ).strip()
         if not title:
-            return error_frame("invalid_project", "new_project requires payload.title", request_id=envelope.request_id, device_id=envelope.device_id)
+            return error_frame(
+                "invalid_project",
+                "new_project requires payload.title",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+            )
         project = self.store.create_project(title)
         if envelope.device_id:
-            self.store.set_active_project(device_id=envelope.device_id, project_key=project.project_key)
+            self.store.set_active_project(
+                device_id=envelope.device_id, project_key=project.project_key
+            )
         return self._project_state_update("project_created", envelope, project)
 
     def _handle_switch_project(self, envelope: Envelope) -> dict[str, Any]:
         project_key = str(envelope.payload.get("project_key") or envelope.project_key or "").strip()
         if not project_key:
-            return error_frame("invalid_project", "switch_project requires project_key", request_id=envelope.request_id, device_id=envelope.device_id)
-        project = self.store.set_active_project(device_id=envelope.device_id or "logos-device", project_key=project_key)
+            return error_frame(
+                "invalid_project",
+                "switch_project requires project_key",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+            )
+        project = self.store.set_active_project(
+            device_id=envelope.device_id or "logos-device", project_key=project_key
+        )
         return self._project_state_update("active_project_changed", envelope, project)
 
     def _handle_rename_project(self, envelope: Envelope) -> dict[str, Any]:
         project_key = self._project_key_for(envelope)
         title = str(envelope.payload.get("title") or "").strip()
         if not title:
-            return error_frame("invalid_project", "rename_project requires payload.title", request_id=envelope.request_id, device_id=envelope.device_id, project_key=project_key)
+            return error_frame(
+                "invalid_project",
+                "rename_project requires payload.title",
+                request_id=envelope.request_id,
+                device_id=envelope.device_id,
+                project_key=project_key,
+            )
         project = self.store.rename_project(project_key, title)
         return self._project_state_update("project_renamed", envelope, project)
 
-    def _project_state_update(self, op: str, envelope: Envelope, project: LogosProject) -> dict[str, Any]:
+    def _project_state_update(
+        self, op: str, envelope: Envelope, project: LogosProject
+    ) -> dict[str, Any]:
         return {
             "type": "state_update",
             "request_id": envelope.request_id,
@@ -787,22 +868,31 @@ class LogosAdapter(
             )
         )
 
-
     def _handle_messages_get(self, envelope: Envelope) -> dict[str, Any]:
         project_key = self._project_key_for(envelope)
         payload = envelope.payload
         limit = self._bounded_limit(payload.get("limit", 100))
         before_message_id = payload.get("before_message_id")
         if before_message_id:
-            session_id = str(envelope.session_id or payload.get("session_id") or f"project:{project_key}")
-            messages = self.store.messages_before_message_id(session_id, str(before_message_id), limit=limit + 1)
+            session_id = str(
+                envelope.session_id or payload.get("session_id") or f"project:{project_key}"
+            )
+            messages = self.store.messages_before_message_id(
+                session_id, str(before_message_id), limit=limit + 1
+            )
             messages = [message for message in messages if message.project_key == project_key]
         else:
-            after_server_seq = int(payload.get("after_server_seq", payload.get("last_seen_server_seq", 0)) or 0)
-            messages = self.store.messages_after_server_seq(project_key, after_server_seq, limit=limit + 1)
+            after_server_seq = int(
+                payload.get("after_server_seq", payload.get("last_seen_server_seq", 0)) or 0
+            )
+            messages = self.store.messages_after_server_seq(
+                project_key, after_server_seq, limit=limit + 1
+            )
         has_more = len(messages) > limit
         messages = messages[:limit]
-        pending_interactions = [item.to_protocol() for item in self.store.list_pending_interactions(project_key)]
+        pending_interactions = [
+            item.to_protocol() for item in self.store.list_pending_interactions(project_key)
+        ]
         run_state = self.store.latest_run_state(project_key)
         return {
             "type": "messages_batch",
@@ -815,7 +905,9 @@ class LogosAdapter(
                 "pending_interactions": pending_interactions,
                 "run_status": run_state.to_protocol() if run_state is not None else None,
                 "has_more": has_more,
-                "after_server_seq": payload.get("after_server_seq", payload.get("last_seen_server_seq")),
+                "after_server_seq": payload.get(
+                    "after_server_seq", payload.get("last_seen_server_seq")
+                ),
                 "before_message_id": before_message_id,
             },
         }
@@ -885,7 +977,9 @@ def _platform_config_for_command() -> PlatformConfig:
         gateway_config = load_gateway_config()
         return gateway_config.platforms.get(_platform()) or PlatformConfig(enabled=True, extra={})
     except Exception:
-        logger.debug("Logos: falling back to env-only platform config for pairing command", exc_info=True)
+        logger.debug(
+            "Logos: falling back to env-only platform config for pairing command", exc_info=True
+        )
         return PlatformConfig(enabled=True, extra={})
 
 

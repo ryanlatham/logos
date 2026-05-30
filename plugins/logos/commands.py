@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any
 
 SCHEMA_VERSION = 1
 MAX_COMMANDS = 240
@@ -20,33 +21,125 @@ class CommandCompletionError(ValueError):
 
 
 FALLBACK_COMMANDS: tuple[dict[str, Any], ...] = (
-    {"name": "resume", "description": "Resume a previously-named session", "category": "Session", "args_hint": "[name]"},
-    {"name": "title", "description": "Set a title for the current session", "category": "Session", "args_hint": "[name]"},
-    {"name": "queue", "description": "Queue a prompt for the next turn", "category": "Session", "aliases": ("q",), "args_hint": "<prompt>"},
-    {"name": "steer", "description": "Inject a message after the next tool call", "category": "Session", "args_hint": "<prompt>"},
+    {
+        "name": "resume",
+        "description": "Resume a previously-named session",
+        "category": "Session",
+        "args_hint": "[name]",
+    },
+    {
+        "name": "title",
+        "description": "Set a title for the current session",
+        "category": "Session",
+        "args_hint": "[name]",
+    },
+    {
+        "name": "queue",
+        "description": "Queue a prompt for the next turn",
+        "category": "Session",
+        "aliases": ("q",),
+        "args_hint": "<prompt>",
+    },
+    {
+        "name": "steer",
+        "description": "Inject a message after the next tool call",
+        "category": "Session",
+        "args_hint": "<prompt>",
+    },
     {"name": "stop", "description": "Stop the active run", "category": "Session"},
-    {"name": "approve", "description": "Approve a pending command", "category": "Session", "args_hint": "[session|always]"},
+    {
+        "name": "approve",
+        "description": "Approve a pending command",
+        "category": "Session",
+        "args_hint": "[session|always]",
+    },
     {"name": "deny", "description": "Deny a pending command", "category": "Session"},
     {"name": "status", "description": "Show session info", "category": "Session"},
-    {"name": "kanban", "description": "Show or update the session kanban board", "category": "Session", "args_hint": "[status]"},
+    {
+        "name": "kanban",
+        "description": "Show or update the session kanban board",
+        "category": "Session",
+        "args_hint": "[status]",
+    },
     {"name": "help", "description": "Show gateway help", "category": "Info"},
     {"name": "commands", "description": "List available slash commands", "category": "Info"},
-    {"name": "goal", "description": "Set or inspect a standing goal", "category": "Session", "args_hint": "[text | pause | resume | clear | status]"},
-    {"name": "subgoal", "description": "Add or manage criteria on the active goal", "category": "Session", "args_hint": "[text | remove N | clear]"},
-    {"name": "model", "description": "Show or switch the active model", "category": "Configuration", "args_hint": "[model]"},
-    {"name": "reasoning", "description": "Show or switch reasoning effort", "category": "Configuration", "args_hint": "[effort]"},
-    {"name": "fast", "description": "Show or switch fast-model mode", "category": "Configuration", "args_hint": "[on|off|model]"},
-    {"name": "voice", "description": "Show or switch voice settings", "category": "Configuration", "args_hint": "[setting]"},
-    {"name": "agents", "description": "Show active agents and running tasks", "category": "Session", "aliases": ("tasks",)},
-    {"name": "background", "description": "Run a prompt in the background", "category": "Session", "aliases": ("bg", "btw"), "args_hint": "<prompt>"},
-    {"name": "new", "description": "Start a new session", "category": "Session", "aliases": ("reset",), "args_hint": "[name]"},
+    {
+        "name": "goal",
+        "description": "Set or inspect a standing goal",
+        "category": "Session",
+        "args_hint": "[text | pause | resume | clear | status]",
+    },
+    {
+        "name": "subgoal",
+        "description": "Add or manage criteria on the active goal",
+        "category": "Session",
+        "args_hint": "[text | remove N | clear]",
+    },
+    {
+        "name": "model",
+        "description": "Show or switch the active model",
+        "category": "Configuration",
+        "args_hint": "[model]",
+    },
+    {
+        "name": "reasoning",
+        "description": "Show or switch reasoning effort",
+        "category": "Configuration",
+        "args_hint": "[effort]",
+    },
+    {
+        "name": "fast",
+        "description": "Show or switch fast-model mode",
+        "category": "Configuration",
+        "args_hint": "[on|off|model]",
+    },
+    {
+        "name": "voice",
+        "description": "Show or switch voice settings",
+        "category": "Configuration",
+        "args_hint": "[setting]",
+    },
+    {
+        "name": "agents",
+        "description": "Show active agents and running tasks",
+        "category": "Session",
+        "aliases": ("tasks",),
+    },
+    {
+        "name": "background",
+        "description": "Run a prompt in the background",
+        "category": "Session",
+        "aliases": ("bg", "btw"),
+        "args_hint": "<prompt>",
+    },
+    {
+        "name": "new",
+        "description": "Start a new session",
+        "category": "Session",
+        "aliases": ("reset",),
+        "args_hint": "[name]",
+    },
     {"name": "retry", "description": "Retry the last message", "category": "Session"},
-    {"name": "undo", "description": "Remove the last user/assistant exchange", "category": "Session"},
-    {"name": "compress", "description": "Manually compress conversation context", "category": "Session", "args_hint": "[focus topic]"},
+    {
+        "name": "undo",
+        "description": "Remove the last user/assistant exchange",
+        "category": "Session",
+    },
+    {
+        "name": "compress",
+        "description": "Manually compress conversation context",
+        "category": "Session",
+        "args_hint": "[focus topic]",
+    },
 )
 
 LOGOS_COMMANDS: tuple[dict[str, Any], ...] = (
-    {"name": "logos-pair", "description": "Create a Logos device pairing invite", "category": "Logos", "args_hint": "[device name]"},
+    {
+        "name": "logos-pair",
+        "description": "Create a Logos device pairing invite",
+        "category": "Logos",
+        "args_hint": "[device name]",
+    },
 )
 
 
@@ -70,10 +163,14 @@ def build_command_catalog(
     specs: list[dict[str, Any]] = []
     if commands_module is not None:
         try:
-            specs.extend(_builtin_specs_from_hermes(commands_module, include_unavailable=include_unavailable))
+            specs.extend(
+                _builtin_specs_from_hermes(commands_module, include_unavailable=include_unavailable)
+            )
         except Exception:
             fallback_used = True
-            warnings.append("Hermes command registry could not be read; using Logos fallback catalog.")
+            warnings.append(
+                "Hermes command registry could not be read; using Logos fallback catalog."
+            )
             specs = []
 
     if not specs:
@@ -117,7 +214,9 @@ def _load_hermes_commands() -> Any:
     return importlib.import_module("hermes_cli.commands")
 
 
-def _builtin_specs_from_hermes(commands_module: Any, *, include_unavailable: bool) -> list[dict[str, Any]]:
+def _builtin_specs_from_hermes(
+    commands_module: Any, *, include_unavailable: bool
+) -> list[dict[str, Any]]:
     registry = getattr(commands_module, "COMMAND_REGISTRY", []) or []
     resolve_gates = getattr(commands_module, "_resolve_config_gates", None)
     gateway_available = getattr(commands_module, "_is_gateway_available", None)
@@ -150,7 +249,9 @@ def _builtin_specs_from_hermes(commands_module: Any, *, include_unavailable: boo
         if not available and not include_unavailable:
             continue
         if not available and not unavailable_reason:
-            unavailable_reason = "This command is not available through the Logos gateway in this runtime."
+            unavailable_reason = (
+                "This command is not available through the Logos gateway in this runtime."
+            )
         specs.append(
             _spec(
                 name=name,
@@ -296,7 +397,10 @@ def _command_completions(text: str, commands: list[Mapping[str, Any]]) -> list[d
         trigger = str(command.get("trigger") or "")
         if not trigger:
             continue
-        names = [trigger, *[str(alias) for alias in command.get("aliases", []) if isinstance(alias, str)]]
+        names = [
+            trigger,
+            *[str(alias) for alias in command.get("aliases", []) if isinstance(alias, str)],
+        ]
         best_score: int | None = None
         for name in names:
             raw = name.lstrip("/").lower()
@@ -324,7 +428,8 @@ def _subcommand_completions(text: str, commands: list[Mapping[str, Any]]) -> lis
             item
             for item in commands
             if str(item.get("trigger") or "").lower() == base_lower
-            or base_lower in [str(alias).lower() for alias in item.get("aliases", []) if isinstance(alias, str)]
+            or base_lower
+            in [str(alias).lower() for alias in item.get("aliases", []) if isinstance(alias, str)]
         ),
         None,
     )
@@ -355,7 +460,9 @@ def _subcommand_completions(text: str, commands: list[Mapping[str, Any]]) -> lis
     return items
 
 
-def _completion_item(command: Mapping[str, Any], replacement_start: int, replacement_end: int) -> dict[str, Any]:
+def _completion_item(
+    command: Mapping[str, Any], replacement_start: int, replacement_end: int
+) -> dict[str, Any]:
     canonical = str(command.get("canonical") or command.get("trigger") or "")
     replacement = canonical + (" " if command.get("adds_trailing_space", False) else "")
     detail = str(command.get("args_hint") or command.get("description") or "")

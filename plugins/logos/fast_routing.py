@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .fast_llm import FastModelResult, is_safe_direct_response_for_request
+from .fast_llm import is_safe_direct_response_for_request
+from .providers import FastModelResultLike
 from .schema import Envelope
 
+if TYPE_CHECKING:
+    from ._adapter_core import LogosAdapterCore
 
-class FastRoutingMixin:
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
+
+
+class FastRoutingMixin(_MixinBase):
     """Fast-model direct responses, acks, and intent routing (from adapter.py).
 
     Mixed into LogosAdapter; uses self.{store, ws_server, tts, _project_key_for,
@@ -17,19 +25,33 @@ class FastRoutingMixin:
     _broadcast_run_status, _dispatch_gateway_text}.
     """
 
-    async def _handle_fast_direct_response(self, envelope: Envelope, result: FastModelResult) -> bool:
+    async def _handle_fast_direct_response(
+        self, envelope: Envelope, result: FastModelResultLike
+    ) -> bool:
         response_text = result.direct_response_text
         response_kind = result.direct_response_kind
         text = envelope.payload.get("text")
-        if any([result.switch_intent, result.create_intent, result.resume_intent, result.cancel_intent, result.approval_decision]):
+        if any(
+            [
+                result.switch_intent,
+                result.create_intent,
+                result.resume_intent,
+                result.cancel_intent,
+                result.approval_decision,
+            ]
+        ):
             return False
         if not response_text or not response_kind or not isinstance(text, str) or not text.strip():
             return False
         if not is_safe_direct_response_for_request(text, response_kind, response_text):
             return False
         project_key = self._project_key_for(envelope)
-        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
-        client_msg_id = str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4())
+        project = self.store.get_project(project_key) or self.store.upsert_project(
+            project_key=project_key, title=project_key
+        )
+        client_msg_id = str(
+            envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()
+        )
         session_id = self._client_session_id_for(envelope, project_key)
         await self._mirror_user_message(
             envelope,
@@ -65,10 +87,14 @@ class FastRoutingMixin:
             last_preview=response_text[:240],
         )
         if self.ws_server is not None:
-            await self.ws_server.broadcast(self._message_state_update(stored_assistant), project_key=project_key)
+            await self.ws_server.broadcast(
+                self._message_state_update(stored_assistant), project_key=project_key
+            )
         return True
 
-    async def _emit_fast_ack(self, envelope: Envelope, result: FastModelResult) -> dict[str, Any] | None:
+    async def _emit_fast_ack(
+        self, envelope: Envelope, result: FastModelResultLike
+    ) -> dict[str, Any] | None:
         if not result.ack or not result.ack_text:
             return None
         project_key = self._project_key_for(envelope)
@@ -83,7 +109,12 @@ class FastRoutingMixin:
                 "audio_id": audio_id,
                 "transient": True,
                 "ttl_ms": 5000,
-                "clear_on": ["assistant_message", "run_terminal", "project_change", "interaction_resolved"],
+                "clear_on": [
+                    "assistant_message",
+                    "run_terminal",
+                    "project_change",
+                    "interaction_resolved",
+                ],
             },
         )
         if self.ws_server is not None:
@@ -102,7 +133,7 @@ class FastRoutingMixin:
             )
         return frame
 
-    async def _route_fast_intent(self, envelope: Envelope, result: FastModelResult) -> bool:
+    async def _route_fast_intent(self, envelope: Envelope, result: FastModelResultLike) -> bool:
         if result.cancel_intent:
             await self._mirror_control_intent_message(envelope)
             await self._handle_run_cancel(envelope)
@@ -127,16 +158,21 @@ class FastRoutingMixin:
             if title:
                 project = self.store.create_project(title)
                 if envelope.device_id:
-                    self.store.set_active_project(device_id=envelope.device_id, project_key=project.project_key)
+                    self.store.set_active_project(
+                        device_id=envelope.device_id, project_key=project.project_key
+                    )
                 frame = self._project_state_update("project_created", envelope, project)
                 if self.ws_server is not None:
                     await self.ws_server.broadcast(frame, project_key=project.project_key)
                 return True
         if result.switch_intent:
             title = result.switch_intent.get("project_title", "").strip()
-            project = self._find_project_by_title(title) if title else None
-            if project is not None:
-                active = self.store.set_active_project(device_id=envelope.device_id or "logos-device", project_key=project.project_key)
+            matched_project = self._find_project_by_title(title) if title else None
+            if matched_project is not None:
+                active = self.store.set_active_project(
+                    device_id=envelope.device_id or "logos-device",
+                    project_key=matched_project.project_key,
+                )
                 frame = self._project_state_update("active_project_changed", envelope, active)
                 if self.ws_server is not None:
                     await self.ws_server.broadcast(frame, project_key=active.project_key)
@@ -161,13 +197,16 @@ class FastRoutingMixin:
         if not isinstance(text, str) or not text.strip():
             return
         project_key = self._project_key_for(envelope)
-        project = self.store.get_project(project_key) or self.store.upsert_project(project_key=project_key, title=project_key)
+        project = self.store.get_project(project_key) or self.store.upsert_project(
+            project_key=project_key, title=project_key
+        )
         await self._mirror_user_message(
             envelope,
             text.strip(),
             project=project,
             project_key=project_key,
             session_id=self._client_session_id_for(envelope, project_key),
-            client_msg_id=str(envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()),
+            client_msg_id=str(
+                envelope.payload.get("client_msg_id") or envelope.request_id or uuid.uuid4()
+            ),
         )
-

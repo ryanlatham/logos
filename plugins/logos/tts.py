@@ -8,9 +8,12 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+
+from .providers import TTSProvider
 
 
 @dataclass(frozen=True)
@@ -47,12 +50,22 @@ class DeterministicStubTTS:
             wav.setframerate(self.sample_rate)
             for i in range(frame_count):
                 envelope = min(1.0, i / 800, (frame_count - i) / 800 if frame_count > i else 0.0)
-                sample = int(0.25 * envelope * 32767 * math.sin(2 * math.pi * frequency * (i / self.sample_rate)))
+                sample = int(
+                    0.25
+                    * envelope
+                    * 32767
+                    * math.sin(2 * math.pi * frequency * (i / self.sample_rate))
+                )
                 wav.writeframesraw(sample.to_bytes(2, byteorder="little", signed=True))
         return buffer.getvalue()
 
     def iter_chunks(self, *, text: str, audio_id: str, chunk_size: int = 4096) -> list[AudioChunk]:
-        return _chunk_audio(self.synthesize(text), audio_id=audio_id, chunk_size=chunk_size, mime_type=self.mime_type)
+        return _chunk_audio(
+            self.synthesize(text),
+            audio_id=audio_id,
+            chunk_size=chunk_size,
+            mime_type=self.mime_type,
+        )
 
 
 class MacOSSayTTS:
@@ -72,7 +85,7 @@ class MacOSSayTTS:
         *,
         voice: str | None = None,
         timeout_seconds: float = 20.0,
-        runner: Callable[..., subprocess.CompletedProcess] | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
         say_path: str | None = None,
         afconvert_path: str | None = None,
     ) -> None:
@@ -111,12 +124,21 @@ class MacOSSayTTS:
         return audio
 
     def iter_chunks(self, *, text: str, audio_id: str, chunk_size: int = 4096) -> list[AudioChunk]:
-        return _chunk_audio(self.synthesize(text), audio_id=audio_id, chunk_size=chunk_size, mime_type=self.mime_type)
+        return _chunk_audio(
+            self.synthesize(text),
+            audio_id=audio_id,
+            chunk_size=chunk_size,
+            mime_type=self.mime_type,
+        )
 
 
-def build_tts(extra: dict[str, Any] | None = None):
+def build_tts(extra: dict[str, Any] | None = None) -> TTSProvider:
     extra = dict(extra or {})
-    provider = str(os.getenv("LOGOS_TTS_PROVIDER") or extra.get("tts_provider") or "deterministic").strip().lower()
+    provider = (
+        str(os.getenv("LOGOS_TTS_PROVIDER") or extra.get("tts_provider") or "deterministic")
+        .strip()
+        .lower()
+    )
     if provider in {"macos_say", "say", "local", "real"}:
         return MacOSSayTTS(
             voice=_optional_text(os.getenv("LOGOS_TTS_VOICE") or extra.get("tts_voice")),
@@ -128,7 +150,9 @@ def build_tts(extra: dict[str, Any] | None = None):
     return DeterministicStubTTS()
 
 
-def _chunk_audio(audio: bytes, *, audio_id: str, chunk_size: int, mime_type: str) -> list[AudioChunk]:
+def _chunk_audio(
+    audio: bytes, *, audio_id: str, chunk_size: int, mime_type: str
+) -> list[AudioChunk]:
     chunks: list[AudioChunk] = []
     for index, start in enumerate(range(0, len(audio), int(chunk_size))):
         raw = audio[start : start + int(chunk_size)]
@@ -143,12 +167,13 @@ def _chunk_audio(audio: bytes, *, audio_id: str, chunk_size: int, mime_type: str
     return chunks
 
 
-def _run_subprocess(args: list[str], *, timeout_seconds: float) -> subprocess.CompletedProcess:
+def _run_subprocess(
+    args: list[str], *, timeout_seconds: float
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         args,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=timeout_seconds,
     )
 

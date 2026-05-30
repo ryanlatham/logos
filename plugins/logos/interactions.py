@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gateway.platforms.base import SendResult
 
 from .apns import PrivateNotificationKind
 from .schema import Envelope, error_frame
 
+if TYPE_CHECKING:
+    from ._adapter_core import LogosAdapterCore
+
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
+
 logger = logging.getLogger(__name__)
 
 
-class InteractionsMixin:
+class InteractionsMixin(_MixinBase):
     """Approval/clarification responses + Hermes send_clarify/send_exec_approval callbacks (from adapter.py).
 
     Mixed into LogosAdapter; uses self.{store, _project_key_for, _client_session_id_for,
@@ -80,7 +87,9 @@ class InteractionsMixin:
         clarify_id = str(envelope.payload.get("clarify_id") or envelope.request_id or "")
         project_key = self._project_key_for(envelope)
         pending = self.store.get_pending_interaction(clarify_id) if clarify_id else None
-        if pending is not None and (pending.kind != "clarification" or pending.project_key != project_key):
+        if pending is not None and (
+            pending.kind != "clarification" or pending.project_key != project_key
+        ):
             return error_frame(
                 "clarify_not_pending",
                 "clarify_response requires a matching pending clarification for this project",
@@ -130,7 +139,7 @@ class InteractionsMixin:
         }
         public_payload = dict(private_payload)
         public_payload.pop("session_key", None)
-        frame = {
+        frame: dict[str, Any] = {
             "type": "clarify_request",
             "request_id": clarify_id,
             "project_key": project_key,
@@ -225,6 +234,10 @@ class InteractionsMixin:
             session_id=session_id,
             request_id=approval_id,
             server_seq=server_seq,
-            sensitive_context={"command": command, "description": description, "metadata": metadata},
+            sensitive_context={
+                "command": command,
+                "description": description,
+                "metadata": metadata,
+            },
         )
         return SendResult(success=True, message_id=approval_id, raw_response=frame)

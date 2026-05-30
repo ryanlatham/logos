@@ -19,7 +19,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install cryptography websockets "qrcode[pil]" pytest pytest-asyncio httpx h2
+        run: pip install cryptography websockets "qrcode[pil]" pytest pytest-asyncio httpx h2 ruff==0.9.6 mypy==1.15.0
+      - name: Ruff lint
+        run: ruff check plugins/logos scripts
+      - name: Ruff format check
+        run: ruff format --check plugins/logos scripts
+      - name: mypy (strict)
+        run: mypy
       - name: Compile (syntax/import sanity)
         run: python -m compileall -q plugins/logos scripts tests
       - name: Hermes-free tests

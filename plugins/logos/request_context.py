@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from typing import Iterator
+from collections.abc import Iterator
 
 # Correlates background Logos processing (callbacks fired from Hermes' run task) back to the
 # originating request/project/session, so mirrored messages and telemetry can be tagged without
 # threading IDs through every call. Extracted from adapter.py.
-_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
-    "logos_request_context",
-    default=None,
+_CURRENT_LOGOS_REQUEST_CONTEXT: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar(
+        "logos_request_context",
+        default=None,
+    )
 )
 
 

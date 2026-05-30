@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 LOGOS_STORE_SCHEMA_VERSION = 3
 
 
@@ -189,8 +188,6 @@ class LogosRunState:
 
 
 class LogosStore:
-
-
     """SQLite-backed Stage C mirror for Logos-visible messages and server_seq."""
 
     def __init__(self, path: str | Path) -> None:
@@ -357,7 +354,8 @@ class LogosStore:
             # EXISTS leaves an existing table untouched, so backfill any missing columns on
             # pre-v3 databases. Column names/types are fixed literals (no injection surface).
             existing_run_state_cols = {
-                row[1] for row in self._conn.execute("PRAGMA table_info(logos_run_states)").fetchall()
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(logos_run_states)").fetchall()
             }
             for column, decl in (
                 ("started_at", "REAL"),
@@ -383,7 +381,9 @@ class LogosStore:
         if not device_id:
             raise ValueError("device_id is required")
         now = time.time()
-        capabilities_json = json.dumps([str(item) for item in capabilities or []], separators=(",", ":"))
+        capabilities_json = json.dumps(
+            [str(item) for item in capabilities or []], separators=(",", ":")
+        )
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -577,7 +577,9 @@ class LogosStore:
             ).fetchone()
         return self._row_to_pending_interaction(row) if row else None
 
-    def list_pending_interactions(self, project_key: str | None = None) -> list[LogosPendingInteraction]:
+    def list_pending_interactions(
+        self, project_key: str | None = None
+    ) -> list[LogosPendingInteraction]:
         with self._lock:
             if project_key:
                 rows = self._conn.execute(
@@ -592,11 +594,15 @@ class LogosStore:
 
     def resolve_pending_interaction(self, request_id: str) -> None:
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM logos_pending_interactions WHERE request_id = ?", (str(request_id),))
+            self._conn.execute(
+                "DELETE FROM logos_pending_interactions WHERE request_id = ?", (str(request_id),)
+            )
 
     def resolve_pending_interactions_for_project(self, project_key: str) -> None:
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM logos_pending_interactions WHERE project_key = ?", (str(project_key),))
+            self._conn.execute(
+                "DELETE FROM logos_pending_interactions WHERE project_key = ?", (str(project_key),)
+            )
 
     def upsert_run_state(
         self,
@@ -799,7 +805,9 @@ class LogosStore:
         return [self._row_to_project(row) for row in rows]
 
     def set_active_project(self, *, device_id: str, project_key: str) -> LogosProject:
-        project = self.get_project(project_key) or self.upsert_project(project_key=project_key, title=project_key)
+        project = self.get_project(project_key) or self.upsert_project(
+            project_key=project_key, title=project_key
+        )
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -905,7 +913,9 @@ class LogosStore:
                 metadata=metadata,
             )
 
-    def messages_after_server_seq(self, project_key: str, after_server_seq: int, *, limit: int = 100) -> list[LogosMessage]:
+    def messages_after_server_seq(
+        self, project_key: str, after_server_seq: int, *, limit: int = 100
+    ) -> list[LogosMessage]:
         limit = self._bounded_limit(limit)
         with self._lock:
             rows = self._conn.execute(
@@ -919,7 +929,9 @@ class LogosStore:
             ).fetchall()
         return [self._row_to_message(row) for row in rows]
 
-    def messages_before_message_id(self, session_id: str, before_message_id: str, *, limit: int = 50) -> list[LogosMessage]:
+    def messages_before_message_id(
+        self, session_id: str, before_message_id: str, *, limit: int = 50
+    ) -> list[LogosMessage]:
         limit = self._bounded_limit(limit)
         with self._lock:
             anchor = self._conn.execute(
@@ -1062,7 +1074,11 @@ class LogosStore:
             current_session_id=row["current_session_id"],
             lineage_root_session_id=row["lineage_root_session_id"],
             last_seen_message_id=row["last_seen_message_id"],
-            last_seen_server_seq=(int(row["last_seen_server_seq"]) if row["last_seen_server_seq"] is not None else None),
+            last_seen_server_seq=(
+                int(row["last_seen_server_seq"])
+                if row["last_seen_server_seq"] is not None
+                else None
+            ),
             last_preview=row["last_preview"],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),

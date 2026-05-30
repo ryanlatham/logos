@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import _optional_nonempty_str
 from .request_context import current_request_context
-from .schema import redact_secrets
+from .schema import Envelope, redact_secrets
+
+if TYPE_CHECKING:
+    from gateway.platforms.base import MessageEvent
+
+    from ._adapter_core import LogosAdapterCore
+
+    _MixinBase = LogosAdapterCore
+else:
+    _MixinBase = object
 
 # Run-origin text persisted for retry-after-interruption is capped so a pathological prompt
 # can't bloat the run-state row.
@@ -15,7 +24,7 @@ MAX_RUN_ORIGIN_TEXT_CHARS = 2000
 logger = logging.getLogger(__name__)
 
 
-class RunStateMixin:
+class RunStateMixin(_MixinBase):
     """Run-status broadcasting, cancellation, and the typing->keepalive bridge (from adapter.py).
 
     Mixed into LogosAdapter; uses self.{store, ws_server, _project_key_for,
@@ -23,7 +32,7 @@ class RunStateMixin:
     _last_keepalive_sent_at, _keepalive_throttle_seconds, stale_timeout_seconds}.
     """
 
-    async def send_typing(self, chat_id: str, metadata=None) -> None:  # type: ignore[override]
+    async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
         """Surface Hermes' typing loop as a Logos run keepalive."""
 
         if self.ws_server is None:
@@ -32,14 +41,16 @@ class RunStateMixin:
         project_key = self._project_key_from_chat_id(chat_id)
         context = current_request_context()
         context_matches_project = bool(context and context.get("project_key") == project_key)
+        matched_context = context if context_matches_project else None
         session_id = str(
             metadata.get("session_id")
             or metadata.get("session")
-            or (context.get("session_id") if context_matches_project else None)
+            or (matched_context.get("session_id") if matched_context else None)
             or chat_id
         )
         request_id = _optional_nonempty_str(
-            metadata.get("request_id") or (context.get("request_id") if context_matches_project else None)
+            metadata.get("request_id")
+            or (matched_context.get("request_id") if matched_context else None)
         )
         device_id = _optional_nonempty_str(metadata.get("device_id"))
         throttle_key = (project_key, request_id or session_id)
@@ -62,7 +73,9 @@ class RunStateMixin:
             },
         )
 
-    def _clear_request_bookkeeping(self, *, project_key: str, session_id: str | None, request_id: str | None) -> None:
+    def _clear_request_bookkeeping(
+        self, *, project_key: str, session_id: str | None, request_id: str | None
+    ) -> None:
         if request_id:
             self._last_keepalive_sent_at.pop((project_key, request_id), None)
         if session_id:
@@ -179,11 +192,13 @@ class RunStateMixin:
             status="error" if dispatch_failed else "idle",
             request_id=envelope.request_id,
             device_id=envelope.device_id,
-            payload={"cancelled": not dispatch_failed, "reason": "stop_dispatch_failed"} if dispatch_failed else {"cancelled": True},
+            payload={"cancelled": not dispatch_failed, "reason": "stop_dispatch_failed"}
+            if dispatch_failed
+            else {"cancelled": True},
         )
         return terminal_frame
 
-    async def on_processing_start(self, event) -> None:  # type: ignore[override]
+    async def on_processing_start(self, event: MessageEvent) -> None:
         """Record durable run origin so an interrupted run can be recovered/retried.
 
         Fires when Hermes begins background processing (after handle_message routes the
@@ -191,7 +206,9 @@ class RunStateMixin:
         enrich the persisted row with started_at + the redacted origin text + origin_request_id,
         which COALESCE-preserve across later status-only updates.
         """
-        await super().on_processing_start(event)
+        # super() resolves to BasePlatformAdapter (gateway-Any) at runtime, not the
+        # type-only LogosAdapterCore stub mypy sees through the TYPE_CHECKING base.
+        await super().on_processing_start(event)  # type: ignore[safe-super]
         context = self._request_context_for_event(event)
         if not context:
             return
@@ -208,7 +225,7 @@ class RunStateMixin:
             origin_request_id=context["request_id"],
         )
 
-    async def on_processing_complete(self, event, outcome) -> None:  # type: ignore[override]
+    async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         """Reconcile a run that ended without a final message (honest, idempotent).
 
         Hermes' final response normally flips the run to ``idle`` via ``send``; this hook fires
@@ -217,7 +234,9 @@ class RunStateMixin:
         never double-idle a run a final message already terminated). An interrupted run carries
         its redacted ``retry_text`` so the app can offer a one-tap retry.
         """
-        await super().on_processing_complete(event, outcome)
+        # super() resolves to BasePlatformAdapter (gateway-Any) at runtime, not the
+        # type-only LogosAdapterCore stub mypy sees through the TYPE_CHECKING base.
+        await super().on_processing_complete(event, outcome)  # type: ignore[safe-super]
         context = self._request_context_for_event(event)
         if not context:
             return
@@ -252,7 +271,11 @@ class RunStateMixin:
         )
         telemetry = getattr(self, "_telemetry", None)
         if telemetry is not None:
-            event_name = "run.cancelled" if outcome_name == "CANCELLED" else (
-                "run.interrupted" if interrupted else "run.reconciled"
+            event_name = (
+                "run.cancelled"
+                if outcome_name == "CANCELLED"
+                else ("run.interrupted" if interrupted else "run.reconciled")
             )
-            telemetry.event(event_name, final_status=final_status, had_origin_text=bool(current.origin_text))
+            telemetry.event(
+                event_name, final_status=final_status, had_origin_text=bool(current.origin_text)
+            )
