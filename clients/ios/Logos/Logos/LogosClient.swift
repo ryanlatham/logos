@@ -159,6 +159,7 @@ final class LogosClient {
         let projectKey = activeProjectKey
         let pending = LogosMessage.pending(projectKey: projectKey, content: trimmed)
         let requestID = UUID().uuidString
+        let previousRunStatus = runStatus
         // Apply the optimistic UI state *before* awaiting the send: with async transport the
         // send (and its inline failure callback) now resolves within `await sendFrame`, so the
         // pending message / run state must already be in place for the failure handler to roll
@@ -191,6 +192,10 @@ final class LogosClient {
             }
         } else {
             handlePendingTextSendFailure(messageID: pending.messageID, projectKey: projectKey, requestID: requestID, error: LogosSocketSendError.staleConnection)
+            // Roll back the optimistically-set run state too — a pre-send rejection (e.g. seal
+            // failure) never routes through `failCurrentSocket`, so without this `runStatus` would
+            // stay `.running` with no progress/timeout to ever clear it (stuck UI).
+            runStatus = previousRunStatus
         }
         return sent
     }
@@ -215,6 +220,7 @@ final class LogosClient {
             reason: "The socket closed before Logos confirmed the final speech frame was sent."
         )
         let requestID = UUID().uuidString
+        let previousRunStatus = runStatus
         // Apply the final-speech optimistic UI state *before* awaiting the send (see `sendText`):
         // the inline send/failure callback resolves within `await sendFrame`, so the pending
         // message / run state must already be in place for the failure handler to roll it back.
@@ -257,6 +263,7 @@ final class LogosClient {
             messageManager.removePendingMessage(messageID: inputID)
             messageManager.refreshMessages()
             suspendStaleTimeout()
+            runStatus = previousRunStatus
         }
         return sent
     }

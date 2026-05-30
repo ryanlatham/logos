@@ -477,6 +477,14 @@ final class LogosConnection: WebSocketLifecycleObserving {
                 }
                 LogosConnectionLog.logger.info("Receive loop got message \(LogosConnectionLog.messageSummary(message), privacy: .public) connection_id=\(connectionID.uuidString, privacy: .public)")
                 await self.handleSocketMessage(message)
+                // `handleSocketMessage` suspends (the frame router awaits post-hello orchestration),
+                // so a reconnect can swap `task`/connection mid-processing. Re-check before re-arming:
+                // otherwise this stale loop would start a second `receive()` on the *new* socket and
+                // steal+drop a frame the live loop should have received.
+                guard self.connectionLifecycle.accepts(connectionID), self.isCurrentTaskID(taskID) else {
+                    LogosConnectionLog.logger.warning("Receive loop not re-armed; connection superseded during frame handling connection_id=\(connectionID.uuidString, privacy: .public)")
+                    return
+                }
                 self.receiveLoop(connectionID: connectionID)
             } catch {
                 guard let self else { return }
