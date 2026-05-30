@@ -37,11 +37,6 @@ enum LogosConnectionLog {
         }
         if let failingURL = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL {
             parts.append("failingURL=\(urlDescription(failingURL))")
-        } else if let failingURLString = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String,
-                  let failingURL = URL(string: failingURLString) {
-            parts.append("failingURL=\(urlDescription(failingURL))")
-        } else if let failingURLString = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String {
-            parts.append("failingURL=\(failingURLString)")
         }
         if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
             parts.append("underlying=[\(underlying.domain) \(underlying.code)] \(underlying.localizedDescription)")
