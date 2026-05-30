@@ -258,22 +258,19 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
     private let sampleDecoder: any AudioSampleDecoding
     private let spectrumAnalyzer: AudioSpectrumAnalyzer
     private let limits: AudioPlaybackLimits
-    private let spectrumDecodeQueue: DispatchQueue
 
     init(
         sessionManager: any AudioSessionManaging = SystemAudioSessionManager(),
         playerFactory: any AudioPlayerMaking = SystemAudioPlayerFactory(),
         sampleDecoder: any AudioSampleDecoding = AVAudioFileSampleDecoder(),
         spectrumAnalyzer: AudioSpectrumAnalyzer = AudioSpectrumAnalyzer(),
-        limits: AudioPlaybackLimits = AudioPlaybackLimits(),
-        spectrumDecodeQueue: DispatchQueue = DispatchQueue(label: "dev.logos.audio-spectrum-decode", qos: .utility)
+        limits: AudioPlaybackLimits = AudioPlaybackLimits()
     ) {
         self.sessionManager = sessionManager
         self.playerFactory = playerFactory
         self.sampleDecoder = sampleDecoder
         self.spectrumAnalyzer = spectrumAnalyzer
         self.limits = limits
-        self.spectrumDecodeQueue = spectrumDecodeQueue
         super.init()
     }
 
@@ -472,22 +469,26 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         spectrumDecodeTokensByAudioID[audioID] = token
         spectrumSamplesByAudioID.removeValue(forKey: audioID)
         let decoder = sampleDecoder
-        spectrumDecodeQueue.async { [weak self] in
+        // CPU-bound decode off the main actor; the result lands back via a @MainActor hop, gated on
+        // the per-audioID token so a superseded/cancelled decode is ignored (same token lifecycle as
+        // the previous GCD version — `waitForSpectrumDecodeForTesting` still observes the token dict).
+        Task.detached(priority: .utility) { [weak self] in
             let decodedSamples = try? decoder.decodeSamples(from: data)
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.spectrumDecodeTokensByAudioID[audioID] == token else { return }
-                self.spectrumDecodeTokensByAudioID.removeValue(forKey: audioID)
-                guard self.playersByAudioID[audioID] != nil else {
-                    self.spectrumSamplesByAudioID.removeValue(forKey: audioID)
-                    return
-                }
-                if let decodedSamples, decodedSamples.samples.isEmpty == false {
-                    self.spectrumSamplesByAudioID[audioID] = decodedSamples
-                } else {
-                    self.spectrumSamplesByAudioID.removeValue(forKey: audioID)
-                }
-            }
+            await self?.applyDecodedSpectrum(decodedSamples, audioID: audioID, token: token)
+        }
+    }
+
+    private func applyDecodedSpectrum(_ decodedSamples: DecodedAudioSamples?, audioID: String, token: UUID) {
+        guard spectrumDecodeTokensByAudioID[audioID] == token else { return }
+        spectrumDecodeTokensByAudioID.removeValue(forKey: audioID)
+        guard playersByAudioID[audioID] != nil else {
+            spectrumSamplesByAudioID.removeValue(forKey: audioID)
+            return
+        }
+        if let decodedSamples, decodedSamples.samples.isEmpty == false {
+            spectrumSamplesByAudioID[audioID] = decodedSamples
+        } else {
+            spectrumSamplesByAudioID.removeValue(forKey: audioID)
         }
     }
 
