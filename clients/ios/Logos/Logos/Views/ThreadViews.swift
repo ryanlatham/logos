@@ -28,6 +28,7 @@ struct DraftUserBubble: View {
     let text: String
     @State private var shimmerPhase = false
     @State private var caretVisible = true
+    @State private var rowWidth: CGFloat = 0
 
     var body: some View {
         HStack(alignment: .bottom) {
@@ -53,10 +54,15 @@ struct DraftUserBubble: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
+            .frame(maxWidth: (rowWidth > 0 ? rowWidth : 360) * 0.78, alignment: .leading)
             .background(Color.logosAmber, in: ChatBubbleShape(isUser: true))
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You, dictating: \(text)")
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            rowWidth = width
         }
         .onAppear {
             withAnimation(.linear(duration: 2.4).repeatForever(autoreverses: false)) { shimmerPhase.toggle() }

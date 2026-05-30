@@ -219,6 +219,7 @@ struct ContentView: View {
 
     @State private var draft = ""
     @State private var clarifyAnswer = ""
+    @State private var threadBubbleWidthBasis: CGFloat = 0
     @StateObject private var voiceInput = VoiceInputController()
     @StateObject private var appCoordinator = AppCoordinator()
     @AppStorage("logos.slashCommandRecents") private var slashCommandRecentsStorage = ""
@@ -847,7 +848,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .leading)
+            .frame(maxWidth: (threadBubbleWidthBasis > 0 ? threadBubbleWidthBasis : 360) * 0.78, alignment: .leading)
             .background(message.role == "user" ? Color.logosAmber : Color.logosBG2)
             .clipShape(ChatBubbleShape(isUser: message.role == "user"))
             .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
@@ -855,6 +856,11 @@ struct ContentView: View {
             if message.role != "user" { Spacer(minLength: 48) }
         }
         .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            threadBubbleWidthBasis = width
+        }
     }
 
     private var composerBar: some View {
@@ -873,11 +879,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var composerPillSurface: some View {
-        if #available(iOS 26.0, *) {
-            GlassEffectContainer(spacing: 8) {
-                composerPillRow
-            }
-        } else {
+        GlassEffectContainer(spacing: 8) {
             composerPillRow
         }
     }
