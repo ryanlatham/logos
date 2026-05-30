@@ -37,6 +37,12 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
     private weak var lifecycleObserver: (any WebSocketLifecycleObserving)?
     private let url: URL
     private let pinnedSPKISHA256: String?
+    // `send`/`receive` run off the main actor (the async `WebSocketTasking` protocol) while `cancel()`
+    // runs on the owning @MainActor `LogosConnection`. `lock` serializes access to the mutable
+    // `session`/`task` so an off-main read can't race the main-actor teardown. send/receive grab the
+    // task under the lock and then await on that local reference — never holding the lock across a
+    // suspension — so a cancel that nils the task mid-send just makes the send throw.
+    private let lock = NSLock()
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
 
@@ -58,19 +64,21 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
 
     func resume() {
         LogosConnectionLog.logger.info("WebSocket task resume requested url=\(LogosConnectionLog.urlDescription(self.url), privacy: .public)")
-        task?.resume()
+        lock.withLock { task }?.resume()
     }
 
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         LogosConnectionLog.logger.info("WebSocket task cancel requested close_code=\(closeCode.rawValue, privacy: .public) reason=\(LogosConnectionLog.closeReasonDescription(reason), privacy: .public)")
-        task?.cancel(with: closeCode, reason: reason)
-        session?.invalidateAndCancel()
-        session = nil
-        task = nil
+        lock.withLock {
+            task?.cancel(with: closeCode, reason: reason)
+            session?.invalidateAndCancel()
+            session = nil
+            task = nil
+        }
     }
 
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
-        guard let task else {
+        guard let task = lock.withLock({ self.task }) else {
             LogosConnectionLog.logger.error("WebSocket send requested after task was released")
             throw URLError(.notConnectedToInternet)
         }
@@ -78,7 +86,7 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
     }
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        guard let task else {
+        guard let task = lock.withLock({ self.task }) else {
             LogosConnectionLog.logger.error("WebSocket receive requested after task was released")
             throw URLError(.notConnectedToInternet)
         }

@@ -34,7 +34,7 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
     @ObservationIgnored private var lastSentPartialTranscript = ""
     @ObservationIgnored private var bestTranscript = ""
     @ObservationIgnored private var silenceDetector = TapToTalkSilenceDetector()
-    @ObservationIgnored private var startIntent = VoiceStartIntentTracker<Mode>()
+    private var startIntent = VoiceStartIntentTracker<Mode>()
     @ObservationIgnored private var didInstallTap = false
     @ObservationIgnored private var shouldSendFinalAfterRecognition = false
     @ObservationIgnored private var finalizationState = VoiceFinalizationState()
