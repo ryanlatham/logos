@@ -15,7 +15,7 @@ protocol AudioCoordinatorHost: AnyObject {
     /// `ensureConnectedForUserAction`, including its error side effect when not connected).
     @discardableResult func ensureAudioConnected(_ action: String) -> Bool
     /// Send a playback frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool
     /// Extract a non-empty `project_key` from an inbound frame root.
     func audioFrameProjectKey(_ root: [String: Any]) -> String?
     /// Surface a playback error: the client clears the transient ack and records it under `.audio`.
@@ -90,8 +90,8 @@ final class AudioCoordinator {
         }
     }
 
-    func playback(message: LogosMessage) {
-        _ = requestPlayback(message: message, mode: "full")
+    func playback(message: LogosMessage) async {
+        _ = await requestPlayback(message: message, mode: "full")
     }
 
     func pausePlayback() {
@@ -156,11 +156,11 @@ final class AudioCoordinator {
     }
 
     @discardableResult
-    func requestPlayback(message: LogosMessage, mode: String, autoPlayKey: String? = nil, notificationRouteKey: String? = nil) -> Bool {
+    func requestPlayback(message: LogosMessage, mode: String, autoPlayKey: String? = nil, notificationRouteKey: String? = nil) async -> Bool {
         guard message.isProgressUpdate == false else { return false }
         guard host?.ensureAudioConnected("play audio") == true else { return false }
         let audioID = "ios-\(UUID().uuidString)"
-        return requestPlaybackAudio(
+        return await requestPlaybackAudio(
             audioID: audioID,
             projectKey: message.projectKey,
             sessionID: message.sessionID,
@@ -173,7 +173,7 @@ final class AudioCoordinator {
     }
 
     @discardableResult
-    private func requestPlaybackAudio(audioID: String, projectKey: String, sessionID: String?, messageID: String?, mode: String, text: String, autoPlayKey: String? = nil, notificationRouteKey: String? = nil) -> Bool {
+    private func requestPlaybackAudio(audioID: String, projectKey: String, sessionID: String?, messageID: String?, mode: String, text: String, autoPlayKey: String? = nil, notificationRouteKey: String? = nil) async -> Bool {
         prepareForNewPlaybackRequest(audioID: audioID)
         requestedAudioIDs.insert(audioID)
         stoppedAudioIDs.remove(audioID)
@@ -194,7 +194,18 @@ final class AudioCoordinator {
             "text": text
         ]
         if let messageID { payload["message_id"] = messageID }
-        let sent = host?.sendAudioFrame([
+        // Record the retry-key bookkeeping + stream watchdog *before* awaiting the send: the inline
+        // send/failure callback now resolves within `await sendAudioFrame`, and the failure handler
+        // tears these down (releasing the auto-play / route keys for retry), so they must already be
+        // in place. A pre-send validation failure (`sent == false`) rolls them back below.
+        if let autoPlayKey {
+            playbackAutoPlayKeysByAudioID[audioID] = autoPlayKey
+        }
+        if let notificationRouteKey {
+            playbackNotificationRouteKeysByAudioID[audioID] = notificationRouteKey
+        }
+        scheduleAudioPlaybackStreamTimeout(audioID: audioID)
+        let sent = await host?.sendAudioFrame([
             "type": "playback_audio",
             "request_id": UUID().uuidString,
             "device_id": host?.audioDeviceID ?? "",
@@ -211,15 +222,16 @@ final class AudioCoordinator {
             }
             self?.clearFailedPlaybackRequest(audioID: audioID)
         } ?? false
-        if sent {
+        if sent == false {
+            // Pre-send validation failed (the inline failure callback never ran): roll back.
             if let autoPlayKey {
-                playbackAutoPlayKeysByAudioID[audioID] = autoPlayKey
+                host?.clearAutoPlayedMessageKey(autoPlayKey)
             }
             if let notificationRouteKey {
-                playbackNotificationRouteKeysByAudioID[audioID] = notificationRouteKey
+                host?.clearFulfilledNotificationRouteKey(notificationRouteKey)
             }
-            scheduleAudioPlaybackStreamTimeout(audioID: audioID)
-        } else {
+            clearPlaybackRetryKeys(audioID: audioID, allowRetry: false)
+            cancelAudioPlaybackStreamTimeout(audioID: audioID)
             stoppedAudioIDs.insert(audioID)
             requestedAudioIDs.remove(audioID)
             if audioPlaybackOverlay?.audioID == audioID {

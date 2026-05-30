@@ -1,10 +1,10 @@
 import Foundation
 
-protocol WebSocketTasking: AnyObject {
+protocol WebSocketTasking: AnyObject, Sendable {
     func resume()
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
-    func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void)
-    func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void)
+    func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func receive() async throws -> URLSessionWebSocketTask.Message
 }
 
 protocol WebSocketLifecycleObserving: AnyObject {
@@ -33,7 +33,7 @@ struct URLSessionWebSocketTaskFactory: WebSocketTaskMaking {
     }
 }
 
-final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWebSocketDelegate {
+final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWebSocketDelegate, @unchecked Sendable {
     private weak var lifecycleObserver: (any WebSocketLifecycleObserving)?
     private let url: URL
     private let pinnedSPKISHA256: String?
@@ -69,22 +69,20 @@ final class URLSessionWebSocketTaskBox: NSObject, WebSocketTasking, URLSessionWe
         task = nil
     }
 
-    func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void) {
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
         guard let task else {
             LogosConnectionLog.logger.error("WebSocket send requested after task was released")
-            completionHandler(URLError(.notConnectedToInternet))
-            return
+            throw URLError(.notConnectedToInternet)
         }
-        task.send(message, completionHandler: completionHandler)
+        try await task.send(message)
     }
 
-    func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
+    func receive() async throws -> URLSessionWebSocketTask.Message {
         guard let task else {
             LogosConnectionLog.logger.error("WebSocket receive requested after task was released")
-            completionHandler(.failure(URLError(.notConnectedToInternet)))
-            return
+            throw URLError(.notConnectedToInternet)
         }
-        task.receive(completionHandler: completionHandler)
+        return try await task.receive()
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {

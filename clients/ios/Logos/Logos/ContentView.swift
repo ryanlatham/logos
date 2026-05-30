@@ -490,8 +490,8 @@ struct ContentView: View {
                             canStop: canStopProgressRun,
                             canRetry: canRetryProgressRun,
                             onToggleExpanded: { client.toggleProgressActivityExpanded() },
-                            onStop: { client.cancelRun() },
-                            onRetry: { _ = client.retryProgressActivity() }
+                            onStop: { Task { @MainActor in await client.cancelRun() } },
+                            onRetry: { Task { @MainActor in _ = await client.retryProgressActivity() } }
                         )
                         .id("progress-activity")
                     }
@@ -782,12 +782,16 @@ struct ContentView: View {
                 isPending: client.pendingInteractionResponseID == approval.id,
                 isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
                 onApprove: {
-                    client.approveCurrentRequest()
-                    handleThreadContentChanged(forceFollow: true)
+                    Task { @MainActor in
+                        await client.approveCurrentRequest()
+                        handleThreadContentChanged(forceFollow: true)
+                    }
                 },
                 onDeny: {
-                    client.denyCurrentRequest()
-                    handleThreadContentChanged(forceFollow: true)
+                    Task { @MainActor in
+                        await client.denyCurrentRequest()
+                        handleThreadContentChanged(forceFollow: true)
+                    }
                 }
             )
             .id(approval.id)
@@ -800,9 +804,11 @@ struct ContentView: View {
                 isPending: client.pendingInteractionResponseID == clarify.id,
                 isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
                 focused: $focusedField,
-                onChoice: {
-                    if client.answerClarification($0) {
-                        handleThreadContentChanged(forceFollow: true)
+                onChoice: { choice in
+                    Task { @MainActor in
+                        if await client.answerClarification(choice) {
+                            handleThreadContentChanged(forceFollow: true)
+                        }
                     }
                 },
                 onFreeText: submitClarificationAnswer
@@ -833,7 +839,7 @@ struct ContentView: View {
 
                     if message.role != "user", message.status == "persisted", message.isProgressUpdate == false {
                         Button {
-                            client.playback(message: message)
+                            Task { @MainActor in await client.playback(message: message) }
                         } label: {
                             Label("Play", systemImage: "play.circle")
                                 .labelStyle(.titleAndIcon)
@@ -1196,7 +1202,7 @@ struct ContentView: View {
                 LazyVStack(spacing: ProjectSwitcherLayout.projectRowSpacing) {
                     ForEach(displayedProjects) { project in
                         Button {
-                            client.switchProject(project.projectKey)
+                            Task { @MainActor in await client.switchProject(project.projectKey) }
                             closeProjectSwitcher()
                         } label: {
                             ProjectRowView(
@@ -1841,9 +1847,13 @@ struct ContentView: View {
             }
         )
         appCoordinator.start()
-        client.updateSceneActivationForPlayback(isActive: scenePhase == .active)
+        Task { @MainActor in
+            await client.updateSceneActivationForPlayback(isActive: scenePhase == .active)
+        }
         notifications.onRoute = { route in
-            client.handleNotificationRoute(route)
+            Task { @MainActor in
+                await client.handleNotificationRoute(route)
+            }
         }
         appCoordinator.activateInputs()
     }
@@ -1859,24 +1869,30 @@ struct ContentView: View {
         appCoordinator.handleConnectionStateChange(newState) { pushEnabled = $0 }
     }
 
+    @discardableResult
     private func handleFinalVoiceTranscript(text: String, inputID: String, partialSeq: Int, startedAt: Int64) -> Bool {
-        let sent = client.sendSpeech(
-            text: text,
-            isFinal: true,
-            inputID: inputID,
-            partialSeq: partialSeq,
-            startedAtMilliseconds: startedAt
-        )
-        if sent == false {
-            draft = text
-            focusedField = .composer
-            withAnimation(.easeOut(duration: 0.18)) {
-                composerMode = .text
+        // The socket send is now async; kick it off and apply the optimistic-follow / text-composer
+        // fallback once it resolves. The voice state machine only uses the synchronous return for an
+        // idle status string, so we report that the transcript was accepted for delivery here.
+        Task { @MainActor in
+            let sent = await client.sendSpeech(
+                text: text,
+                isFinal: true,
+                inputID: inputID,
+                partialSeq: partialSeq,
+                startedAtMilliseconds: startedAt
+            )
+            if sent == false {
+                draft = text
+                focusedField = .composer
+                withAnimation(.easeOut(duration: 0.18)) {
+                    composerMode = .text
+                }
+            } else {
+                handleThreadContentChanged(forceFollow: true)
             }
-        } else {
-            handleThreadContentChanged(forceFollow: true)
         }
-        return sent
+        return true
     }
 
     private func restoreUndeliveredSpeechDraft() {
@@ -2324,12 +2340,15 @@ struct ContentView: View {
     }
 
     private func submitDraft() {
-        if client.sendText(draft) {
-            rememberSlashCommandIfNeeded(draft)
-            draft = ""
-            focusedField = nil
-            slashCommandDismissedDraft = nil
-            handleThreadContentChanged(forceFollow: true)
+        let pendingDraft = draft
+        Task { @MainActor in
+            if await client.sendText(pendingDraft) {
+                rememberSlashCommandIfNeeded(pendingDraft)
+                draft = ""
+                focusedField = nil
+                slashCommandDismissedDraft = nil
+                handleThreadContentChanged(forceFollow: true)
+            }
         }
     }
 
@@ -2342,7 +2361,7 @@ struct ContentView: View {
             slashCommandDismissedDraft = nil
         }
         if value.contains(" ") {
-            client.requestSlashCommandCompletion(text: value)
+            Task { @MainActor in await client.requestSlashCommandCompletion(text: value) }
         }
     }
 
@@ -2382,21 +2401,25 @@ struct ContentView: View {
     }
 
     private func submitClarificationAnswer() {
-        if client.answerClarification(clarifyAnswer) {
-            clarifyAnswer = ""
-            focusedField = nil
-            handleThreadContentChanged(forceFollow: true)
+        let pendingAnswer = clarifyAnswer
+        Task { @MainActor in
+            if await client.answerClarification(pendingAnswer) {
+                clarifyAnswer = ""
+                focusedField = nil
+                handleThreadContentChanged(forceFollow: true)
+            }
         }
     }
 
     private func createProjectFromTitleField() {
-        if client.createProject(title: newProjectTitle) {
-            let createdTitle = newProjectTitle
-            newProjectTitle = ""
-            isCreatingProject = false
-            closeProjectSwitcher()
-            justCreatedProject = true
-            Task { @MainActor in
+        let pendingTitle = newProjectTitle
+        Task { @MainActor in
+            if await client.createProject(title: pendingTitle) {
+                let createdTitle = pendingTitle
+                newProjectTitle = ""
+                isCreatingProject = false
+                closeProjectSwitcher()
+                justCreatedProject = true
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
                 if justCreatedProject || activeProjectTitle == createdTitle {
                     justCreatedProject = false

@@ -51,17 +51,23 @@ final class AppCoordinator {
         client.connectIfRequestedByEnvironment()
         voiceInput.configureCallbacks(
             partial: { [weak self] text, inputID, partialSeq, startedAt in
-                self?.client?.sendSpeech(text: text, isFinal: false, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
+                Task { @MainActor in
+                    await self?.client?.sendSpeech(text: text, isFinal: false, inputID: inputID, partialSeq: partialSeq, startedAtMilliseconds: startedAt)
+                }
             },
             final: { [weak self] text, inputID, partialSeq, startedAt in
                 self?.onVoiceFinal?(text, inputID, partialSeq, startedAt) ?? false
             }
         )
         notifications.onDeviceToken = { [weak self] token in
-            self?.client?.registerDevice(apnsToken: token)
+            Task { @MainActor in
+                await self?.client?.registerDevice(apnsToken: token)
+            }
         }
         if let token = notifications.deviceToken {
-            client.registerDevice(apnsToken: token)
+            Task { @MainActor in
+                await client.registerDevice(apnsToken: token)
+            }
         }
     }
 
@@ -81,11 +87,15 @@ final class AppCoordinator {
     /// auto-connect + command-catalog refresh on resume.
     func handleScenePhaseChange(isActive: Bool, isBackgroundOrInactive: Bool) {
         guard let client else { return }
-        client.updateSceneActivationForPlayback(isActive: isActive)
+        Task { @MainActor in
+            await client.updateSceneActivationForPlayback(isActive: isActive)
+        }
         if isActive {
             client.resumeAudioForSceneActive()
             client.connectIfAutoConnectEnabled()
-            client.requestCommandCatalog()
+            Task { @MainActor in
+                await client.requestCommandCatalog()
+            }
         } else if isBackgroundOrInactive {
             client.pauseAudioForSceneBackground()
         }
@@ -100,7 +110,9 @@ final class AppCoordinator {
         voiceInput.updateTransportAvailable(newState == .connected)
         if newState == .connected {
             onPushEnabled(notifications.authorizationStatus.contains("allowed"))
-            client.requestCommandCatalog()
+            Task { @MainActor in
+                await client.requestCommandCatalog()
+            }
         }
     }
 

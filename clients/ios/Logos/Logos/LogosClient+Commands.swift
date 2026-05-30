@@ -4,11 +4,11 @@ import Foundation
 // split out of the LogosClient monolith (P5). Same type/state via an extension.
 extension LogosClient {
     @discardableResult
-    func requestCommandCatalog(includeUnavailable: Bool = true) -> Bool {
+    func requestCommandCatalog(includeUnavailable: Bool = true) async -> Bool {
         guard connectionState == .connected, logosConnection.hasOpenSocket else { return false }
         let requestID = UUID().uuidString
         pendingCommandCatalogRequestID = requestID
-        return sendFrame([
+        return await sendFrame([
             "type": "commands_get",
             "request_id": requestID,
             "device_id": settings.deviceID,
@@ -18,12 +18,12 @@ extension LogosClient {
     }
 
     @discardableResult
-    func requestSlashCommandCompletion(text: String) -> Bool {
+    func requestSlashCommandCompletion(text: String) async -> Bool {
         guard connectionState == .connected, logosConnection.hasOpenSocket else { return false }
         guard text.hasPrefix("/"), text.count <= 500, text.rangeOfCharacter(from: .controlCharacters) == nil else { return false }
         let requestID = UUID().uuidString
         pendingCommandCompletionRequestID = requestID
-        return sendFrame([
+        return await sendFrame([
             "type": "commands_complete",
             "request_id": requestID,
             "device_id": settings.deviceID,
