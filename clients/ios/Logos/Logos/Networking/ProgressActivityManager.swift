@@ -58,9 +58,9 @@ protocol ProgressActivityManagerHost: AnyObject {
 
     // MARK: Outbound send paths used to retry a failed run
     /// Resend a text run (mirrors `LogosClient.sendText`).
-    @discardableResult func sendProgressText(_ text: String) -> Bool
+    @discardableResult func sendProgressText(_ text: String) async -> Bool
     /// Resend a final speech run (mirrors `LogosClient.sendSpeech` for the retry case).
-    @discardableResult func sendProgressSpeech(text: String) -> Bool
+    @discardableResult func sendProgressSpeech(text: String) async -> Bool
 
     // MARK: Connection-retry side effects owned by the client
     /// Kick a fresh automatic reconnect attempt (mirrors `connect(isAutomaticRetry: true)`).
@@ -187,7 +187,7 @@ final class ProgressActivityManager {
     }
 
     @discardableResult
-    func retryProgressActivity() -> Bool {
+    func retryProgressActivity() async -> Bool {
         guard host?.progressIsConnected == true, host?.progressHasOpenSocket == true else { return false }
         guard host?.progressRunStatus == .idle else { return false }
         guard let activity = progressActivity,
@@ -196,9 +196,9 @@ final class ProgressActivityManager {
         else { return false }
         switch retryRequest {
         case .text(let text):
-            return host?.sendProgressText(text) ?? false
+            return await host?.sendProgressText(text) ?? false
         case .speech(let text):
-            return host?.sendProgressSpeech(text: text) ?? false
+            return await host?.sendProgressSpeech(text: text) ?? false
         }
     }
 

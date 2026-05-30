@@ -477,12 +477,12 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(socket.sentMessages.isEmpty)
 
         socket.open()
-        await Task.yield()
+        await yieldUntil { socket.sentMessages.isEmpty == false }
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
         XCTAssertEqual(client.connectionState, .connecting)
 
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
 
         XCTAssertEqual(client.connectionState, .connected)
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
@@ -493,21 +493,22 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testCommandCatalogRequestAndStaleResponseHandling() throws {
+    func testCommandCatalogRequestAndStaleResponseHandling() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.requestCommandCatalog())
+        let __sendResult1 = await client.requestCommandCatalog()
+        XCTAssertTrue(__sendResult1)
         let requestFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestID = try XCTUnwrap(requestFrame["request_id"] as? String)
         XCTAssertEqual(requestFrame["type"] as? String, "commands_get")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"commands_list","request_id":"stale-catalog","payload":{"schema_version":1,"catalog_version":"old","generated_at":"2026-05-27T00:00:00Z","fallback_used":false,"warnings":[],"commands":[]}}
         """#)
         XCTAssertNotEqual(client.slashCommandCatalog.catalogVersion, "old")
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"commands_list","request_id":"\(requestID)","payload":{"schema_version":1,"catalog_version":"fresh","generated_at":"2026-05-27T00:00:00Z","fallback_used":false,"warnings":[],"commands":[{"id":"builtin:resume","trigger":"/resume","canonical":"/resume","aliases":[],"description":"Resume","category":"Session","args_hint":"[name]","subcommands":[],"source":"builtin","available":true,"unavailable_reason":"","requires_args":false,"adds_trailing_space":true,"deprecated":false}]}}
         """)
 
@@ -516,21 +517,22 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testCommandCompletionRequestAndStaleResponseHandling() throws {
+    func testCommandCompletionRequestAndStaleResponseHandling() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.requestSlashCommandCompletion(text: "/res"))
+        let __sendResult2 = await client.requestSlashCommandCompletion(text: "/res")
+        XCTAssertTrue(__sendResult2)
         let requestFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestID = try XCTUnwrap(requestFrame["request_id"] as? String)
         XCTAssertEqual(requestFrame["type"] as? String, "commands_complete")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"commands_complete_result","request_id":"stale-completion","payload":{"catalog_version":"v1","fallback_used":false,"warnings":[],"items":[{"canonical":"/wrong","replacement_text":"/wrong","replacement_start":0,"replacement_end":4,"display":"/wrong","detail":"","kind":"command","adds_trailing_space":false}]}}
         """#)
         XCTAssertTrue(client.slashCommandCompletion.items.isEmpty)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"commands_complete_result","request_id":"\(requestID)","payload":{"catalog_version":"v1","fallback_used":false,"warnings":[],"items":[{"canonical":"/resume","replacement_text":"/resume ","replacement_start":0,"replacement_end":4,"display":"/resume","detail":"[name]","kind":"command","adds_trailing_space":true}]}}
         """)
 
@@ -550,18 +552,18 @@ final class LogosModelTests: XCTestCase {
         client.settings.autoConnect = true
 
         client.connect()
-        client.registerDevice(apnsToken: "apns-token")
+        await client.registerDevice(apnsToken: "apns-token")
 
         XCTAssertEqual(client.connectionState, .connecting)
         XCTAssertNil(client.lastError)
         XCTAssertTrue(socket.sentMessages.isEmpty)
 
         socket.open()
-        await Task.yield()
+        await yieldUntil { socket.sentMessages.isEmpty == false }
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
 
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
             "hello",
@@ -572,8 +574,8 @@ final class LogosModelTests: XCTestCase {
         let registerPayload = try XCTUnwrap(registerFrame["payload"] as? [String: Any])
         XCTAssertEqual(registerPayload["apns_token"] as? String, "apns-token")
 
-        client.handleFrameString(#"{"type":"registered","request_id":"register-1","payload":{"device":{"device_id":"iphone-a","apns_registered":true}}}"#)
-        client.registerDevice(apnsToken: nil)
+        await client.handleFrameString(#"{"type":"registered","request_id":"register-1","payload":{"device":{"device_id":"iphone-a","apns_registered":true}}}"#)
+        await client.registerDevice(apnsToken: nil)
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
             "hello",
@@ -598,12 +600,12 @@ final class LogosModelTests: XCTestCase {
 
         client.connect()
         socket.open()
-        await Task.yield()
+        await yieldUntil { socket.sentMessages.isEmpty == false }
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
 
-        socket.receiveString(#"{"type":"error","request_id":"hello-1","project_key":"default","payload":{"code":"auth_failed","reason":"invalid_signature","message":"invalid Logos signed hello: signature mismatch"}}"#)
-        await Task.yield()
+        await socket.receiveString(#"{"type":"error","request_id":"hello-1","project_key":"default","payload":{"code":"auth_failed","reason":"invalid_signature","message":"invalid Logos signed hello: signature mismatch"}}"#)
+        await yieldUntil { client.connectionState == .error }
 
         XCTAssertEqual(client.connectionState, .error)
         XCTAssertEqual(client.lastError, "Logos authentication failed: signature mismatch. Check that the iOS Device key matches LOGOS_DEVICE_SECRET on the Logos adapter.")
@@ -623,7 +625,7 @@ final class LogosModelTests: XCTestCase {
 
         client.connect()
         socket.fail(message: "Socket is not connected")
-        await Task.yield()
+        await yieldUntil { client.connectionState == .error }
 
         XCTAssertEqual(client.connectionState, .error)
         XCTAssertEqual(client.lastError, "Socket is not connected")
@@ -675,7 +677,7 @@ final class LogosModelTests: XCTestCase {
 
         client.connect()
         socket.fail(message: "Gateway unreachable")
-        await Task.yield()
+        await yieldUntil { client.connectionState == .error }
 
         XCTAssertNotNil(client.connectionRetryState)
         XCTAssertEqual(client.runStatus, .idle)
@@ -701,13 +703,13 @@ final class LogosModelTests: XCTestCase {
 
         client.connect()
         socket.fail(message: "Gateway unreachable")
-        await Task.yield()
+        await yieldUntil { client.connectionState == .error }
         XCTAssertNotNil(client.connectionRetryState)
 
         client.connect()
         socket.open()
-        await Task.yield()
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+        await yieldUntil { socket.sentMessages.isEmpty == false }
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
 
         XCTAssertNil(client.connectionRetryState)
         XCTAssertEqual(client.connectionState, .connected)
@@ -905,8 +907,8 @@ final class LogosModelTests: XCTestCase {
         client.settings.secret = "old-secret"
         client.connect()
         socket.open()
-        await Task.yield()
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
+        await yieldUntil { socket.sentMessages.isEmpty == false }
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{"authenticated":true}}"#)
         XCTAssertEqual(client.connectionState, .connected)
 
         let route = LogosPairingRoute(
@@ -925,7 +927,8 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.settings.deviceID, "old-device")
         XCTAssertEqual(client.settings.secret, "old-secret")
         XCTAssertTrue(client.lastError?.contains("Logos pairing failed") == true)
-        XCTAssertTrue(client.createProject(title: "Still usable"))
+        let __sendResult3 = await client.createProject(title: "Still usable")
+        XCTAssertTrue(__sendResult3)
     }
 
     @MainActor
@@ -1244,12 +1247,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testDisconnectedFinalSpeechReturnsFalseWithoutAppendingPendingMessage() throws {
+    func testDisconnectedFinalSpeechReturnsFalseWithoutAppendingPendingMessage() async throws {
         let client = LogosClient()
         client.disconnect()
         let before = client.messages
 
-        let sent = client.sendSpeech(
+        let sent = await client.sendSpeech(
             text: "hello Hermes",
             isFinal: true,
             inputID: "voice-turn-1",
@@ -1396,8 +1399,8 @@ final class LogosModelTests: XCTestCase {
             timestamp: 123,
             status: "persisted"
         ))
-        let client = makeSocketBackedClient(socket: socket, store: store)
-        let sent = client.sendSpeech(
+        let client = await makeSocketBackedClient(socket: socket, store: store)
+        let sent = await client.sendSpeech(
             text: "yes",
             isFinal: true,
             inputID: "voice-turn-current",
@@ -1410,9 +1413,9 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSuccessfulConnectionMarksFirstConnectionComplete() throws {
+    func testSuccessfulConnectionMarksFirstConnectionComplete() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, autoConnect: false)
+        let client = await makeSocketBackedClient(socket: socket, autoConnect: false)
 
         XCTAssertTrue(client.settings.hasCompletedFirstConnection)
     }
@@ -1420,8 +1423,8 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testFinalSpeechPendingAppearsImmediatelyAfterASRFinalBeforeSocketSendCompletes() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        let sent = client.sendSpeech(
+        let client = await makeSocketBackedClient(socket: socket)
+        let sent = await client.sendSpeech(
             text: "hello Hermes",
             isFinal: true,
             inputID: "voice-turn-queued",
@@ -1435,9 +1438,6 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.messages.last?.role, "user")
         XCTAssertEqual(client.messages.last?.status, "pending")
 
-        socket.completeLastSend(error: nil)
-        await Task.yield()
-
         XCTAssertEqual(client.messages.filter { $0.messageID == "voice-turn-queued" }.count, 1)
         XCTAssertNil(client.undeliveredSpeechDraft)
     }
@@ -1445,13 +1445,11 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testTextSendFailureRemovesPendingMessage() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("this text send will fail"))
-        XCTAssertTrue(client.messages.contains { $0.content == "this text send will fail" && $0.status == "pending" })
-
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
+        socket.failNextSend(RecordingSocketError())
+        let sent = await client.sendText("this text send will fail")
+        XCTAssertTrue(sent)
 
         XCTAssertFalse(client.messages.contains { $0.content == "this text send will fail" && $0.status == "pending" })
         XCTAssertEqual(client.connectionState, .error)
@@ -1461,8 +1459,9 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testFinalSpeechSocketFailureRestoresUndeliveredDraftWithoutPendingMessage() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        let sent = client.sendSpeech(
+        let client = await makeSocketBackedClient(socket: socket)
+        socket.failNextSend(RecordingSocketError())
+        let sent = await client.sendSpeech(
             text: "restore this transcript",
             isFinal: true,
             inputID: "voice-turn-failed",
@@ -1471,9 +1470,6 @@ final class LogosModelTests: XCTestCase {
         )
 
         XCTAssertTrue(sent)
-
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
 
         XCTAssertEqual(client.undeliveredSpeechDraft?.id, "voice-turn-failed")
         XCTAssertEqual(client.undeliveredSpeechDraft?.text, "restore this transcript")
@@ -1484,16 +1480,21 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testDisconnectRestoresInFlightFinalSpeechDraftBeforeSendCompletion() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        let sent = client.sendSpeech(
-            text: "save this before disconnect",
-            isFinal: true,
-            inputID: "voice-turn-disconnect",
-            partialSeq: 2,
-            startedAtMilliseconds: 123
-        )
-
-        XCTAssertTrue(sent)
+        let client = await makeSocketBackedClient(socket: socket)
+        // Park the send so the final-speech draft stays in flight across the disconnect.
+        socket.holdNextSends()
+        let sendTask = Task { @MainActor in
+            await client.sendSpeech(
+                text: "save this before disconnect",
+                isFinal: true,
+                inputID: "voice-turn-disconnect",
+                partialSeq: 2,
+                startedAtMilliseconds: 123
+            )
+        }
+        while client.messages.contains(where: { $0.messageID == "voice-turn-disconnect" }) == false {
+            await Task.yield()
+        }
 
         client.disconnect()
         await Task.yield()
@@ -1501,26 +1502,38 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.undeliveredSpeechDraft?.id, "voice-turn-disconnect")
         XCTAssertEqual(client.undeliveredSpeechDraft?.text, "save this before disconnect")
         XCTAssertFalse(client.messages.contains { $0.messageID == "voice-turn-disconnect" })
+
+        // Release the parked send so the suspended task can finish.
+        await socket.completeHeldSend(error: nil)
+        _ = await sendTask.value
     }
 
     @MainActor
     func testLateFinalSpeechSendCompletionAfterDisconnectIsIgnored() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        let sent = client.sendSpeech(
-            text: "do not resurrect error after disconnect",
-            isFinal: true,
-            inputID: "voice-turn-late-completion",
-            partialSeq: 2,
-            startedAtMilliseconds: 123
-        )
+        let client = await makeSocketBackedClient(socket: socket)
+        // Park the send so the disconnect happens while it is still in flight; the send then
+        // completes (late) on the now-stale connection and must be ignored.
+        socket.holdNextSends()
+        let sendTask = Task { @MainActor in
+            await client.sendSpeech(
+                text: "do not resurrect error after disconnect",
+                isFinal: true,
+                inputID: "voice-turn-late-completion",
+                partialSeq: 2,
+                startedAtMilliseconds: 123
+            )
+        }
+        while client.messages.contains(where: { $0.messageID == "voice-turn-late-completion" }) == false {
+            await Task.yield()
+        }
 
-        XCTAssertTrue(sent)
         client.disconnect()
         await Task.yield()
         let restoredReason = client.undeliveredSpeechDraft?.reason
 
-        socket.completeLastSend(error: RecordingSocketError())
+        await socket.completeHeldSend(error: RecordingSocketError())
+        _ = await sendTask.value
         await Task.yield()
 
         XCTAssertEqual(client.connectionState, .disconnected)
@@ -1618,7 +1631,7 @@ final class LogosModelTests: XCTestCase {
         client.settings.urlString = "ws://127.0.0.1:8765"
         client.settings.secret = "test-secret"
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "alpha",
             sessionID: "session-alpha",
@@ -1632,11 +1645,11 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(socket.sentMessages.isEmpty)
 
         socket.open()
-        await Task.yield()
+        await yieldUntil { socket.sentMessages.isEmpty == false }
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, ["hello"])
 
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-alpha","payload":{"authenticated":true}}"#)
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-alpha","payload":{"authenticated":true}}"#)
 
         XCTAssertEqual(try socket.sentMessages.map { try frameType(from: $0) }, [
             "hello",
@@ -1651,12 +1664,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationRouteAutoplaysReplayedFinalOnce() throws {
+    func testFinishedNotificationRouteAutoplaysReplayedFinalOnce() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-notification",
@@ -1670,7 +1683,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(fetchFrame["project_key"] as? String, "default")
         XCTAssertEqual((try XCTUnwrap(fetchFrame["payload"] as? [String: Any]))["after_server_seq"] as? Int, 95)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"messages-get-notification","project_key":"default","session_id":"session-notification","payload":{"messages":[{"project_key":"default","session_id":"session-notification","message_id":"user-notification-prompt","server_seq":119,"role":"user","content":"Notification prompt context.","timestamp":122.0,"metadata":{"request_id":"req-notification"}},{"project_key":"default","session_id":"session-notification","message_id":"assistant-notification-final","server_seq":120,"role":"assistant","content":"Notification final response.","timestamp":123.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification"}}]}}
         """#)
 
@@ -1688,7 +1701,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-notification:assistant-notification-final")
         XCTAssertEqual(client.threadFocusRequest?.reason, .finishedNotification)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"messages-get-notification","project_key":"default","session_id":"session-notification","payload":{"messages":[{"project_key":"default","session_id":"session-notification","message_id":"assistant-notification-final","server_seq":120,"role":"assistant","content":"Notification final response.","timestamp":123.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-notification"}}]}}
         """#)
 
@@ -1698,7 +1711,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationRouteAutoplaysCachedFinalOnce() throws {
+    func testFinishedNotificationRouteAutoplaysCachedFinalOnce() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         let cachedMessage = try XCTUnwrap(LogosMessage.from(dictionary: [
@@ -1712,10 +1725,10 @@ final class LogosModelTests: XCTestCase {
             "metadata": ["finalized": true, "source": "hermes"]
         ]))
         store.upsert(cachedMessage)
-        let client = makeSocketBackedClient(socket: socket, store: store)
+        let client = await makeSocketBackedClient(socket: socket, store: store)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-cached-notification",
@@ -1732,7 +1745,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.threadFocusRequest?.reason, .finishedNotification)
         let focusID = client.threadFocusRequest?.id
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-cached-notification",
@@ -1747,7 +1760,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationRouteFindsFinalPastOldLocalRows() throws {
+    func testFinishedNotificationRouteFindsFinalPastOldLocalRows() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         for index in 1...550 {
@@ -1779,10 +1792,10 @@ final class LogosModelTests: XCTestCase {
             metadataSource: "hermes",
             metadataRequestID: "req-notified-final"
         ))
-        let client = makeSocketBackedClient(socket: socket, store: store)
+        let client = await makeSocketBackedClient(socket: socket, store: store)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-long-history",
@@ -1801,7 +1814,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationRouteAnchorsCachedFinalOutsideLatestWindow() throws {
+    func testFinishedNotificationRouteAnchorsCachedFinalOutsideLatestWindow() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         store.upsert(LogosMessage(
@@ -1833,11 +1846,11 @@ final class LogosModelTests: XCTestCase {
                 metadataSource: "hermes"
             ))
         }
-        let client = makeSocketBackedClient(socket: socket, store: store)
+        let client = await makeSocketBackedClient(socket: socket, store: store)
         XCTAssertFalse(client.messages.contains { $0.messageID == "assistant-anchor-cached-final" })
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-anchor-cached",
@@ -1853,7 +1866,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationRouteAnchorsReplayedFinalOutsideLatestWindow() throws {
+    func testFinishedNotificationRouteAnchorsReplayedFinalOutsideLatestWindow() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         for index in 11...150 {
@@ -1871,10 +1884,10 @@ final class LogosModelTests: XCTestCase {
                 metadataSource: "hermes"
             ))
         }
-        let client = makeSocketBackedClient(socket: socket, store: store)
+        let client = await makeSocketBackedClient(socket: socket, store: store)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-anchor-replayed",
@@ -1882,7 +1895,7 @@ final class LogosModelTests: XCTestCase {
             requestID: "req-anchor-replayed",
             serverSeq: 10
         ))
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"messages-get-anchor-replayed","project_key":"default","session_id":"session-anchor-replayed","payload":{"messages":[{"project_key":"default","session_id":"session-anchor-replayed","message_id":"assistant-anchor-replayed-final","server_seq":10,"role":"assistant","content":"Older replayed final response.","timestamp":10.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-anchor-replayed"}}]}}
         """#)
 
@@ -1892,7 +1905,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.threadFocusRequest?.targetMessageID, "session-anchor-replayed:assistant-anchor-replayed-final")
         let focusID = client.threadFocusRequest?.id
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-anchor-replayed",
@@ -1908,7 +1921,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishedNotificationReplayedFinalCompletesActiveProgressAndStaysVisible() throws {
+    func testFinishedNotificationReplayedFinalCompletesActiveProgressAndStaysVisible() async throws {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         for index in 11...150 {
@@ -1926,13 +1939,14 @@ final class LogosModelTests: XCTestCase {
                 metadataSource: "hermes"
             ))
         }
-        let client = makeSocketBackedClient(socket: socket, store: store)
-        XCTAssertTrue(client.sendText("finish from notification while backgrounded"))
+        let client = await makeSocketBackedClient(socket: socket, store: store)
+        let __sendResult4 = await client.sendText("finish from notification while backgrounded")
+        XCTAssertTrue(__sendResult4)
         let textFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-anchor-active",
@@ -1940,7 +1954,7 @@ final class LogosModelTests: XCTestCase {
             requestID: requestID,
             serverSeq: 10
         ))
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"messages-get-anchor-active","project_key":"default","session_id":"session-anchor-active","payload":{"messages":[{"project_key":"default","session_id":"session-anchor-active","message_id":"assistant-anchor-active-final","server_seq":10,"role":"assistant","content":"Older active final response.","timestamp":10.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(requestID)"}}]}}
         """)
 
@@ -1956,11 +1970,11 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testFinishedNotificationAutoplayWaitsUntilSceneIsActive() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.updateSceneActivationForPlayback(isActive: false)
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.updateSceneActivationForPlayback(isActive: false)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
             sessionID: "session-inactive-notification",
@@ -1968,14 +1982,14 @@ final class LogosModelTests: XCTestCase {
             requestID: "req-inactive-notification",
             serverSeq: 180
         ))
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"messages-get-inactive","project_key":"default","session_id":"session-inactive-notification","payload":{"messages":[{"project_key":"default","session_id":"session-inactive-notification","message_id":"assistant-inactive-notification-final","server_seq":180,"role":"assistant","content":"Notification final while inactive.","timestamp":180.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-inactive-notification"}}]}}
         """#)
 
         var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
-        client.updateSceneActivationForPlayback(isActive: true)
+        await client.updateSceneActivationForPlayback(isActive: true)
         await Task.yield()
 
         newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
@@ -1988,21 +2002,22 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testLiveFinalAutoplayWaitsUntilSceneIsActive() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.updateSceneActivationForPlayback(isActive: false)
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.updateSceneActivationForPlayback(isActive: false)
         let baselineCount = socket.sentMessages.count
 
-        XCTAssertTrue(client.sendText("finish while inactive"))
+        let __sendResult5 = await client.sendText("finish while inactive")
+        XCTAssertTrue(__sendResult5)
         let textFrame = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"session-live-inactive","payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live-inactive","message_id":"assistant-live-inactive-final","server_seq":181,"role":"assistant","content":"Live final while inactive.","timestamp":181.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(requestID)"}}}}
         """)
 
         var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
-        client.updateSceneActivationForPlayback(isActive: true)
+        await client.updateSceneActivationForPlayback(isActive: true)
         await Task.yield()
 
         newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
@@ -2016,7 +2031,7 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testFinishedNotificationPlaybackSendFailureAllowsRouteRetry() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let route = LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
@@ -2030,17 +2045,22 @@ final class LogosModelTests: XCTestCase {
         """#
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(route)
-        client.handleFrameString(finalBatch)
+        await client.handleNotificationRoute(route)
+        // Fail the playback send so the auto-play / route keys are released for retry.
+        socket.failNextSend(RecordingSocketError())
+        await client.handleFrameString(finalBatch)
         var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 1)
 
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
-
-        client.handleNotificationRoute(route)
+        await client.handleNotificationRoute(route)
         socket.open()
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-retry","payload":{}}"#)
+        let helloCount = socket.sentMessages.count
+        await yieldUntil { socket.sentMessages.count > helloCount }
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-retry","payload":{}}"#)
+        await yieldUntil {
+            (try? socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
+                .filter { $0["type"] as? String == "playback_audio" }.count) == 2
+        }
         newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertEqual(newFrames.filter { $0["type"] as? String == "playback_audio" }.count, 2)
     }
@@ -2054,7 +2074,7 @@ final class LogosModelTests: XCTestCase {
             sessionManager: session,
             playerFactory: RecordingAudioPlayerFactory()
         )
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let route = LogosNotificationRoute(
             kind: "finished",
             projectKey: "default",
@@ -2068,35 +2088,35 @@ final class LogosModelTests: XCTestCase {
         """#
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(route)
-        client.handleFrameString(finalBatch)
+        await client.handleNotificationRoute(route)
+        await client.handleFrameString(finalBatch)
         var newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         var playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertEqual(playbackFrames.count, 1)
         let firstPayload = try XCTUnwrap(playbackFrames.first?["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(firstPayload["audio_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-notification-stream-retry","payload":{"audio_id":"\(audioID)","message_id":"assistant-notification-stream-retry-final","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-notification-stream-retry","payload":{"audio_id":"\(audioID)","message_id":"assistant-notification-stream-retry-final","chunk_count":1}}
         """)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .failed)
 
-        client.handleNotificationRoute(route)
+        await client.handleNotificationRoute(route)
         newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         playbackFrames = newFrames.filter { $0["type"] as? String == "playback_audio" }
         XCTAssertEqual(playbackFrames.count, 2)
     }
 
     @MainActor
-    func testApprovalNotificationRouteFetchesWithoutAutoplay() throws {
+    func testApprovalNotificationRouteFetchesWithoutAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleNotificationRoute(LogosNotificationRoute(
+        await client.handleNotificationRoute(LogosNotificationRoute(
             kind: "approval",
             projectKey: "default",
             sessionID: "session-approval",
@@ -2229,11 +2249,11 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSuccessfulInboundFrameClearsVisibleErrorAndMarksConnected() throws {
+    func testSuccessfulInboundFrameClearsVisibleErrorAndMarksConnected() async throws {
         let client = LogosClient()
         client.lastError = "Cannot reconnect: stale socket failure."
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"hello","request_id":"hello-1","payload":{}}
         """)
 
@@ -2242,11 +2262,11 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSuccessfulOperationFrameClearsPriorAdapterError() throws {
+    func testSuccessfulOperationFrameClearsPriorAdapterError() async throws {
         let client = LogosClient()
         client.lastError = "Cannot send a message: Logos is not connected."
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"projects_list","payload":{"projects":[],"active_project_key":"default"}}
         """)
 
@@ -2254,16 +2274,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testStateUpdateMessageUpdatedReplacesExistingMessageContent() throws {
+    func testStateUpdateMessageUpdatedReplacesExistingMessageContent() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","project_key":"default","payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"tool-progress-1","server_seq":10,"role":"assistant","content":"🔧 terminal…","timestamp":123.0}}}
         """)
         XCTAssertEqual(client.messages.count, 1)
         XCTAssertEqual(client.messages.first?.content, "🔧 terminal…")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"tool-progress-1","server_seq":11,"role":"assistant","content":"🔧 terminal…\n✅ terminal done","timestamp":124.0,"metadata":{"finalized":true}}}}
         """#)
 
@@ -2273,9 +2293,9 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testManualPlaybackRequestsFullMessageAudio() throws {
+    func testManualPlaybackRequestsFullMessageAudio() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
         let message = LogosMessage(
             projectKey: "default",
@@ -2288,7 +2308,7 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
 
         XCTAssertEqual(socket.sentMessages.count, baselineCount + 1)
         let root = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
@@ -2302,12 +2322,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLiveFinalAssistantMessageAutoplaysFinalAutoAudioOnce() throws {
+    func testLiveFinalAssistantMessageAutoplaysFinalAutoAudioOnce() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-live","server_seq":50,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live","message_id":"assistant-live-1","server_seq":50,"role":"assistant","content":"Hello. Ada here. What are we tackling?","timestamp":123.0}}}
         """#)
 
@@ -2321,7 +2341,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(payload["mode"] as? String, "final_auto")
         XCTAssertEqual(payload["text"] as? String, "Hello. Ada here. What are we tackling?")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-live","server_seq":50,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-live","message_id":"assistant-live-1","server_seq":50,"role":"assistant","content":"Hello. Ada here. What are we tackling?","timestamp":123.0}}}
         """#)
 
@@ -2330,12 +2350,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testNonFinalProgressPersistsInProgressCardOnlyAndNeverAutoplays() throws {
+    func testNonFinalProgressPersistsInProgressCardOnlyAndNeverAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-progress","project_key":"default","session_id":"session-progress","server_seq":70,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-progress","message_id":"assistant-progress-1","server_seq":70,"role":"assistant","content":"🔧 terminal…","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal"}}}}
         """#)
 
@@ -2346,7 +2366,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.events.first?.text, "🔧 terminal…")
         XCTAssertEqual(client.runStatus, .running)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-progress","project_key":"default","session_id":"session-progress","server_seq":71,"payload":{"kind":"tool_progress","progress_kind":"terminal","message_id":"assistant-progress-1","text":"✅ terminal done","transient":false,"finalized":false,"message":{"project_key":"default","session_id":"session-progress","message_id":"assistant-progress-1","server_seq":71,"role":"assistant","content":"✅ terminal done","timestamp":124.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}}}}
         """#)
 
@@ -2355,7 +2375,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.events.count, 1)
         XCTAssertEqual(client.progressActivity?.events.first?.text, "✅ terminal done")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-progress","project_key":"default","session_id":"session-progress","server_seq":72,"payload":{"kind":"tool_progress","progress_kind":"terminal","message_id":"assistant-progress-2","text":"✅ terminal done","transient":false,"finalized":false,"message":{"project_key":"default","session_id":"session-progress","message_id":"assistant-progress-2","server_seq":72,"role":"assistant","content":"✅ terminal done","timestamp":125.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}}}}
         """#)
 
@@ -2365,28 +2385,29 @@ final class LogosModelTests: XCTestCase {
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","project_key":"default","payload":{"status":"idle"}}
         """#)
         XCTAssertEqual(client.runStatus, .running)
     }
 
     @MainActor
-    func testScopedIdleRunStatusCompletesCurrentSlashCommandProgress() throws {
+    func testScopedIdleRunStatusCompletesCurrentSlashCommandProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("/status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult6 = await client.sendText("/status")
+        XCTAssertTrue(__sendResult6)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"gateway_status","progress_kind":"gateway_status","text":"Slash command is running"}}
         """)
 
         XCTAssertEqual(client.runStatus, .running)
         XCTAssertEqual(client.progressActivity?.isComplete, false)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle"}}
         """)
 
@@ -2396,14 +2417,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testInterruptedRunStatusCompletesProgressAndAllowsRetry() throws {
+    func testInterruptedRunStatusCompletesProgressAndAllowsRetry() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult7 = await client.sendText("/restart-hermes")
+        XCTAssertTrue(__sendResult7)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","interrupted":true,"final_status":"interrupted","reason":"gateway_restarting"}}
         """)
 
@@ -2411,20 +2433,22 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.isComplete, true)
         XCTAssertEqual(client.progressActivity?.finalStatus, .interrupted)
         XCTAssertEqual(client.progressActivity?.failureMessage, "Hermes restarted before this run finished.")
-        XCTAssertTrue(client.retryProgressActivity())
+        let __sendResult8 = await client.retryProgressActivity()
+        XCTAssertTrue(__sendResult8)
         let retryFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         XCTAssertEqual((retryFrame["payload"] as? [String: Any])?["text"] as? String, "/restart-hermes")
     }
 
     @MainActor
-    func testMessagesBatchRunStatusRunningKeepsActiveProgressWorking() throws {
+    func testMessagesBatchRunStatusRunningKeepsActiveProgressWorking() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("/long-running"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult9 = await client.sendText("/long-running")
+        XCTAssertTrue(__sendResult9)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"run_status":{"project_key":"default","session_id":"project:default","status":"running","request_id":"\(requestID)","payload":{"source":"typing"},"server_seq":10,"updated_at":123.0},"has_more":false,"after_server_seq":0}}
         """)
 
@@ -2434,14 +2458,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchInterruptedRunStatusClearsWorkingState() throws {
+    func testMessagesBatchInterruptedRunStatusClearsWorkingState() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult10 = await client.sendText("/restart-hermes")
+        XCTAssertTrue(__sendResult10)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"run_status":{"project_key":"default","session_id":"project:default","status":"idle","request_id":"\(requestID)","payload":{"interrupted":true,"final_status":"interrupted","reason":"gateway_restarting"},"server_seq":11,"updated_at":124.0},"has_more":false,"after_server_seq":0}}
         """)
 
@@ -2454,20 +2479,22 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testLegacyReconnectReplayWithoutRunStateInterruptsActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("/restart-hermes"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult11 = await client.sendText("/restart-hermes")
+        XCTAssertTrue(__sendResult11)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
         socket.fail(message: "Gateway restarted")
-        await Task.yield()
+        await yieldUntil { client.connectionState == .error }
+        let helloCountBeforeReconnect = socket.sentMessages.count
         client.connect()
         socket.open()
-        await Task.yield()
+        await yieldUntil { socket.sentMessages.count > helloCountBeforeReconnect }
         let reconnectHello = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "hello" })
         let reconnectHelloID = try XCTUnwrap(reconnectHello["request_id"] as? String)
-        client.handleFrameString(#"{"type":"hello","request_id":"hello-reconnected","payload":{"authenticated":true}}"#)
-        client.handleFrameString("""
+        await client.handleFrameString(#"{"type":"hello","request_id":"hello-reconnected","payload":{"authenticated":true}}"#)
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"\(reconnectHelloID)","project_key":"default","session_id":"project:default","payload":{"messages":[],"pending_interactions":[],"has_more":false,"after_server_seq":0}}
         """)
 
@@ -2478,13 +2505,13 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLegacyGatewayStillWorkingMessageAggregatesOutsideMessagesAndNeverAutoplays() throws {
+    func testLegacyGatewayStillWorkingMessageAggregatesOutsideMessagesAndNeverAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
         let progressText = "⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-still-working","project_key":"default","session_id":"session-still-working","server_seq":71,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-still-working","message_id":"assistant-still-working-1","server_seq":71,"role":"assistant","content":"⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)","timestamp":123.0}}}
         """#)
 
@@ -2497,7 +2524,7 @@ final class LogosModelTests: XCTestCase {
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","project_key":"default","payload":{"status":"idle"}}
         """#)
         XCTAssertEqual(client.runStatus, .running)
@@ -2507,10 +2534,10 @@ final class LogosModelTests: XCTestCase {
     func testGatewayStatusProgressCanBecomeLocalStaleNoticeWithoutAutoplay() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-gateway-status","project_key":"default","session_id":"session-gateway-status","payload":{"kind":"gateway_status","progress_kind":"gateway_status","text":"⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"}}
         """#)
         XCTAssertTrue(scheduler.fireStaleTimeout())
@@ -2605,12 +2632,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testRetryStatusStateUpdateAggregatesOutsideMessagesAndNeverAutoplays() throws {
+    func testRetryStatusStateUpdateAggregatesOutsideMessagesAndNeverAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-retry-status","project_key":"default","session_id":"session-retry-status","server_seq":75,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-retry-status","message_id":"assistant-retry-status","server_seq":75,"role":"assistant","content":"⏳ Retrying in 2.6s (attempt 1/3)...","timestamp":123.0}}}
         """#)
 
@@ -2624,15 +2651,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testUnscopedLegacyGatewayStatusStateUpdateAttachesToActiveProgress() throws {
+    func testUnscopedLegacyGatewayStatusStateUpdateAttachesToActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("legacy unscoped status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult12 = await client.sendText("legacy unscoped status")
+        XCTAssertTrue(__sendResult12)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":77,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (1 min elapsed)","timestamp":125.0}}}
         """)
 
@@ -2646,16 +2674,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testProviderAbortStateUpdateStaysInProgressAndAllowsLaterFinal() throws {
+    func testProviderAbortStateUpdateStaysInProgressAndAllowsLaterFinal() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger provider abort status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult13 = await client.sendText("trigger provider abort status")
+        XCTAssertTrue(__sendResult13)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let providerStatusText = "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call."
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":78,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-status","server_seq":78,"role":"assistant","content":"\(providerStatusText)","timestamp":126.0}}}
         """)
 
@@ -2669,7 +2698,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(providerFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
         let finalBaselineCount = socket.sentMessages.count
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":79,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-final","server_seq":79,"role":"assistant","content":"Final answer after provider retry.","timestamp":127.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -2687,15 +2716,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testRetryStatusMessagesBatchAggregatesForActivePromptAndNeverAutoplays() throws {
+    func testRetryStatusMessagesBatchAggregatesForActivePromptAndNeverAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger retry status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult14 = await client.sendText("trigger retry status")
+        XCTAssertTrue(__sendResult14)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-retry-batch","server_seq":76,"role":"assistant","content":"⏳ Retrying in 2.6s (attempt 1/3)...","timestamp":124.0}]}}
         """)
 
@@ -2708,15 +2738,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testUnscopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+    func testUnscopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("legacy unscoped status batch"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult15 = await client.sendText("legacy unscoped status batch")
+        XCTAssertTrue(__sendResult15)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-unscoped-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
         """)
 
@@ -2730,15 +2761,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFetchScopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() throws {
+    func testFetchScopedLegacyGatewayStatusMessagesBatchAttachesToActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("legacy fetch status batch"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult16 = await client.sendText("legacy fetch status batch")
+        XCTAssertTrue(__sendResult16)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"messages-get-replay","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-fetch-batch-still-working","server_seq":77,"role":"assistant","content":"⏳ Still working... (2 min elapsed)","timestamp":125.0}]}}
         """)
 
@@ -2752,16 +2784,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testProviderAbortMessagesBatchAggregatesForActivePromptAndNeverAutoplays() throws {
+    func testProviderAbortMessagesBatchAggregatesForActivePromptAndNeverAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger provider abort batch status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult17 = await client.sendText("trigger provider abort batch status")
+        XCTAssertTrue(__sendResult17)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let providerStatusText = "⚠️ No response from provider for 300s (non-streaming, model: gpt-5.5). Aborting call."
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-provider-batch","server_seq":80,"role":"assistant","content":"\(providerStatusText)","timestamp":128.0}]}}
         """)
 
@@ -2776,16 +2809,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testActiveRunAssistantStatusWithoutFinalMetadataStaysInProgressUntilExplicitFinal() throws {
+    func testActiveRunAssistantStatusWithoutFinalMetadataStaysInProgressUntilExplicitFinal() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger nonterminal status"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult18 = await client.sendText("trigger nonterminal status")
+        XCTAssertTrue(__sendResult18)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let statusText = "Preflight compression: compacting context before continuing."
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":89,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-preflight-status","server_seq":89,"role":"assistant","content":"\(statusText)","timestamp":129.0}}}
         """)
 
@@ -2798,7 +2832,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertTrue(statusFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
 
         let finalBaselineCount = socket.sentMessages.count
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":90,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-explicit-final","server_seq":90,"role":"assistant","content":"Explicit final after status.","timestamp":130.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -2811,16 +2845,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testReadableErrorFinalMetadataMarksProgressFailedAfterRawErrorProgress() throws {
+    func testReadableErrorFinalMetadataMarksProgressFailedAfterRawErrorProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger raw provider failure"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult19 = await client.sendText("trigger raw provider failure")
+        XCTAssertTrue(__sendResult19)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let rawError = "⚠️ 'NoneType' object is not iterable"
         let readableError = "Hermes hit an unrecoverable error before it could answer. The underlying error was: 'NoneType' object is not iterable."
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"gateway_status","progress_kind":"gateway_status","message_id":"progress-error","text":"\(rawError)","transient":true}}
         """)
 
@@ -2828,7 +2863,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.isComplete, false)
         XCTAssertFalse(client.messages.contains { $0.content == rawError })
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":91,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-readable-error","server_seq":91,"role":"assistant","content":"\(readableError)","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes_error","final_status":"failed","error":true,"request_id":"\(requestID)"}}}}
         """)
 
@@ -2842,15 +2877,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchErrorFinalMetadataMarksProgressFailed() throws {
+    func testMessagesBatchErrorFinalMetadataMarksProgressFailed() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("trigger replayed provider failure"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult20 = await client.sendText("trigger replayed provider failure")
+        XCTAssertTrue(__sendResult20)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let readableError = "Hermes hit an unrecoverable error before it could answer."
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-batch-readable-error","server_seq":92,"role":"assistant","content":"\(readableError)","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes_error","final_status":"failed","error":true,"request_id":"\(requestID)"}}]}}
         """)
 
@@ -2863,11 +2899,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testTextSendCreatesProgressActivityBeforeFirstAdapterUpdate() throws {
+    func testTextSendCreatesProgressActivityBeforeFirstAdapterUpdate() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("start progress immediately"))
+        let __sendResult21 = await client.sendText("start progress immediately")
+        XCTAssertTrue(__sendResult21)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
@@ -2882,7 +2919,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNotNil(client.progressActivity?.startedAt)
         XCTAssertNil(client.progressActivity?.completedAt)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Adapter update arrived"}}
         """)
         XCTAssertEqual(client.progressActivity?.updateCount, 1)
@@ -2890,17 +2927,18 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testProgressActivityCompletionFreezesElapsedTime() throws {
+    func testProgressActivityCompletionFreezesElapsedTime() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("measure elapsed progress"))
+        let __sendResult22 = await client.sendText("measure elapsed progress")
+        XCTAssertTrue(__sendResult22)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let startedAt = try XCTUnwrap(client.progressActivity?.startedAt)
         XCTAssertNil(client.progressActivity?.completedAt)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":91,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-elapsed-final","server_seq":91,"role":"assistant","content":"Done measuring.","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -2912,21 +2950,22 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateDifferentRequestProgressAfterCompletionDoesNotReplaceCompletedCard() throws {
+    func testLateDifferentRequestProgressAfterCompletionDoesNotReplaceCompletedCard() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("finish before stale progress"))
+        let __sendResult23 = await client.sendText("finish before stale progress")
+        XCTAssertTrue(__sendResult23)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":92,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-completed-before-late-progress","server_seq":92,"role":"assistant","content":"Done before stale progress.","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
         XCTAssertEqual(client.progressActivity?.requestID, requestID)
         XCTAssertEqual(client.progressActivity?.finalStatus, .complete)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-stale-progress-after-complete","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Stale progress after completion"}}
         """#)
 
@@ -2937,15 +2976,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testRunStatusErrorMarksProgressFailedAndTextRetryResendsOriginalPrompt() throws {
+    func testRunStatusErrorMarksProgressFailedAndTextRetryResendsOriginalPrompt() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("retry this exact text"))
+        let __sendResult24 = await client.sendText("retry this exact text")
+        XCTAssertTrue(__sendResult24)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Hermes failed the request"}}
         """)
 
@@ -2956,7 +2996,8 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.retryRequest, .text("retry this exact text"))
 
         let baselineCount = socket.sentMessages.count
-        XCTAssertTrue(client.retryProgressActivity())
+        let __sendResult25 = await client.retryProgressActivity()
+        XCTAssertTrue(__sendResult25)
 
         let retryFrame = try XCTUnwrap(try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let retryPayload = try XCTUnwrap(retryFrame["payload"] as? [String: Any])
@@ -2966,15 +3007,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testUnscopedAdapterErrorDoesNotFailActiveProgressRun() throws {
+    func testUnscopedAdapterErrorDoesNotFailActiveProgressRun() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("keep working after unrelated adapter error"))
+        let __sendResult26 = await client.sendText("keep working after unrelated adapter error")
+        XCTAssertTrue(__sendResult26)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"error","project_key":"default","payload":{"code":"server_error","message":"Unscoped adapter notice"}}
         """#)
 
@@ -2986,20 +3028,21 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateFinalAfterRunErrorDoesNotCompleteFailedProgressOrAutoplay() throws {
+    func testLateFinalAfterRunErrorDoesNotCompleteFailedProgressOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("fail then late final"))
+        let __sendResult27 = await client.sendText("fail then late final")
+        XCTAssertTrue(__sendResult27)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Hermes failed before final"}}
         """)
         XCTAssertEqual(client.progressActivity?.finalStatus, .failed)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":93,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-late-after-failed-run","server_seq":93,"role":"assistant","content":"Late final after failed run.","timestamp":133.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -3013,21 +3056,22 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testVoiceRetryResendsOriginalTranscriptAsFreshFinalSpeech() throws {
+    func testVoiceRetryResendsOriginalTranscriptAsFreshFinalSpeech() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendSpeech(
+        let speechRetrySent = await client.sendSpeech(
             text: "retry this voice transcript",
             isFinal: true,
             inputID: "voice-original-failed",
             partialSeq: 4,
             startedAtMilliseconds: 123
-        ))
+        )
+        XCTAssertTrue(speechRetrySent)
         let speechFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
         let requestID = try XCTUnwrap(speechFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","payload":{"status":"error","message":"Voice request failed"}}
         """)
 
@@ -3035,7 +3079,8 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.retryRequest, .speech(text: "retry this voice transcript"))
 
         let baselineCount = socket.sentMessages.count
-        XCTAssertTrue(client.retryProgressActivity())
+        let __sendResult28 = await client.retryProgressActivity()
+        XCTAssertTrue(__sendResult28)
 
         let retryFrame = try XCTUnwrap(try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
         let retryPayload = try XCTUnwrap(retryFrame["payload"] as? [String: Any])
@@ -3046,17 +3091,18 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalSpeechSendCreatesProgressActivityBeforeFirstAdapterUpdate() throws {
+    func testFinalSpeechSendCreatesProgressActivityBeforeFirstAdapterUpdate() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendSpeech(
+        let speechProgressSent = await client.sendSpeech(
             text: "voice request starts progress",
             isFinal: true,
             inputID: "voice-progress-start",
             partialSeq: 1,
             startedAtMilliseconds: 123
-        ))
+        )
+        XCTAssertTrue(speechProgressSent)
         let speechFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "speech" })
         let requestID = try XCTUnwrap(speechFrame["request_id"] as? String)
 
@@ -3072,7 +3118,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testStoredLegacyGatewayProgressMessagesAreFilteredAndPlaybackGuarded() throws {
+    func testStoredLegacyGatewayProgressMessagesAreFilteredAndPlaybackGuarded() async throws {
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         let legacyProgress = LogosMessage(
             projectKey: "default",
@@ -3086,11 +3132,11 @@ final class LogosModelTests: XCTestCase {
         )
         store.upsert(legacyProgress)
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket, store: store)
+        let client = await makeSocketBackedClient(socket: socket, store: store)
         let baselineCount = socket.sentMessages.count
 
         XCTAssertTrue(client.messages.isEmpty)
-        client.playback(message: legacyProgress)
+        await client.playback(message: legacyProgress)
 
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.filter { $0["type"] as? String == "playback_audio" }.isEmpty)
@@ -3119,11 +3165,11 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchClearsProgressWhenFinalResponseArrivesInSameBatch() throws {
+    func testMessagesBatchClearsProgressWhenFinalResponseArrivesInSameBatch() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"req-batch-final","project_key":"default","session_id":"session-batch-final","payload":{"messages":[{"project_key":"default","session_id":"session-batch-final","message_id":"legacy-progress-in-batch","server_seq":81,"role":"assistant","content":"⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)","timestamp":123.0},{"project_key":"default","session_id":"session-batch-final","message_id":"assistant-batch-final","server_seq":82,"role":"assistant","content":"Final response after progress.","timestamp":124.0,"metadata":{"finalized":true}}]}}
         """#)
 
@@ -3134,12 +3180,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchKeepsDurableProgressOutOfConversationBubblesWhenFinalResponseArrivesInSameBatch() throws {
+    func testMessagesBatchKeepsDurableProgressOutOfConversationBubblesWhenFinalResponseArrivesInSameBatch() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"req-batch-durable-final","project_key":"default","session_id":"session-batch-durable-final","payload":{"messages":[{"project_key":"default","session_id":"session-batch-durable-final","message_id":"progress-batch","server_seq":81,"role":"assistant","content":"🔧 terminal: \"pytest\"","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","transient":false}},{"project_key":"default","session_id":"session-batch-durable-final","message_id":"assistant-batch-final","server_seq":82,"role":"assistant","content":"Final response after progress.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
         """#)
 
@@ -3151,17 +3197,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalCompletesExistingProgressActivity() throws {
+    func testMessagesBatchFinalCompletesExistingProgressActivity() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-final-only-replay","project_key":"default","session_id":"session-final-only-replay","payload":{"kind":"gateway_status","progress_kind":"gateway_status","text":"⏳ Still working... (3 min elapsed — iteration 1/1000, API call #1 completed)"}}
         """#)
         XCTAssertNotNil(client.progressActivity)
         XCTAssertEqual(client.runStatus, .running)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"req-final-only-replay","project_key":"default","session_id":"session-final-only-replay","payload":{"messages":[{"project_key":"default","session_id":"session-final-only-replay","message_id":"assistant-final-only","server_seq":83,"role":"assistant","content":"Final response replayed without transient progress.","timestamp":125.0,"metadata":{"finalized":true}}]}}
         """#)
 
@@ -3173,18 +3219,18 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalDuringCancelDoesNotClearCancelLatch() throws {
+    func testMessagesBatchFinalDuringCancelDoesNotClearCancelLatch() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-batch","project_key":"default","session_id":"session-cancel-batch","payload":{"kind":"terminal","text":"Still running before cancel"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         XCTAssertEqual(client.runStatus, .cancelling)
         XCTAssertEqual(client.progressActivity?.requestID, "req-cancel-batch")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"req-cancel-batch","project_key":"default","session_id":"session-cancel-batch","payload":{"messages":[{"project_key":"default","session_id":"session-cancel-batch","message_id":"assistant-cancelled-final-replay","server_seq":84,"role":"assistant","content":"Late final replay after local cancel.","timestamp":126.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
         """#)
 
@@ -3194,17 +3240,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalForDifferentRequestDoesNotClearCurrentProgress() throws {
+    func testMessagesBatchFinalForDifferentRequestDoesNotClearCurrentProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-current-batch","project_key":"default","session_id":"session-shared-batch","payload":{"kind":"terminal","text":"Current request still running"}}
         """#)
         XCTAssertEqual(client.runStatus, .running)
         XCTAssertEqual(client.progressActivity?.requestID, "req-current-batch")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"req-old-batch","project_key":"default","session_id":"session-shared-batch","payload":{"messages":[{"project_key":"default","session_id":"session-shared-batch","message_id":"assistant-old-batch-final","server_seq":85,"role":"assistant","content":"Old same-session final replay.","timestamp":127.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
         """#)
 
@@ -3214,15 +3260,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testUnscopedMessagesBatchFinalAfterNewTextBeforeProgressDoesNotIdlePrompt() throws {
+    func testUnscopedMessagesBatchFinalAfterNewTextBeforeProgressDoesNotIdlePrompt() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("new request before unscoped batch final"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult29 = await client.sendText("new request before unscoped batch final")
+        XCTAssertTrue(__sendResult29)
         let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-batch-final","server_seq":86,"role":"assistant","content":"Old unscoped batch final replay.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes"}}]}}
         """#)
 
@@ -3235,15 +3282,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() throws {
+    func testMessagesBatchFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-batch-metadata-final","project_key":"default","session_id":"session-batch-metadata-final","payload":{"kind":"terminal","text":"Running before metadata final"}}
         """#)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","project_key":"default","session_id":"session-batch-metadata-final","payload":{"messages":[{"project_key":"default","session_id":"session-batch-metadata-final","message_id":"assistant-batch-metadata-final","server_seq":87,"role":"assistant","content":"Final with metadata request id.","timestamp":129.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-batch-metadata-final"}}]}}
         """#)
 
@@ -3253,15 +3300,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMessagesBatchFinalPrefersMessageMetadataRequestIDOverBatchFetchRequestID() throws {
+    func testMessagesBatchFinalPrefersMessageMetadataRequestIDOverBatchFetchRequestID() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("complete from replay metadata"))
+        let __sendResult30 = await client.sendText("complete from replay metadata")
+        XCTAssertTrue(__sendResult30)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let runRequestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"messages_batch","request_id":"messages-get-replay","project_key":"default","session_id":"project:default","payload":{"messages":[{"project_key":"default","session_id":"project:default","message_id":"assistant-replay-final-metadata-request","server_seq":88,"role":"assistant","content":"Replay final with metadata request id.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes","request_id":"\(runRequestID)"}}]}}
         """)
 
@@ -3272,15 +3320,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testStateUpdateFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() throws {
+    func testStateUpdateFinalMetadataRequestIDCompletesProgressWithoutFrameRequestID() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-state-metadata-final","project_key":"default","session_id":"session-state-metadata-final","payload":{"kind":"terminal","text":"Running before metadata state final"}}
         """#)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-state-metadata-final","server_seq":88,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-state-metadata-final","message_id":"assistant-state-metadata-final","server_seq":88,"role":"assistant","content":"State final with metadata request id.","timestamp":130.0,"metadata":{"finalized":true,"source":"hermes","request_id":"req-state-metadata-final"}}}}
         """#)
 
@@ -3290,18 +3338,18 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalizedMessageUpdatedKeepsProgressCardAndAutoplaysFinalAutoOnce() throws {
+    func testFinalizedMessageUpdatedKeepsProgressCardAndAutoplaysFinalAutoOnce() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":80,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-finalize-1","server_seq":80,"role":"assistant","content":"🔧 terminal…","timestamp":123.0,"metadata":{"finalized":false,"progress_kind":"terminal"}}}}
         """#)
         XCTAssertEqual(client.progressActivity?.events.count, 1)
         XCTAssertTrue(client.messages.isEmpty)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":81,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-finalize-1","server_seq":81,"role":"assistant","content":"Done with the terminal work.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3320,19 +3368,19 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(payload["message_id"] as? String, "assistant-finalize-1")
         XCTAssertEqual(payload["mode"] as? String, "final_auto")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-finalize","server_seq":82,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-later-unrelated","server_seq":82,"role":"assistant","content":"Later unrelated assistant message.","timestamp":125.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
         XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-finalize:assistant-finalize-1")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":83,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-second-same-request","server_seq":83,"role":"assistant","content":"A later same-request final should not move progress.","timestamp":126.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
         XCTAssertEqual(client.progressActivity?.completedFinalMessageID, "session-finalize:assistant-finalize-1")
         let framesAfterLaterSameRequest = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertEqual(framesAfterLaterSameRequest.filter { $0["type"] as? String == "playback_audio" }.count, 1)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-finalize","project_key":"default","session_id":"session-finalize","server_seq":81,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-finalize","message_id":"assistant-finalize-1","server_seq":81,"role":"assistant","content":"Done with the terminal work.","timestamp":124.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
         let framesAfterDuplicate = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
@@ -3340,15 +3388,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalStateUpdateForDifferentSessionDoesNotClearCurrentProgressOrAutoplay() throws {
+    func testFinalStateUpdateForDifferentSessionDoesNotClearCurrentProgressOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-current","project_key":"default","session_id":"session-current","payload":{"kind":"terminal","text":"Current request is still running"}}
         """#)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-old","server_seq":91,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-old","message_id":"assistant-old-final","server_seq":91,"role":"assistant","content":"Old final response arrived late.","timestamp":126.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3363,10 +3411,10 @@ final class LogosModelTests: XCTestCase {
     func testProgressSilenceTimeoutIsVisualOnlyAndFinalCancelsTimeout() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-timeout","project_key":"default","session_id":"session-timeout","payload":{"kind":"terminal","text":"Still running"}}
         """#)
         XCTAssertTrue(scheduler.fireStaleTimeout())
@@ -3386,12 +3434,12 @@ final class LogosModelTests: XCTestCase {
 
         let socket2 = RecordingWebSocketTask()
         let scheduler2 = ManualStaleTimeoutScheduler()
-        let client2 = makeSocketBackedClient(socket: socket2, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler2)
+        let client2 = await makeSocketBackedClient(socket: socket2, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler2)
         let baselineCount2 = socket2.sentMessages.count
-        client2.handleFrameString(#"""
+        await client2.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-timeout","project_key":"default","session_id":"session-cancel-timeout","payload":{"kind":"terminal","text":"Almost done"}}
         """#)
-        client2.handleFrameString(#"""
+        await client2.handleFrameString(#"""
         {"type":"state_update","request_id":"req-cancel-timeout","project_key":"default","session_id":"session-cancel-timeout","server_seq":90,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"session-cancel-timeout","message_id":"assistant-cancel-timeout","server_seq":90,"role":"assistant","content":"Finished before timeout.","timestamp":125.0,"metadata":{"finalized":true}}}}
         """#)
         XCTAssertFalse(scheduler2.hasPendingTimeout)
@@ -3411,13 +3459,14 @@ final class LogosModelTests: XCTestCase {
     func testServerClientConfigOverridesStaleTimeoutAndPromptSilenceAddsLocalNotice() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 30, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 30, staleTimeoutScheduler: scheduler)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"hello","request_id":"hello-config","payload":{"client_config":{"stale_timeout_seconds":0.05}}}
         """#)
         let baselineCount = socket.sentMessages.count
-        XCTAssertTrue(client.sendText("Do something slow."))
+        let __sendResult31 = await client.sendText("Do something slow.")
+        XCTAssertTrue(__sendResult31)
         let sentCount = socket.sentMessages.count
 
         // The server-provided client_config overrides the 30s default down to 0.05s.
@@ -3437,13 +3486,14 @@ final class LogosModelTests: XCTestCase {
     func testRunStatusKeepaliveResetsStaleNoticeTimer() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
-        XCTAssertTrue(client.sendText("Stay alive while working."))
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
+        let __sendResult32 = await client.sendText("Stay alive while working.")
+        XCTAssertTrue(__sendResult32)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let scheduleCountAfterSend = scheduler.scheduleCount
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
         """)
         // A matching keepalive reschedules (resets) the active stale timer, and no
@@ -3460,11 +3510,12 @@ final class LogosModelTests: XCTestCase {
     func testMismatchedRunStatusKeepaliveDoesNotResetActiveStaleTimer() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
-        XCTAssertTrue(client.sendText("Active run should not be reset by old keepalive."))
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.08, staleTimeoutScheduler: scheduler)
+        let __sendResult33 = await client.sendText("Active run should not be reset by old keepalive.")
+        XCTAssertTrue(__sendResult33)
         let scheduleCountAfterSend = scheduler.scheduleCount
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"req-old-keepalive","project_key":"default","session_id":"project:default","payload":{"status":"running","keepalive":true,"source":"typing"}}
         """#)
         // A keepalive for a stale request ID must not reschedule the active timer.
@@ -3479,15 +3530,16 @@ final class LogosModelTests: XCTestCase {
     func testTerminalRunStatusAfterStaleNoticeStopsRepeatingNotices() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
-        XCTAssertTrue(client.sendText("This will become stale, then idle."))
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let __sendResult34 = await client.sendText("This will become stale, then idle.")
+        XCTAssertTrue(__sendResult34)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
 
         XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.messages.filter { $0.status == "local_notice" }.count, 1)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(requestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle"}}
         """)
         // The terminal idle status cancels the repeating timer; firing again is a no-op.
@@ -3501,16 +3553,16 @@ final class LogosModelTests: XCTestCase {
     func testTimedOutProgressIgnoresUnrelatedLateProgress() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-timeout-current","project_key":"default","session_id":"session-timeout-current","payload":{"kind":"terminal","text":"Current request running"}}
         """#)
         XCTAssertTrue(scheduler.fireStaleTimeout())
         XCTAssertEqual(client.progressActivity?.requestID, "req-timeout-current")
         XCTAssertEqual(client.progressActivity?.timedOut, true)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-unrelated-late","project_key":"default","session_id":"session-timeout-current","payload":{"kind":"terminal","text":"Unrelated late progress"}}
         """#)
 
@@ -3522,9 +3574,9 @@ final class LogosModelTests: XCTestCase {
     func testMessagesBatchDurableProgressDoesNotReviveLiveProgressOrStaleTimer() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","request_id":"hello-replay","project_key":"default","session_id":"session-replay","payload":{"messages":[{"project_key":"default","session_id":"session-replay","message_id":"progress-replay","server_seq":91,"role":"assistant","content":"🔧 terminal: \"old\"","timestamp":123.0,"metadata":{"finalized":false,"source":"tool_progress","progress_kind":"terminal","request_id":"req-old-replay","transient":false}}]}}
         """#)
         // Durable progress replay must not arm a stale timer.
@@ -3540,8 +3592,9 @@ final class LogosModelTests: XCTestCase {
         let socket = RecordingWebSocketTask()
         let store = SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3")
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, store: store, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
-        XCTAssertTrue(client.sendText("Persist stale notice."))
+        let client = await makeSocketBackedClient(socket: socket, store: store, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let __sendResult35 = await client.sendText("Persist stale notice.")
+        XCTAssertTrue(__sendResult35)
 
         XCTAssertTrue(scheduler.fireStaleTimeout())
 
@@ -3554,13 +3607,13 @@ final class LogosModelTests: XCTestCase {
     func testProgressTimeoutSuspendsWhileAwaitingApproval() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-approval-wait","project_key":"default","session_id":"session-approval-wait","payload":{"kind":"terminal","text":"🔧 terminal running"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"req-approval-wait","project_key":"default","session_id":"session-approval-wait","payload":{"approval_id":"approval-wait","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
         // Awaiting approval suspends the stale timer; nothing remains armed to fire.
@@ -3577,14 +3630,14 @@ final class LogosModelTests: XCTestCase {
     func testCancelRunDedupeSuspendsProgressTimeoutAndAcceptsIdle() async throws {
         let socket = RecordingWebSocketTask()
         let scheduler = ManualStaleTimeoutScheduler()
-        let client = makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket, staleTimeoutInterval: 0.05, staleTimeoutScheduler: scheduler)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel","project_key":"default","session_id":"session-cancel","payload":{"kind":"terminal","text":"Long task running"}}
         """#)
         let baselineCount = socket.sentMessages.count
 
-        client.cancelRun()
-        client.cancelRun()
+        await client.cancelRun()
+        await client.cancelRun()
 
         XCTAssertEqual(client.runStatus, .cancelling)
         let cancelFrames = try socket.sentMessages.dropFirst(baselineCount)
@@ -3595,7 +3648,7 @@ final class LogosModelTests: XCTestCase {
         let payload = try XCTUnwrap(cancelFrames.first?["payload"] as? [String: Any])
         XCTAssertTrue(payload.isEmpty)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","project_key":"default","payload":{"status":"cancelling"}}
         """#)
         // Cancelling suspends the stale timer, so no timeout fire remains armed.
@@ -3604,7 +3657,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.runStatus, .cancelling)
         XCTAssertEqual(client.progressActivity?.events.filter { $0.kind == "timeout" }.count, 0)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"stale-idle","project_key":"default","payload":{"status":"idle"}}
         """#)
 
@@ -3612,7 +3665,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNotNil(client.progressActivity)
 
         let cancelRequestID = try XCTUnwrap(cancelFrames.first?["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","payload":{"status":"idle","cancelled":true}}
         """)
 
@@ -3623,27 +3676,27 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testCancelRunClearsInteractionCardsAndIgnoresLateRequests() throws {
+    func testCancelRunClearsInteractionCardsAndIgnoresLateRequests() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"approval-before-cancel","project_key":"default","session_id":"session-cancel-interaction","payload":{"approval_id":"approval-before-cancel","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
         XCTAssertEqual(client.runStatus, .awaitingApproval)
         XCTAssertEqual(client.approvalCard?.id, "approval-before-cancel")
 
-        client.cancelRun()
+        await client.cancelRun()
 
         XCTAssertEqual(client.runStatus, .cancelling)
         XCTAssertNil(client.approvalCard)
         XCTAssertNil(client.clarifyCard)
         XCTAssertNil(client.pendingInteractionResponseID)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"approval-late","project_key":"default","session_id":"session-cancel-interaction","payload":{"approval_id":"approval-late","title":"Approve late?","summary":"Late approval","command_preview":"echo late","risk":"fixture"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"clarify_request","request_id":"clarify-late","project_key":"default","session_id":"session-cancel-interaction","payload":{"clarify_id":"clarify-late","question":"Late question?","choices":["yes"],"allow_free_text":true}}
         """#)
 
@@ -3653,26 +3706,26 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testProjectSwitchClearsRunStatusAndIgnoresStaleProjectFrames() throws {
+    func testProjectSwitchClearsRunStatusAndIgnoresStaleProjectFrames() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-alpha","project_key":"default","session_id":"session-alpha","payload":{"kind":"terminal","text":"Alpha is running"}}
         """#)
         XCTAssertEqual(client.runStatus, .running)
 
-        client.switchProject("beta")
+        await client.switchProject("beta")
 
         XCTAssertEqual(client.activeProjectKey, "beta")
         XCTAssertEqual(client.runStatus, .idle)
         XCTAssertNil(client.progressActivity)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"switch-alpha-old","project_key":"default","server_seq":130,"payload":{"op":"active_project_changed","project":{"project_key":"default","title":"Default"}}}
         """#)
         XCTAssertEqual(client.activeProjectKey, "beta")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"projects_list","request_id":"list-stale","project_key":"default","payload":{"active_project_key":"default","projects":[{"project_key":"default","title":"Default"},{"project_key":"beta","title":"Beta"}]}}
         """#)
         XCTAssertEqual(client.activeProjectKey, "beta")
@@ -3681,16 +3734,16 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testAdapterErrorsClearPendingInteractionAndCancelState() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         await Task.yield()
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"approval-not-pending","project_key":"default","session_id":"session-approval-error","payload":{"approval_id":"approval-not-pending","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
-        client.approveCurrentRequest()
+        await client.approveCurrentRequest()
         XCTAssertEqual(client.pendingInteractionResponseID, "approval-not-pending")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"error","request_id":"approval-not-pending","project_key":"default","payload":{"code":"approval_not_pending","message":"approval_response requires a matching pending approval for this project"}}
         """#)
 
@@ -3698,15 +3751,15 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNil(client.approvalCard)
         XCTAssertNil(client.ackText)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-error","project_key":"default","session_id":"session-cancel-error","payload":{"kind":"terminal","text":"Long task running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
         XCTAssertEqual(client.runStatus, .cancelling)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"error","request_id":"\(cancelRequestID)","project_key":"default","payload":{"code":"run_cancel_failed","message":"cancel failed"}}
         """)
 
@@ -3717,17 +3770,14 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testCancelRunSendFailureClearsProgressAndReportsError() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         await Task.yield()
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-send-fail","project_key":"default","session_id":"session-cancel-send-fail","payload":{"kind":"terminal","text":"Long task running"}}
         """#)
 
-        client.cancelRun()
-        XCTAssertEqual(client.runStatus, .cancelling)
-
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
+        socket.failNextSend(RecordingSocketError())
+        await client.cancelRun()
 
         XCTAssertEqual(client.runStatus, .error)
         XCTAssertNil(client.progressActivity)
@@ -3735,15 +3785,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSameSessionDifferentRequestFinalDoesNotClearProgressOrAutoplay() throws {
+    func testSameSessionDifferentRequestFinalDoesNotClearProgressOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-current-shared","project_key":"default","session_id":"session-shared","payload":{"kind":"terminal","text":"Current request is still running"}}
         """#)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-old-shared","project_key":"default","session_id":"session-shared","server_seq":131,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-shared","message_id":"assistant-old-shared-final","server_seq":131,"role":"assistant","content":"Old final response arrived late.","timestamp":126.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3755,29 +3805,29 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testUnsolicitedSameDeviceAudioIsIgnoredButFastAckAudioIsAuthorized() throws {
+    func testUnsolicitedSameDeviceAudioIsIgnoredButFastAckAudioIsAuthorized() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let unsolicited = Data([4, 5, 6]).base64EncodedString()
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-audio","payload":{"audio_id":"unsolicited-audio","message_id":"assistant-audio","chunk_index":0,"data":"\(unsolicited)"}}
         """)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-audio","payload":{"audio_id":"unsolicited-audio","message_id":"assistant-audio","chunk_count":1}}
         """#)
         XCTAssertEqual(factory.player.playCalls, 0)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"ack-req","project_key":"default","session_id":"session-audio","payload":{"op":"fast_ack","ack_text":"On it.","audio_id":"ack-audio","transient":true}}
         """#)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-audio","payload":{"audio_id":"ack-audio","chunk_index":0,"data":"\(unsolicited)"}}
         """)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-audio","payload":{"audio_id":"ack-audio","chunk_count":1}}
         """#)
 
@@ -3787,34 +3837,43 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testStaleTextSendCompletionAfterDisconnectRemovesPendingBubble() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         await Task.yield()
 
-        XCTAssertTrue(client.sendText("pending then disconnect"))
+        // Park the send so the disconnect happens while the text send is still in flight; the send
+        // then completes (late) on the now-stale connection and the optimistic bubble is rolled back.
+        socket.holdNextSends()
+        let sendTask = Task { @MainActor in
+            await client.sendText("pending then disconnect")
+        }
+        while client.messages.contains(where: { $0.content == "pending then disconnect" }) == false {
+            await Task.yield()
+        }
         XCTAssertEqual(client.messages.last?.content, "pending then disconnect")
         XCTAssertEqual(client.messages.last?.status, "pending")
 
         client.disconnect()
-        socket.completeLastSend(error: nil)
-        await Task.yield()
+        await socket.completeHeldSend(error: nil)
+        _ = await sendTask.value
+        await yieldUntil { client.messages.allSatisfy { $0.content != "pending then disconnect" } }
 
         XCTAssertTrue(client.messages.allSatisfy { $0.content != "pending then disconnect" })
     }
 
     @MainActor
-    func testLateRunStatusCannotOverrideCancellingUntilIdle() throws {
+    func testLateRunStatusCannotOverrideCancellingUntilIdle() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-latch","project_key":"default","session_id":"session-cancel-latch","payload":{"kind":"terminal","text":"Still running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         XCTAssertEqual(client.runStatus, .cancelling)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"late-running","project_key":"default","payload":{"status":"running"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"late-approval","project_key":"default","payload":{"status":"awaiting_approval"}}
         """#)
 
@@ -3824,12 +3883,12 @@ final class LogosModelTests: XCTestCase {
 
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"stale-cancel-complete","project_key":"default","payload":{"status":"idle"}}
         """#)
         XCTAssertEqual(client.runStatus, .cancelling)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","payload":{"status":"idle","cancelled":true}}
         """)
         XCTAssertEqual(client.runStatus, .idle)
@@ -3839,16 +3898,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateUnscopedFinalDuringCancelDoesNotClearProgressOrAutoplay() throws {
+    func testLateUnscopedFinalDuringCancelDoesNotClearProgressOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-current","project_key":"default","session_id":"session-shared-cancel","payload":{"kind":"terminal","text":"Current request is running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-shared-cancel","server_seq":132,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-shared-cancel","message_id":"assistant-unscoped-late-final","server_seq":132,"role":"assistant","content":"Late final after cancel.","timestamp":127.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3859,16 +3918,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateUnscopedFinalAfterCancelCompleteDoesNotClearNewSameSessionRunOrAutoplay() throws {
+    func testLateUnscopedFinalAfterCancelCompleteDoesNotClearNewSameSessionRunOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-before-cancel","project_key":"default","session_id":"session-shared-rerun","payload":{"kind":"terminal","text":"Old request is running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"session-shared-rerun","payload":{"status":"idle","cancelled":true}}
         """)
         XCTAssertEqual(client.runStatus, .idle)
@@ -3876,19 +3935,20 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
         XCTAssertNil(client.progressActivity?.retryRequest)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-new-after-cancel","project_key":"default","session_id":"session-shared-rerun","payload":{"kind":"terminal","text":"New request is running"}}
         """#)
         XCTAssertEqual(client.progressActivity?.requestID, "req-old-before-cancel")
         XCTAssertEqual(client.progressActivity?.finalStatus, .stopped)
 
-        XCTAssertTrue(client.sendText("new run after cancel"))
+        let __sendResult36 = await client.sendText("new run after cancel")
+        XCTAssertTrue(__sendResult36)
         let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
         XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-shared-rerun","server_seq":133,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-shared-rerun","message_id":"assistant-old-unscoped-after-cancel","server_seq":133,"role":"assistant","content":"Old final after the user started over.","timestamp":128.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3899,22 +3959,23 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateUnscopedFinalAfterNewTextBeforeProgressDoesNotAutoplay() throws {
+    func testLateUnscopedFinalAfterNewTextBeforeProgressDoesNotAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-before-text-rerun","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request is running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
-        XCTAssertTrue(client.sendText("new request before progress"))
+        let __sendResult37 = await client.sendText("new request before progress")
+        XCTAssertTrue(__sendResult37)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":134,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-before-progress","server_seq":134,"role":"assistant","content":"Old final before new progress starts.","timestamp":129.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -3924,15 +3985,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMatchingFinalAfterNewTextBeforeProgressAutoplays() throws {
+    func testMatchingFinalAfterNewTextBeforeProgressAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("fast hello before progress"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult38 = await client.sendText("fast hello before progress")
+        XCTAssertTrue(__sendResult38)
         let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestID = try XCTUnwrap(textRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":135,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-fast-final","server_seq":135,"role":"assistant","content":"Fast response before progress.","timestamp":130.0,"metadata":{"finalized":true,"source":"fast_response"}}}}
         """)
 
@@ -3944,22 +4006,24 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testOutstandingFollowupFinalBeforeProgressSupersedesOlderActiveProgress() throws {
+    func testOutstandingFollowupFinalBeforeProgressSupersedesOlderActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("first run before followup final"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult39 = await client.sendText("first run before followup final")
+        XCTAssertTrue(__sendResult39)
         let firstRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let firstRequestID = try XCTUnwrap(firstRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"First run active before followup final"}}
         """)
         XCTAssertEqual(client.progressActivity?.requestID, firstRequestID)
 
-        XCTAssertTrue(client.sendText("second final before progress"))
+        let __sendResult40 = await client.sendText("second final before progress")
+        XCTAssertTrue(__sendResult40)
         let secondRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let secondRequestID = try XCTUnwrap(secondRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","server_seq":143,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-second-final-before-progress","server_seq":143,"role":"assistant","content":"Second final before progress.","timestamp":138.0,"metadata":{"finalized":true,"source":"fast_response"}}}}
         """)
 
@@ -3974,27 +4038,28 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateStaleProgressAfterNewTextBeforeProgressDoesNotReleaseStaleFinal() throws {
+    func testLateStaleProgressAfterNewTextBeforeProgressDoesNotReleaseStaleFinal() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request was running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
-        XCTAssertTrue(client.sendText("new request before stale progress"))
+        let __sendResult41 = await client.sendText("new request before stale progress")
+        XCTAssertTrue(__sendResult41)
         let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Late old progress"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-old-stale-progress","project_key":"default","session_id":"project:default","server_seq":136,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-stale-progress-final","server_seq":136,"role":"assistant","content":"Old final after stale progress.","timestamp":131.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -4006,32 +4071,33 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testLateStaleProgressAfterNewProgressDoesNotReplaceNewProgressOrAutoplay() throws {
+    func testLateStaleProgressAfterNewProgressDoesNotReplaceNewProgressOrAutoplay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old request was running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
-        XCTAssertTrue(client.sendText("new request with valid progress"))
+        let __sendResult42 = await client.sendText("new request with valid progress")
+        XCTAssertTrue(__sendResult42)
         let textRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let newRequestID = try XCTUnwrap(textRoot["request_id"] as? String)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(newRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"New request progress"}}
         """)
         XCTAssertEqual(client.progressActivity?.requestID, newRequestID)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Late old progress after new progress"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-old-after-new-progress","project_key":"default","session_id":"project:default","server_seq":137,"payload":{"op":"message_updated","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-after-new-progress-final","server_seq":137,"role":"assistant","content":"Old final after the new request has progress.","timestamp":132.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -4042,27 +4108,28 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testCancelSuppressesAllOutstandingOutboundRequests() throws {
+    func testCancelSuppressesAllOutstandingOutboundRequests() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         var requestIDs: [String] = []
         for index in 0..<70 {
-            XCTAssertTrue(client.sendText("pending request \(index)"))
+            let __sendResult43 = await client.sendText("pending request \(index)")
+            XCTAssertTrue(__sendResult43)
             let root = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
             requestIDs.append(try XCTUnwrap(root["request_id"] as? String))
         }
         XCTAssertEqual(Set(requestIDs).count, 70)
         let firstRequestID = try XCTUnwrap(requestIDs.first)
 
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","server_seq":138,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-first-pending-after-cancel","server_seq":138,"role":"assistant","content":"Old first pending final after cancel.","timestamp":133.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -4072,27 +4139,29 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testOutstandingFollowupProgressSupersedesOlderActiveProgress() throws {
+    func testOutstandingFollowupProgressSupersedesOlderActiveProgress() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        XCTAssertTrue(client.sendText("first run"))
+        let client = await makeSocketBackedClient(socket: socket)
+        let __sendResult44 = await client.sendText("first run")
+        XCTAssertTrue(__sendResult44)
         let firstRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let firstRequestID = try XCTUnwrap(firstRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(firstRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"First run progress"}}
         """)
         XCTAssertEqual(client.progressActivity?.requestID, firstRequestID)
 
-        XCTAssertTrue(client.sendText("second run"))
+        let __sendResult45 = await client.sendText("second run")
+        XCTAssertTrue(__sendResult45)
         let secondRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let secondRequestID = try XCTUnwrap(secondRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"tool_progress","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Second run progress"}}
         """)
         XCTAssertEqual(client.progressActivity?.requestID, secondRequestID)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(secondRequestID)","project_key":"default","session_id":"project:default","server_seq":140,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-second-run-final","server_seq":140,"role":"assistant","content":"Second run final.","timestamp":135.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
 
@@ -4104,26 +4173,27 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testPostCancelUnscopedFinalDoesNotAutoplayAfterMatchingNewFinal() throws {
+    func testPostCancelUnscopedFinalDoesNotAutoplayAfterMatchingNewFinal() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-old-unscoped-after-good-final","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Old run progress"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let cancelRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let cancelRequestID = try XCTUnwrap(cancelRoot["request_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"run_status","request_id":"\(cancelRequestID)","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """)
-        XCTAssertTrue(client.sendText("new run after cancel"))
+        let __sendResult46 = await client.sendText("new run after cancel")
+        XCTAssertTrue(__sendResult46)
         let newRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let newRequestID = try XCTUnwrap(newRoot["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(newRequestID)","project_key":"default","session_id":"project:default","server_seq":141,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-new-after-cancel-final","server_seq":141,"role":"assistant","content":"New final after cancel.","timestamp":136.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"project:default","server_seq":142,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-old-unscoped-after-good-final","server_seq":142,"role":"assistant","content":"Old unscoped final after the good final.","timestamp":137.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -4134,18 +4204,18 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testServerDrivenCancelSuppressesActiveRunBeforeStaleFinal() throws {
+    func testServerDrivenCancelSuppressesActiveRunBeforeStaleFinal() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-server-driven-cancel","project_key":"default","session_id":"project:default","payload":{"kind":"terminal","text":"Server-side run is active"}}
         """#)
         XCTAssertEqual(client.progressActivity?.requestID, "req-server-driven-cancel")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"server-cancel-status","project_key":"default","session_id":"project:default","payload":{"status":"cancelling"}}
         """#)
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","request_id":"server-cancel-status","project_key":"default","session_id":"project:default","payload":{"status":"idle","cancelled":true}}
         """#)
         XCTAssertEqual(client.runStatus, .idle)
@@ -4154,7 +4224,7 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNil(client.progressActivity?.retryRequest)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-server-driven-cancel","project_key":"default","session_id":"project:default","server_seq":139,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"assistant-server-driven-cancel-final","server_seq":139,"role":"assistant","content":"Server-canceled final arrived late.","timestamp":134.0,"metadata":{"finalized":true,"source":"hermes"}}}}
         """#)
 
@@ -4164,18 +4234,21 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testOutboundTextAndSpeechAreRejectedWhileCancelling() throws {
+    func testOutboundTextAndSpeechAreRejectedWhileCancelling() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"tool_progress","request_id":"req-cancel-outbound","project_key":"default","session_id":"session-cancel-outbound","payload":{"kind":"terminal","text":"Current request is running"}}
         """#)
-        client.cancelRun()
+        await client.cancelRun()
         let baselineCount = socket.sentMessages.count
 
-        XCTAssertFalse(client.sendText("new text while stopping"))
-        XCTAssertFalse(client.sendSpeech(text: "new final speech while stopping", isFinal: true, inputID: "voice-during-cancel", partialSeq: 0, startedAtMilliseconds: 1))
-        XCTAssertFalse(client.sendSpeech(text: "new partial speech while stopping", isFinal: false, inputID: "voice-partial-during-cancel", partialSeq: 1, startedAtMilliseconds: 1))
+        let __sendResult47 = await client.sendText("new text while stopping")
+        XCTAssertFalse(__sendResult47)
+        let __sendResult48 = await client.sendSpeech(text: "new final speech while stopping", isFinal: true, inputID: "voice-during-cancel", partialSeq: 0, startedAtMilliseconds: 1)
+        XCTAssertFalse(__sendResult48)
+        let __sendResult49 = await client.sendSpeech(text: "new partial speech while stopping", isFinal: false, inputID: "voice-partial-during-cancel", partialSeq: 1, startedAtMilliseconds: 1)
+        XCTAssertFalse(__sendResult49)
 
         let newFrames = try socket.sentMessages.dropFirst(baselineCount).map { try frameRoot(from: $0) }
         XCTAssertTrue(newFrames.isEmpty)
@@ -4185,17 +4258,17 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testReceiveLoopFailureClearsPendingInteractionState() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         await Task.yield()
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"approval-before-receive-failure","project_key":"default","session_id":"session-receive-failure","payload":{"approval_id":"approval-before-receive-failure","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
-        client.approveCurrentRequest()
+        await client.approveCurrentRequest()
         XCTAssertEqual(client.approvalCard?.id, "approval-before-receive-failure")
         XCTAssertEqual(client.pendingInteractionResponseID, "approval-before-receive-failure")
 
-        socket.receiveFailure(RecordingSocketError())
-        await Task.yield()
+        await socket.receiveFailure(RecordingSocketError())
+        await yieldUntil { client.connectionState == .error }
 
         XCTAssertEqual(client.connectionState, .error)
         XCTAssertEqual(client.runStatus, .idle)
@@ -4209,19 +4282,26 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testApprovalResponseSendFailureClearsPendingStateForRetry() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         await Task.yield()
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"approval-send-fail","project_key":"default","session_id":"session-approval-fail","payload":{"approval_id":"approval-send-fail","title":"Approve?","summary":"Needs confirmation","command_preview":"echo ok","risk":"fixture"}}
         """#)
-        client.approveCurrentRequest()
+        // Park the approval-response send so the optimistic pending/ack state is observable before the
+        // send completes (late) with a failure, which then clears it for retry.
+        socket.holdNextSends()
+        let approveTask = Task { @MainActor in await client.approveCurrentRequest() }
+        while client.pendingInteractionResponseID != "approval-send-fail" {
+            await Task.yield()
+        }
 
         XCTAssertEqual(client.pendingInteractionResponseID, "approval-send-fail")
         XCTAssertEqual(client.ackText, "Approved. Waiting for Hermes…")
 
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
+        await socket.completeHeldSend(error: RecordingSocketError())
+        _ = await approveTask.value
+        await yieldUntil { client.pendingInteractionResponseID == nil && client.connectionState == .error }
 
         XCTAssertNil(client.pendingInteractionResponseID)
         XCTAssertNil(client.ackText)
@@ -4235,7 +4315,7 @@ final class LogosModelTests: XCTestCase {
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         await Task.yield()
         let message = LogosMessage(
             projectKey: "default",
@@ -4248,36 +4328,43 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        // Park the playback-request send so the requesting overlay is observable before the send
+        // completes (late) with a failure, which then clears the overlay.
+        socket.holdNextSends()
+        let playbackTask = Task { @MainActor in await client.playback(message: message) }
+        while client.audioPlaybackOverlay?.phase != .requesting {
+            await Task.yield()
+        }
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
 
-        socket.completeLastSend(error: RecordingSocketError())
-        await Task.yield()
+        await socket.completeHeldSend(error: RecordingSocketError())
+        _ = await playbackTask.value
+        await yieldUntil { client.audioPlaybackOverlay == nil && client.connectionState == .error }
 
         XCTAssertNil(client.audioPlaybackOverlay)
         XCTAssertNil(client.playbackStatus)
         XCTAssertEqual(client.connectionState, .error)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-playback-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-playback-fail","chunk_index":0,"data":"\(Data([1, 2]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-playback-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-playback-fail","chunk_count":1}}
         """)
         XCTAssertEqual(factory.player.playCalls, 0)
     }
 
     @MainActor
-    func testAudioEndActivationFailureMarksOverlayFailed() throws {
+    func testAudioEndActivationFailureMarksOverlayFailed() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         session.preparePlaybackError = RecordingAudioSessionError()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-audio-activation-fail",
@@ -4289,15 +4376,15 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-audio-activation-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-audio-activation-fail","chunk_index":0,"data":"\(Data([1, 2]).base64EncodedString())"}}
         """)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-audio-activation-fail","payload":{"audio_id":"\(audioID)","message_id":"assistant-audio-activation-fail","chunk_count":1}}
         """)
 
@@ -4310,7 +4397,7 @@ final class LogosModelTests: XCTestCase {
     @MainActor
     func testSocketFailureFailsInFlightRequestedAudioOverlay() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-audio-socket-fail",
@@ -4322,11 +4409,11 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
 
         socket.fail(message: "socket dropped during audio")
-        await Task.yield()
+        await yieldUntil { client.connectionState == .error }
 
         XCTAssertEqual(client.connectionState, .error)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .failed)
@@ -4335,12 +4422,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testPlaybackOverlayControlsAudioLifecycleAndSuppressesStoppedFrames() throws {
+    func testPlaybackOverlayControlsAudioLifecycleAndSuppressesStoppedFrames() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-overlay",
@@ -4352,7 +4439,7 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
@@ -4363,13 +4450,13 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual(client.audioPlaybackOverlay?.canStop, true)
 
         let chunk = Data([1, 2, 3, 4]).base64EncodedString()
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-1","chunk_index":0,"data":"\(chunk)"}}
         """)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .receiving)
         XCTAssertEqual(client.audioPlaybackOverlay?.spectrumBins.count, 12)
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-1","chunk_count":1}}
         """)
         XCTAssertEqual(factory.receivedData, Data([1, 2, 3, 4]))
@@ -4391,10 +4478,10 @@ final class LogosModelTests: XCTestCase {
         XCTAssertNil(client.playbackStatus)
 
         let playCallsAfterStop = factory.player.playCalls
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-1","chunk_index":1,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-1","chunk_count":2}}
         """)
         XCTAssertEqual(factory.player.playCalls, playCallsAfterStop)
@@ -4402,12 +4489,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testReceivingAudioKeepsSpectrumIdleUntilPlaybackStarts() throws {
+    func testReceivingAudioKeepsSpectrumIdleUntilPlaybackStarts() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-receiving-idle",
@@ -4419,11 +4506,11 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-receiving-idle","payload":{"audio_id":"\(audioID)","message_id":"assistant-receiving-idle-1","chunk_index":0,"data":"\(Data([255, 255, 255, 255]).base64EncodedString())"}}
         """)
 
@@ -4442,7 +4529,7 @@ final class LogosModelTests: XCTestCase {
             sampleRate: sampleRate
         ))
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-spectrum-refresh",
@@ -4454,14 +4541,14 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-refresh","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-refresh-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-refresh","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-refresh-1","chunk_count":1}}
         """)
         let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: audioID)
@@ -4489,7 +4576,7 @@ final class LogosModelTests: XCTestCase {
             sampleRate: sampleRate
         ))
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-spectrum-ticker",
@@ -4501,15 +4588,15 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-ticker","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-ticker-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
         """)
         factory.player.currentTime = 0.25
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-ticker","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-ticker-1","chunk_count":1}}
         """)
         let decoded = await controller.waitForSpectrumDecodeForTesting(audioID: audioID)
@@ -4527,7 +4614,7 @@ final class LogosModelTests: XCTestCase {
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-finished-late-audio",
@@ -4539,14 +4626,14 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_count":1}}
         """)
         let playCallsBeforeFinish = factory.player.playCalls
@@ -4554,10 +4641,10 @@ final class LogosModelTests: XCTestCase {
         controller.onPlaybackFinished?(audioID, true)
         try await Task.sleep(nanoseconds: 1_000_000)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .finished)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_index":1,"data":"\(Data([4, 5, 6]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-finished-late-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-finished-late-audio-1","chunk_count":2}}
         """)
 
@@ -4566,7 +4653,7 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testStoppedAudioRejectsStaleSpectrumRefresh() throws {
+    func testStoppedAudioRejectsStaleSpectrumRefresh() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
@@ -4576,7 +4663,7 @@ final class LogosModelTests: XCTestCase {
             sampleRate: sampleRate
         ))
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory, sampleDecoder: decoder)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-spectrum-stopped",
@@ -4588,14 +4675,14 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-stopped","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-stopped-1","chunk_index":0,"data":"\(Data([1, 2, 3]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-spectrum-stopped","payload":{"audio_id":"\(audioID)","message_id":"assistant-spectrum-stopped-1","chunk_count":1}}
         """)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
@@ -4613,7 +4700,7 @@ final class LogosModelTests: XCTestCase {
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-overlay-finished",
@@ -4625,15 +4712,15 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
         let chunk = Data([9, 10, 11]).base64EncodedString()
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay-finished","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-finished-1","chunk_index":0,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-overlay-finished","payload":{"audio_id":"\(audioID)","message_id":"assistant-overlay-finished-1","chunk_count":1}}
         """)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
@@ -4649,12 +4736,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testSceneLifecyclePauseResumeIsLocalAndPreservesOffset() throws {
+    func testSceneLifecyclePauseResumeIsLocalAndPreservesOffset() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-lifecycle",
@@ -4666,15 +4753,15 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
         let chunk = Data([5, 6]).base64EncodedString()
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-lifecycle","payload":{"audio_id":"\(audioID)","message_id":"assistant-lifecycle-1","chunk_index":0,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-lifecycle","payload":{"audio_id":"\(audioID)","message_id":"assistant-lifecycle-1","chunk_count":1}}
         """)
         factory.player.currentTime = 8.25
@@ -4697,12 +4784,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testManualPausedAudioDoesNotResumeOnSceneActive() throws {
+    func testManualPausedAudioDoesNotResumeOnSceneActive() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-manual-pause",
@@ -4714,15 +4801,15 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
         let chunk = Data([7, 8]).base64EncodedString()
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-manual-pause","payload":{"audio_id":"\(audioID)","message_id":"assistant-manual-pause-1","chunk_index":0,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-manual-pause","payload":{"audio_id":"\(audioID)","message_id":"assistant-manual-pause-1","chunk_count":1}}
         """)
         XCTAssertEqual(factory.player.playCalls, 1)
@@ -4739,12 +4826,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testNewPlaybackRequestStopsPriorAudioAndSuppressesLateFrames() throws {
+    func testNewPlaybackRequestStopsPriorAudioAndSuppressesLateFrames() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let first = LogosMessage(
             projectKey: "default",
             sessionID: "session-replay-one",
@@ -4766,30 +4853,30 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: first)
+        await client.playback(message: first)
         let firstRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let firstPayload = try XCTUnwrap(firstRoot["payload"] as? [String: Any])
         let firstAudioID = try XCTUnwrap(firstPayload["audio_id"] as? String)
         let chunk = Data([3, 4]).base64EncodedString()
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-replay-one","payload":{"audio_id":"\(firstAudioID)","message_id":"assistant-replay-1","chunk_index":0,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-replay-one","payload":{"audio_id":"\(firstAudioID)","message_id":"assistant-replay-1","chunk_count":1}}
         """)
         XCTAssertEqual(factory.player.playCalls, 1)
 
-        client.playback(message: second)
+        await client.playback(message: second)
         let secondRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let secondPayload = try XCTUnwrap(secondRoot["payload"] as? [String: Any])
         XCTAssertNotEqual(secondPayload["audio_id"] as? String, firstAudioID)
         XCTAssertEqual(factory.player.stopCalls, 1)
         XCTAssertEqual(client.audioPlaybackOverlay?.messageID, "assistant-replay-2")
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-replay-one","payload":{"audio_id":"\(firstAudioID)","message_id":"assistant-replay-1","chunk_index":1,"data":"\(chunk)"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-replay-one","payload":{"audio_id":"\(firstAudioID)","message_id":"assistant-replay-1","chunk_count":2}}
         """)
         XCTAssertEqual(factory.player.playCalls, 1)
@@ -4797,12 +4884,12 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testProjectSwitchStopsAudioAndRejectsLateFrames() throws {
+    func testProjectSwitchStopsAudioAndRejectsLateFrames() async throws {
         let socket = RecordingWebSocketTask()
         let session = RecordingAudioSessionManager()
         let factory = RecordingAudioPlayerFactory()
         let controller = AudioPlaybackController(sessionManager: session, playerFactory: factory)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: controller)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: controller)
         let message = LogosMessage(
             projectKey: "default",
             sessionID: "session-project-audio",
@@ -4814,18 +4901,18 @@ final class LogosModelTests: XCTestCase {
             status: "persisted"
         )
 
-        client.playback(message: message)
+        await client.playback(message: message)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
         let requestPayload = try XCTUnwrap(requestRoot["payload"] as? [String: Any])
         let audioID = try XCTUnwrap(requestPayload["audio_id"] as? String)
-        client.switchProject("beta")
+        await client.switchProject("beta")
 
         XCTAssertNil(client.audioPlaybackOverlay)
         XCTAssertNil(client.playbackStatus)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"session-project-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-project-audio-1","chunk_index":0,"data":"\(Data([1]).base64EncodedString())"}}
         """)
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_end","device_id":"ios-simulator","project_key":"default","session_id":"session-project-audio","payload":{"audio_id":"\(audioID)","message_id":"assistant-project-audio-1","chunk_count":1}}
         """)
 
@@ -4851,15 +4938,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckClearsWhenAssistantMessageArrives() throws {
+    func testFastAckClearsWhenAssistantMessageArrives() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"I'll check.","transient":true,"ttl_ms":5000}}
         """#)
         XCTAssertEqual(client.ackText, "I'll check.")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-ack","server_seq":51,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-ack","message_id":"assistant-ack-1","server_seq":51,"role":"assistant","content":"Checked. Clean.","timestamp":123.0}}}
         """#)
 
@@ -4867,15 +4954,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckClearsWhenRunStatusBecomesTerminal() throws {
+    func testFastAckClearsWhenRunStatusBecomesTerminal() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"Working on it.","transient":true,"ttl_ms":5000}}
         """#)
         XCTAssertEqual(client.ackText, "Working on it.")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"run_status","project_key":"default","payload":{"status":"idle"}}
         """#)
 
@@ -4883,14 +4970,14 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckTTLExpiresWithoutClearingNewerAckEarly() throws {
+    func testFastAckTTLExpiresWithoutClearingNewerAckEarly() async throws {
         let scheduler = ManualAckClearScheduler()
         let client = LogosClient(
             store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
             ackClearScheduler: scheduler
         )
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"old-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"Old ack.","transient":true,"ttl_ms":40}}
         """#)
         XCTAssertEqual(client.ackText, "Old ack.")
@@ -4899,7 +4986,7 @@ final class LogosModelTests: XCTestCase {
         let staleClear = try XCTUnwrap(scheduler.pendingClear)
         let scheduleCountAfterOld = scheduler.scheduleCount
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"new-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"New ack.","transient":true,"ttl_ms":220}}
         """#)
         XCTAssertEqual(client.ackText, "New ack.")
@@ -4919,11 +5006,11 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckIgnoresInactiveProject() throws {
+    func testFastAckIgnoresInactiveProject() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
         client.activeProjectKey = "default"
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"other","payload":{"op":"fast_ack","ack_text":"Wrong project.","transient":true,"ttl_ms":5000}}
         """#)
 
@@ -4931,15 +5018,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastAckSurvivesSameActiveProjectRefresh() throws {
+    func testFastAckSurvivesSameActiveProjectRefresh() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"I'll check.","transient":true,"ttl_ms":5000}}
         """#)
         XCTAssertEqual(client.ackText, "I'll check.")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"projects_list","payload":{"active_project_key":"default","projects":[{"project_key":"default","title":"Default","current_session_id":"project:default","last_preview":""}]}}
         """#)
 
@@ -4947,15 +5034,15 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testAdapterErrorClearsFastAck() throws {
+    func testAdapterErrorClearsFastAck() async throws {
         let client = LogosClient(store: SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"))
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"I'll check.","transient":true,"ttl_ms":5000}}
         """#)
         XCTAssertEqual(client.ackText, "I'll check.")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"error","request_id":"req-ack","project_key":"default","payload":{"code":"server_error","message":"Hermes failed."}}
         """#)
 
@@ -4964,17 +5051,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testInteractionReconciliationClearsResponseAck() throws {
+    func testInteractionReconciliationClearsResponseAck() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"approval_request","request_id":"appr-1","project_key":"default","payload":{"title":"Approve command?","summary":"Hermes needs approval.","command_preview":"python test.py","risk":"low"}}
         """#)
-        client.approveCurrentRequest()
+        await client.approveCurrentRequest()
         XCTAssertEqual(client.ackText, "Approved. Waiting for Hermes…")
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"messages_batch","project_key":"default","payload":{"messages":[],"pending_interactions":[]}}
         """#)
 
@@ -4984,16 +5071,16 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testFastDirectResponseClearsAckAndAutoplaysOnce() throws {
+    func testFastDirectResponseClearsAckAndAutoplaysOnce() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
-        client.handleFrameString(#"""
+        let client = await makeSocketBackedClient(socket: socket)
+        await client.handleFrameString(#"""
         {"type":"state_update","request_id":"req-ack","project_key":"default","payload":{"op":"fast_ack","ack_text":"I'll check.","transient":true,"ttl_ms":5000}}
         """#)
         XCTAssertEqual(client.ackText, "I'll check.")
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString(#"""
+        await client.handleFrameString(#"""
         {"type":"state_update","project_key":"default","session_id":"session-fast","server_seq":60,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"session-fast","message_id":"fast-req-hi","server_seq":60,"role":"assistant","content":"I'm here.","timestamp":123.0,"metadata":{"source":"fast_response"}}}}
         """#)
 
@@ -5005,16 +5092,17 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testActiveFastDirectResponseWithFinalMetadataCompletesProgressAndAutoplays() throws {
+    func testActiveFastDirectResponseWithFinalMetadataCompletesProgressAndAutoplays() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
 
-        XCTAssertTrue(client.sendText("hi"))
+        let __sendResult50 = await client.sendText("hi")
+        XCTAssertTrue(__sendResult50)
         let textFrame = try XCTUnwrap(try socket.sentMessages.map { try frameRoot(from: $0) }.last { $0["type"] as? String == "text_input" })
         let requestID = try XCTUnwrap(textFrame["request_id"] as? String)
         let baselineCount = socket.sentMessages.count
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"state_update","request_id":"\(requestID)","project_key":"default","session_id":"project:default","server_seq":61,"payload":{"op":"message_appended","message":{"project_key":"default","session_id":"project:default","message_id":"fast-\(requestID)","server_seq":61,"role":"assistant","content":"I'm here.","timestamp":124.0,"metadata":{"finalized":true,"source":"fast_response","request_id":"\(requestID)"}}}}
         """)
 
@@ -5026,11 +5114,11 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testAudioFramesForOtherDevicesAreIgnored() throws {
+    func testAudioFramesForOtherDevicesAreIgnored() async throws {
         let client = LogosClient()
         client.settings.deviceID = "iphone-a"
 
-        client.handleFrameString("""
+        await client.handleFrameString("""
         {"type":"audio_chunk","device_id":"iphone-b","payload":{"audio_id":"foreign-audio","chunk_index":0,"data":"not-base64"}}
         """)
 
@@ -5200,12 +5288,12 @@ final class LogosModelTests: XCTestCase {
     // (request -> receive -> play -> stop, plus the unsolicited-frame gate). This pins the
     // observable state machine so the audio internals can later be lifted into a collaborator.
     @MainActor
-    func testAudioPlaybackFlowThroughClientRequestReceivePlayStop() throws {
+    func testAudioPlaybackFlowThroughClientRequestReceivePlayStop() async throws {
         let socket = RecordingWebSocketTask()
         let factory = RecordingAudioPlayerFactory()
         let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1, -0.1, 0.2], sampleRate: 24_000))
         let audio = AudioPlaybackController(sessionManager: RecordingAudioSessionManager(), playerFactory: factory, sampleDecoder: decoder)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: audio)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: audio)
         client.activeProjectKey = "default"
 
         let message = LogosMessage(
@@ -5214,7 +5302,7 @@ final class LogosModelTests: XCTestCase {
         )
 
         // 1. Request playback -> requesting overlay + a playback_audio frame carrying the id.
-        client.playback(message: message)
+        await client.playback(message: message)
         let audioID = try XCTUnwrap(client.audioPlaybackOverlay?.audioID)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
         XCTAssertEqual(client.playbackStatus, "Requesting audio")
@@ -5223,19 +5311,19 @@ final class LogosModelTests: XCTestCase {
         XCTAssertEqual((sent["payload"] as? [String: Any])?["audio_id"] as? String, audioID)
 
         // 2. An unsolicited chunk (different id) must be ignored — the gate holds.
-        client.handleFrameString(#"{"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"s1","payload":{"audio_id":"intruder","chunk_index":0,"data":"AQID"}}"#)
+        await client.handleFrameString(#"{"type":"audio_chunk","device_id":"ios-simulator","project_key":"default","session_id":"s1","payload":{"audio_id":"intruder","chunk_index":0,"data":"AQID"}}"#)
         XCTAssertEqual(client.audioPlaybackOverlay?.audioID, audioID)
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
 
         // 3. The matching chunk advances to receiving.
-        client.handleFrameString(
+        await client.handleFrameString(
             "{\"type\":\"audio_chunk\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_index\":0,\"data\":\"AQID\",\"mime_type\":\"audio/mp4\",\"encoding\":\"m4a\"}}"
         )
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .receiving)
         XCTAssertEqual(client.playbackStatus, "Receiving audio")
 
         // 4. audio_end finalizes and starts playback.
-        client.handleFrameString(
+        await client.handleFrameString(
             "{\"type\":\"audio_end\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_count\":1}}"
         )
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
@@ -5250,24 +5338,24 @@ final class LogosModelTests: XCTestCase {
 
     // WS1 P5 prerequisite (cont.): scene background/foreground pause+resume of active playback.
     @MainActor
-    func testAudioPlaybackSceneLifecyclePauseResumeThroughClient() throws {
+    func testAudioPlaybackSceneLifecyclePauseResumeThroughClient() async throws {
         let socket = RecordingWebSocketTask()
         let factory = RecordingAudioPlayerFactory()
         let decoder = RecordingAudioSampleDecoder(decodedSamples: DecodedAudioSamples(samples: [0.1, -0.1], sampleRate: 24_000))
         let audio = AudioPlaybackController(sessionManager: RecordingAudioSessionManager(), playerFactory: factory, sampleDecoder: decoder)
-        let client = makeSocketBackedClient(socket: socket, audioPlayback: audio)
+        let client = await makeSocketBackedClient(socket: socket, audioPlayback: audio)
         client.activeProjectKey = "default"
 
         let message = LogosMessage(
             projectKey: "default", sessionID: "s1", messageID: "m1", serverSeq: 5,
             role: "assistant", content: "hello", timestamp: 1, status: "persisted"
         )
-        client.playback(message: message)
+        await client.playback(message: message)
         let audioID = try XCTUnwrap(client.audioPlaybackOverlay?.audioID)
-        client.handleFrameString(
+        await client.handleFrameString(
             "{\"type\":\"audio_chunk\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_index\":0,\"data\":\"AQID\"}}"
         )
-        client.handleFrameString(
+        await client.handleFrameString(
             "{\"type\":\"audio_end\",\"device_id\":\"ios-simulator\",\"project_key\":\"default\",\"session_id\":\"s1\",\"payload\":{\"audio_id\":\"\(audioID)\",\"chunk_count\":1}}"
         )
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .playing)
@@ -5347,9 +5435,9 @@ final class LogosModelTests: XCTestCase {
     }
 
     @MainActor
-    func testOversizedInboundFrameIsRejectedBeforeJSONParsing() throws {
+    func testOversizedInboundFrameIsRejectedBeforeJSONParsing() async throws {
         let socket = RecordingWebSocketTask()
-        let client = makeSocketBackedClient(socket: socket)
+        let client = await makeSocketBackedClient(socket: socket)
         let previousState = client.connectionState
 
         let oversizedMessage = String(repeating: "x", count: 2_000_000)
@@ -5358,7 +5446,7 @@ final class LogosModelTests: XCTestCase {
         """
         XCTAssertGreaterThan(frame.utf8.count, 2_000_000)
 
-        client.handleFrameString(frame)
+        await client.handleFrameString(frame)
 
         XCTAssertEqual(client.connectionState, previousState)
         XCTAssertNil(client.lastError)
@@ -5728,6 +5816,19 @@ final class ManualAckClearScheduler: AckClearScheduling {
     }
 }
 
+/// Cooperative-yield until `condition` holds (or a bounded number of hops elapse). Inbound-frame
+/// handling now runs on the connection's receive-loop `Task`, so after feeding a frame / failure the
+/// effects land a few executor hops later; this lets the test observe the settled state without a
+/// fixed sleep.
+@MainActor
+private func yieldUntil(_ condition: @MainActor () -> Bool, maxYields: Int = 200) async {
+    var hops = 0
+    while condition() == false, hops < maxYields {
+        await Task.yield()
+        hops += 1
+    }
+}
+
 @MainActor
 private func makeSocketBackedClient(
     socket: RecordingWebSocketTask,
@@ -5736,7 +5837,7 @@ private func makeSocketBackedClient(
     audioPlayback: AudioPlaybackController = AudioPlaybackController(),
     staleTimeoutInterval: TimeInterval = 45,
     staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil
-) -> LogosClient {
+) async -> LogosClient {
     let client = LogosClient(
         store: store ?? SQLiteMessageStore(filename: "LogosTests-\(UUID().uuidString).sqlite3"),
         socketFactory: RecordingWebSocketTaskFactory(socket: socket),
@@ -5748,10 +5849,10 @@ private func makeSocketBackedClient(
     client.settings.deviceID = "ios-simulator"
     client.settings.secret = "test-secret"
     client.settings.autoConnect = autoConnect
-    client.updateSceneActivationForPlayback(isActive: true)
+    await client.updateSceneActivationForPlayback(isActive: true)
     client.connect()
     socket.open()
-    client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)
+    await client.handleFrameString(#"{"type":"hello","request_id":"hello-1","payload":{}}"#)
     return client
 }
 
@@ -5775,11 +5876,21 @@ private final class RecordingWebSocketTaskFactory: WebSocketTaskMaking {
     }
 }
 
-private final class RecordingWebSocketTask: WebSocketTasking {
-    private(set) var sentMessages: [URLSessionWebSocketTask.Message] = []
-    private var sendCompletions: [@Sendable (Error?) -> Void] = []
-    private var receiveCompletions: [@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void] = []
+private final class RecordingWebSocketTask: WebSocketTasking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _sentMessages: [URLSessionWebSocketTask.Message] = []
+    private var queuedSendErrors: [Error] = []
+    private var receiveContinuations: [CheckedContinuation<URLSessionWebSocketTask.Message, Error>] = []
+    private var bufferedReceives: [Result<URLSessionWebSocketTask.Message, Error>] = []
+    // Parked-send support: when `holdSends` is set, `send()` suspends until `completeHeldSend(error:)`
+    // resolves it. This recreates the old "in-flight send across a disconnect / stale connection"
+    // window that the non-suspending fast path collapses, so the late-completion / disconnect-restore
+    // tests can still exercise the stale-connection guard.
+    private var holdSends = false
+    private var heldSendContinuations: [CheckedContinuation<Void, Error>] = []
     weak var lifecycleObserver: (any WebSocketLifecycleObserving)?
+
+    var sentMessages: [URLSessionWebSocketTask.Message] { lock.withLock { _sentMessages } }
 
     func resume() {}
 
@@ -5793,28 +5904,73 @@ private final class RecordingWebSocketTask: WebSocketTasking {
         lifecycleObserver?.webSocketDidFail(taskID: ObjectIdentifier(self), message: message)
     }
 
-    func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping @Sendable (Error?) -> Void) {
-        sentMessages.append(message)
-        sendCompletions.append(completionHandler)
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        let parked: Bool = lock.withLock {
+            _sentMessages.append(message)
+            return holdSends
+        }
+        if parked {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.withLock { heldSendContinuations.append(continuation) }
+            }
+            return
+        }
+        let error: Error? = lock.withLock {
+            queuedSendErrors.isEmpty ? nil : queuedSendErrors.removeFirst()
+        }
+        if let error { throw error }
     }
 
-    func receive(completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void) {
-        receiveCompletions.append(completionHandler)
+    /// Park subsequent sends so the send remains in flight (suspended) until `completeHeldSend(error:)`.
+    func holdNextSends() { lock.withLock { holdSends = true } }
+
+    /// Resolve the oldest parked send, modeling a late send completion that arrives after the socket
+    /// changed; `error == nil` completes it successfully. Waits (cooperative yields) for a parked send.
+    func completeHeldSend(error: Error?) async {
+        while true {
+            let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+                heldSendContinuations.isEmpty ? nil : heldSendContinuations.removeFirst()
+            }
+            if let continuation {
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                return
+            }
+            await Task.yield()
+        }
     }
 
-    func receiveString(_ string: String) {
-        let completion = receiveCompletions.removeFirst()
-        completion(.success(.string(string)))
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URLSessionWebSocketTask.Message, Error>) in
+            let buffered: Result<URLSessionWebSocketTask.Message, Error>? = lock.withLock {
+                if bufferedReceives.isEmpty {
+                    receiveContinuations.append(continuation)
+                    return nil
+                }
+                return bufferedReceives.removeFirst()
+            }
+            if let buffered { continuation.resume(with: buffered) }
+        }
     }
 
-    func receiveFailure(_ error: Error) {
-        let completion = receiveCompletions.removeFirst()
-        completion(.failure(error))
-    }
+    /// Queue an error so the NEXT send throws (replaces the old `completeLastSend(error:)` failure path).
+    func failNextSend(_ error: Error) { lock.withLock { queuedSendErrors.append(error) } }
 
-    func completeLastSend(error: Error?) {
-        let completion = sendCompletions.removeLast()
-        completion(error)
+    /// Feed an inbound frame; waits (cooperative yields) until the connection's receive() is pending, then resolves it.
+    func receiveString(_ string: String) async { await resumeReceive(.success(.string(string))) }
+
+    func receiveFailure(_ error: Error) async { await resumeReceive(.failure(error)) }
+
+    private func resumeReceive(_ result: Result<URLSessionWebSocketTask.Message, Error>) async {
+        while true {
+            let continuation: CheckedContinuation<URLSessionWebSocketTask.Message, Error>? = lock.withLock {
+                receiveContinuations.isEmpty ? nil : receiveContinuations.removeFirst()
+            }
+            if let continuation {
+                continuation.resume(with: result)
+                return
+            }
+            await Task.yield()
+        }
     }
 }
 

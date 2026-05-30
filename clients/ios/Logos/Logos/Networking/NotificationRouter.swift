@@ -23,9 +23,9 @@ protocol NotificationRouterHost: AnyObject {
     /// Kick a fresh connect attempt when a route arrives while disconnected (mirrors `LogosClient.connect()`).
     func notificationConnect()
     /// Send a notification-subsystem frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool
     /// Request a message backfill window (mirrors `LogosClient.requestMessages(afterServerSeq:)`).
-    func notificationRequestMessages(afterServerSeq: Int)
+    func notificationRequestMessages(afterServerSeq: Int) async
     /// The newest persisted `server_seq` for a project (mirrors `LogosClient.latestServerSeq(projectKey:)`).
     func notificationLatestServerSeq(projectKey: String) -> Int
     /// Look up a specific stored message (mirrors `store.message(projectKey:sessionID:messageID:)`).
@@ -39,7 +39,7 @@ protocol NotificationRouterHost: AnyObject {
     var notificationVisibleMessages: [LogosMessage] { get }
     /// Route an auto-play request to the audio coordinator, threading the autoplay/route keys so a
     /// failed send releases them (mirrors `audioCoordinator.requestPlayback(message:mode:"final_auto":…)`).
-    @discardableResult func requestAutoPlay(message: LogosMessage, autoPlayKey: String?, notificationRouteKey: String?) -> Bool
+    @discardableResult func requestAutoPlay(message: LogosMessage, autoPlayKey: String?, notificationRouteKey: String?) async -> Bool
 }
 
 /// Owns the APNS/notification-routing + auto-play subsystem lifted out of `LogosClient` (WS1 P5): the
@@ -80,7 +80,7 @@ final class NotificationRouter {
 
     // MARK: - Device registration
 
-    func registerDevice(apnsToken: String?) {
+    func registerDevice(apnsToken: String?) async {
         if let token = apnsToken, token.isEmpty == false {
             pendingAPNSToken = token
             LogosConnectionLog.logger.info("Stored pending APNS token for registration token_bytes=\(token.utf8.count, privacy: .public)")
@@ -99,7 +99,7 @@ final class NotificationRouter {
         if let token = pendingAPNSToken, token.isEmpty == false {
             payload["apns_token"] = token
         }
-        let sent = host?.sendNotificationFrame([
+        let sent = await host?.sendNotificationFrame([
             "type": "register_device",
             "request_id": UUID().uuidString,
             "device_id": deviceID,
@@ -111,8 +111,8 @@ final class NotificationRouter {
 
     /// Re-arm device registration with whatever pending token is already stored (mirrors the client's
     /// former `registerDevice(apnsToken: pendingAPNSToken)` dispatch from the `hello` handler).
-    func registerDeviceWithPendingToken() {
-        registerDevice(apnsToken: nil)
+    func registerDeviceWithPendingToken() async {
+        await registerDevice(apnsToken: nil)
     }
 
     /// Forget the pending APNS token once the adapter confirms registration (mirrors the client's
@@ -123,34 +123,34 @@ final class NotificationRouter {
 
     // MARK: - Notification routing
 
-    func handleNotificationRoute(_ route: LogosNotificationRoute) {
+    func handleNotificationRoute(_ route: LogosNotificationRoute) async {
         host?.notificationActiveProjectKey = route.projectKey
         pendingNotificationRoute = PendingNotificationRouteState(route: route)
         if host?.notificationIsConnected != true || host?.notificationHasOpenSocket != true {
             host?.notificationConnect()
         } else {
-            processPendingNotificationRouteIfReady()
+            await processPendingNotificationRouteIfReady()
         }
     }
 
-    func updateSceneActivationForPlayback(isActive: Bool) {
+    func updateSceneActivationForPlayback(isActive: Bool) async {
         let wasActive = notificationPlaybackSceneActive
         notificationPlaybackSceneActive = isActive
         guard isActive, wasActive == false else { return }
-        processPendingNotificationRouteIfReady()
-        processPendingFinalAutoPlayIfReady()
+        await processPendingNotificationRouteIfReady()
+        await processPendingFinalAutoPlayIfReady()
     }
 
-    func processPendingNotificationRouteIfReady() {
+    func processPendingNotificationRouteIfReady() async {
         guard host?.notificationIsConnected == true, host?.notificationHasOpenSocket == true else { return }
         guard var pending = pendingNotificationRoute else { return }
         if pending.didRequestMessages == false {
-            host?.notificationRequestMessages(afterServerSeq: notificationFetchAfterServerSeq(for: pending.route))
+            await host?.notificationRequestMessages(afterServerSeq: notificationFetchAfterServerSeq(for: pending.route))
             pending.didRequestMessages = true
             pendingNotificationRoute = pending
         }
         if pending.route.kind.lowercased() == PrivateNotificationRouteKind.finished {
-            fulfillPendingFinishedNotificationRouteIfPossible()
+            await fulfillPendingFinishedNotificationRouteIfPossible()
         } else {
             pendingNotificationRoute = nil
         }
@@ -174,7 +174,7 @@ final class NotificationRouter {
         ].joined(separator: "|")
     }
 
-    func fulfillPendingFinishedNotificationRouteIfPossible() {
+    func fulfillPendingFinishedNotificationRouteIfPossible() async {
         guard let pending = pendingNotificationRoute else { return }
         let route = pending.route
         guard route.kind.lowercased() == PrivateNotificationRouteKind.finished else { return }
@@ -186,9 +186,17 @@ final class NotificationRouter {
         guard let message = notificationFinalMessage(for: route) else { return }
         anchorNotificationRouteMessage(message, routeKey: routeKey)
         guard notificationPlaybackSceneActive else { return }
-        guard requestNotificationPlayback(message, routeKey: routeKey) else { return }
+        // Mark the route consumed + fulfilled *before* awaiting the playback send: the inline
+        // failure callback (which releases `fulfilledNotificationRouteKeys` for retry) now resolves
+        // within `await requestNotificationPlayback`, so the key must already be recorded. A
+        // pre-send failure rolls both back so the route can be retried.
         pendingNotificationRoute = nil
         fulfilledNotificationRouteKeys.insert(routeKey)
+        let started = await requestNotificationPlayback(message, routeKey: routeKey)
+        if started == false {
+            fulfilledNotificationRouteKeys.remove(routeKey)
+            pendingNotificationRoute = pending
+        }
     }
 
     private func anchorNotificationRouteMessage(_ message: LogosMessage, routeKey: String) {
@@ -271,12 +279,12 @@ final class NotificationRouter {
     // MARK: - Auto-play
 
     @discardableResult
-    private func requestNotificationPlayback(_ message: LogosMessage, routeKey: String) -> Bool {
-        requestFinalAutoPlayback(message, notificationRouteKey: routeKey)
+    private func requestNotificationPlayback(_ message: LogosMessage, routeKey: String) async -> Bool {
+        await requestFinalAutoPlayback(message, notificationRouteKey: routeKey)
     }
 
     @discardableResult
-    private func requestFinalAutoPlayback(_ message: LogosMessage, notificationRouteKey: String? = nil) -> Bool {
+    private func requestFinalAutoPlayback(_ message: LogosMessage, notificationRouteKey: String? = nil) async -> Bool {
         let key = message.id
         guard autoPlayedMessageKeys.contains(key) == false else {
             if pendingFinalAutoPlayMessage?.id == key {
@@ -284,22 +292,26 @@ final class NotificationRouter {
             }
             return true
         }
-        let sent = host?.requestAutoPlay(message: message, autoPlayKey: key, notificationRouteKey: notificationRouteKey) ?? false
-        if sent {
-            autoPlayedMessageKeys.insert(key)
-            if pendingFinalAutoPlayMessage?.id == key {
-                pendingFinalAutoPlayMessage = nil
-            }
+        // Mark the message auto-played *before* awaiting the send: the playback send (and its inline
+        // failure callback, which releases this key for retry) now resolves within `await
+        // requestAutoPlay`, so the key must already be recorded. A pre-send failure rolls it back.
+        autoPlayedMessageKeys.insert(key)
+        if pendingFinalAutoPlayMessage?.id == key {
+            pendingFinalAutoPlayMessage = nil
+        }
+        let sent = await host?.requestAutoPlay(message: message, autoPlayKey: key, notificationRouteKey: notificationRouteKey) ?? false
+        if sent == false {
+            autoPlayedMessageKeys.remove(key)
         }
         return sent
     }
 
-    func processPendingFinalAutoPlayIfReady() {
+    func processPendingFinalAutoPlayIfReady() async {
         guard notificationPlaybackSceneActive else { return }
         guard host?.notificationIsConnected == true, host?.notificationHasOpenSocket == true else { return }
         guard let message = pendingFinalAutoPlayMessage else { return }
         guard message.projectKey == host?.notificationActiveProjectKey else { return }
-        _ = requestFinalAutoPlayback(message)
+        _ = await requestFinalAutoPlayback(message)
     }
 
     private func notificationFinalMessage(for route: LogosNotificationRoute) -> LogosMessage? {
@@ -331,14 +343,14 @@ final class NotificationRouter {
     /// the run-reconciliation gate (runStatus/progress/outstanding ids) because it is driven from the
     /// `state_update` pipeline, and calls here once the message has been accepted for auto-play. Owns
     /// the auto-play dedupe + scene-active deferral that this router now holds.
-    func autoPlayLiveAssistantMessageIfNeeded(_ message: LogosMessage) {
+    func autoPlayLiveAssistantMessageIfNeeded(_ message: LogosMessage) async {
         let key = message.id
         guard autoPlayedMessageKeys.contains(key) == false else { return }
         guard notificationPlaybackSceneActive else {
             pendingFinalAutoPlayMessage = message
             return
         }
-        _ = requestFinalAutoPlayback(message)
+        _ = await requestFinalAutoPlayback(message)
     }
 
     // MARK: - Audio ↔ notification key clearing

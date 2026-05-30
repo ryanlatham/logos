@@ -19,7 +19,7 @@ protocol InteractionControllerHost: AnyObject {
     /// `ensureConnectedForUserAction`, including its error side effect when not connected).
     @discardableResult func ensureInteractionConnected(_ action: String) -> Bool
     /// Send an interaction-response frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool
     /// Cancel the stale-silence watchdog (mirrors `LogosClient.suspendStaleTimeout`).
     func suspendInteractionStaleTimeout()
     /// Show the transient fast-ack banner (mirrors `LogosClient.setTransientAck`).
@@ -97,11 +97,16 @@ final class InteractionController {
 
     // MARK: - View-facing interaction actions
 
-    func approveCurrentRequest() {
+    func approveCurrentRequest() async {
         guard let approvalCard else { return }
         guard host?.interactionRunStatus != .cancelling else { return }
         guard host?.ensureInteractionConnected("approve request") == true else { return }
-        let sent = host?.sendInteractionFrame([
+        // Apply the pending-response + ack state *before* awaiting the send: the inline send/failure
+        // callback now resolves within `await sendInteractionFrame`, and the failure handler clears
+        // this state, so it must already be in place. A pre-send validation failure rolls it back.
+        pendingInteractionResponseID = approvalCard.id
+        host?.setInteractionTransientAck("Approved. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
+        let sent = await host?.sendInteractionFrame([
             "type": "approval_response",
             "request_id": approvalCard.id,
             "device_id": host?.interactionDeviceID ?? "",
@@ -111,17 +116,18 @@ final class InteractionController {
             guard case .failure = result else { return }
             self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
         } ?? false
-        if sent {
-            pendingInteractionResponseID = approvalCard.id
-            host?.setInteractionTransientAck("Approved. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
+        if sent == false {
+            clearPendingInteractionResponse(requestID: approvalCard.id, projectKey: approvalCard.projectKey)
         }
     }
 
-    func denyCurrentRequest() {
+    func denyCurrentRequest() async {
         guard let approvalCard else { return }
         guard host?.interactionRunStatus != .cancelling else { return }
         guard host?.ensureInteractionConnected("deny request") == true else { return }
-        let sent = host?.sendInteractionFrame([
+        pendingInteractionResponseID = approvalCard.id
+        host?.setInteractionTransientAck("Denied. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
+        let sent = await host?.sendInteractionFrame([
             "type": "approval_response",
             "request_id": approvalCard.id,
             "device_id": host?.interactionDeviceID ?? "",
@@ -131,20 +137,21 @@ final class InteractionController {
             guard case .failure = result else { return }
             self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
         } ?? false
-        if sent {
-            pendingInteractionResponseID = approvalCard.id
-            host?.setInteractionTransientAck("Denied. Waiting for Hermes…", id: approvalCard.id, projectKey: approvalCard.projectKey)
+        if sent == false {
+            clearPendingInteractionResponse(requestID: approvalCard.id, projectKey: approvalCard.projectKey)
         }
     }
 
     @discardableResult
-    func answerClarification(_ text: String) -> Bool {
+    func answerClarification(_ text: String) async -> Bool {
         guard let clarifyCard else { return false }
         guard host?.interactionRunStatus != .cancelling else { return false }
         guard host?.ensureInteractionConnected("answer clarification") == true else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        let sent = host?.sendInteractionFrame([
+        pendingInteractionResponseID = clarifyCard.id
+        host?.setInteractionTransientAck("Clarification sent. Waiting for Hermes…", id: clarifyCard.id, projectKey: clarifyCard.projectKey)
+        let sent = await host?.sendInteractionFrame([
             "type": "clarify_response",
             "request_id": clarifyCard.id,
             "device_id": host?.interactionDeviceID ?? "",
@@ -157,9 +164,8 @@ final class InteractionController {
             guard case .failure = result else { return }
             self?.clearPendingInteractionResponse(requestID: requestID, projectKey: projectKey)
         } ?? false
-        if sent {
-            pendingInteractionResponseID = clarifyCard.id
-            host?.setInteractionTransientAck("Clarification sent. Waiting for Hermes…", id: clarifyCard.id, projectKey: clarifyCard.projectKey)
+        if sent == false {
+            clearPendingInteractionResponse(requestID: clarifyCard.id, projectKey: clarifyCard.projectKey)
         }
         return sent
     }

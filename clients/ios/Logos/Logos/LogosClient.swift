@@ -151,7 +151,7 @@ final class LogosClient {
     }
 
     @discardableResult
-    func sendText(_ text: String) -> Bool {
+    func sendText(_ text: String) async -> Bool {
         guard ensureConnectedForUserAction("send a message") else { return false }
         guard runStatus != .cancelling else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -159,7 +159,19 @@ final class LogosClient {
         let projectKey = activeProjectKey
         let pending = LogosMessage.pending(projectKey: projectKey, content: trimmed)
         let requestID = UUID().uuidString
-        let sent = sendFrame([
+        // Apply the optimistic UI state *before* awaiting the send: with async transport the
+        // send (and its inline failure callback) now resolves within `await sendFrame`, so the
+        // pending message / run state must already be in place for the failure handler to roll
+        // it back. A pre-send validation failure (`sent == false`) undoes it below.
+        progressActivityManager.clearProgressActivity()
+        progressActivityManager.startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .text(trimmed))
+        progressActivityManager.unsuppressRunRequestID(requestID)
+        outstandingOutboundResponseRequestIDs.insert(requestID)
+        pendingOutboundResponseRequestID = requestID
+        messageManager.addPendingMessage(pending)
+        runStatus = .running
+        scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
+        let sent = await sendFrame([
             "type": "text_input",
             "request_id": requestID,
             "device_id": settings.deviceID,
@@ -174,17 +186,11 @@ final class LogosClient {
             self?.handlePendingTextSendFailure(messageID: pending.messageID, projectKey: projectKey, requestID: requestID, error: error)
         }
         if sent {
-            progressActivityManager.clearProgressActivity()
-            progressActivityManager.startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .text(trimmed))
-            progressActivityManager.unsuppressRunRequestID(requestID)
-            outstandingOutboundResponseRequestIDs.insert(requestID)
-            pendingOutboundResponseRequestID = requestID
-            messageManager.addPendingMessage(pending)
-            runStatus = .running
-            scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
             if Self.shouldRefreshCommandCatalog(afterSending: trimmed) {
-                requestCommandCatalog()
+                await requestCommandCatalog()
             }
+        } else {
+            handlePendingTextSendFailure(messageID: pending.messageID, projectKey: projectKey, requestID: requestID, error: LogosSocketSendError.staleConnection)
         }
         return sent
     }
@@ -195,7 +201,7 @@ final class LogosClient {
     }
 
     @discardableResult
-    func sendSpeech(text: String, isFinal: Bool, inputID: String, partialSeq: Int, startedAtMilliseconds: Int64) -> Bool {
+    func sendSpeech(text: String, isFinal: Bool, inputID: String, partialSeq: Int, startedAtMilliseconds: Int64) async -> Bool {
         guard ensureConnectedForUserAction(isFinal ? "send speech" : "stream speech") else { return false }
         guard runStatus != .cancelling else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -208,11 +214,22 @@ final class LogosClient {
             text: trimmed,
             reason: "The socket closed before Logos confirmed the final speech frame was sent."
         )
+        let requestID = UUID().uuidString
+        // Apply the final-speech optimistic UI state *before* awaiting the send (see `sendText`):
+        // the inline send/failure callback resolves within `await sendFrame`, so the pending
+        // message / run state must already be in place for the failure handler to roll it back.
         if isFinal {
             inFlightFinalSpeechDrafts[inputID] = failedDraft
+            progressActivityManager.clearProgressActivity()
+            progressActivityManager.startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .speech(text: trimmed))
+            progressActivityManager.unsuppressRunRequestID(requestID)
+            outstandingOutboundResponseRequestIDs.insert(requestID)
+            pendingOutboundResponseRequestID = requestID
+            messageManager.addPendingMessage(pending)
+            runStatus = .running
+            scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
         }
-        let requestID = UUID().uuidString
-        let sent = sendFrame(LogosSpeechFrame.make(
+        let sent = await sendFrame(LogosSpeechFrame.make(
             text: trimmed,
             isFinal: isFinal,
             inputID: inputID,
@@ -231,23 +248,22 @@ final class LogosClient {
             }
         }
         if sent == false, isFinal {
+            // Pre-send validation failed (the inline failure callback never ran): roll back the
+            // optimistic state without surfacing an undelivered-draft/error banner (mirrors the
+            // former `sent == false, isFinal` branch that only dropped the in-flight draft).
             inFlightFinalSpeechDrafts.removeValue(forKey: inputID)
-        } else if sent, isFinal {
-            progressActivityManager.clearProgressActivity()
-            progressActivityManager.startProgressActivity(requestID: requestID, projectKey: projectKey, retryRequest: .speech(text: trimmed))
-            progressActivityManager.unsuppressRunRequestID(requestID)
-            outstandingOutboundResponseRequestIDs.insert(requestID)
-            pendingOutboundResponseRequestID = requestID
-            messageManager.addPendingMessage(pending)
-            runStatus = .running
-            scheduleStaleTimeout(requestID: requestID, projectKey: projectKey)
+            clearOutstandingOutboundRequestID(requestID)
+            progressActivityManager.clearProgressActivity(requestID: requestID)
+            messageManager.removePendingMessage(messageID: inputID)
+            messageManager.refreshMessages()
+            suspendStaleTimeout()
         }
         return sent
     }
 
     @discardableResult
-    func retryProgressActivity() -> Bool {
-        progressActivityManager.retryProgressActivity()
+    func retryProgressActivity() async -> Bool {
+        await progressActivityManager.retryProgressActivity()
     }
 
     func clearUndeliveredSpeechDraft(id: String) {
@@ -255,9 +271,9 @@ final class LogosClient {
         undeliveredSpeechDraft = nil
     }
 
-    func requestProjects() {
+    func requestProjects() async {
         LogosConnectionLog.logger.info("Requesting project list active_project=\(self.activeProjectKey, privacy: .public)")
-        sendFrame([
+        await sendFrame([
             "type": "list_projects",
             "request_id": UUID().uuidString,
             "device_id": settings.deviceID,
@@ -266,16 +282,16 @@ final class LogosClient {
     }
 
 
-    func registerDevice(apnsToken: String?) {
-        notificationRouter.registerDevice(apnsToken: apnsToken)
+    func registerDevice(apnsToken: String?) async {
+        await notificationRouter.registerDevice(apnsToken: apnsToken)
     }
 
-    func handleNotificationRoute(_ route: LogosNotificationRoute) {
-        notificationRouter.handleNotificationRoute(route)
+    func handleNotificationRoute(_ route: LogosNotificationRoute) async {
+        await notificationRouter.handleNotificationRoute(route)
     }
 
-    func updateSceneActivationForPlayback(isActive: Bool) {
-        notificationRouter.updateSceneActivationForPlayback(isActive: isActive)
+    func updateSceneActivationForPlayback(isActive: Bool) async {
+        await notificationRouter.updateSceneActivationForPlayback(isActive: isActive)
     }
 
     func applyPairingRoute(_ route: LogosPairingRoute) async {
@@ -310,11 +326,11 @@ final class LogosClient {
     }
 
     @discardableResult
-    func createProject(title: String) -> Bool {
+    func createProject(title: String) async -> Bool {
         guard ensureConnectedForUserAction("create a project") else { return false }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        return sendFrame([
+        return await sendFrame([
             "type": "new_project",
             "request_id": UUID().uuidString,
             "device_id": settings.deviceID,
@@ -322,46 +338,58 @@ final class LogosClient {
         ])
     }
 
-    func switchProject(_ projectKey: String) {
+    func switchProject(_ projectKey: String) async {
         let requestID = UUID().uuidString
         pendingProjectSwitchRequestID = requestID
         pendingProjectSwitchTarget = projectKey
         activeProjectKey = projectKey
-        sendFrame([
+        await sendFrame([
             "type": "switch_project",
             "request_id": requestID,
             "device_id": settings.deviceID,
             "payload": ["project_key": projectKey]
         ])
-        requestMessages(afterServerSeq: 0)
+        await requestMessages(afterServerSeq: 0)
     }
 
-    func requestMessages(afterServerSeq: Int) {
-        messageManager.requestMessages(afterServerSeq: afterServerSeq)
+    func requestMessages(afterServerSeq: Int) async {
+        await messageManager.requestMessages(afterServerSeq: afterServerSeq)
     }
 
     func completeThreadFocusRequest(id: String) {
         notificationRouter.completeThreadFocusRequest(id: id)
     }
 
-    func approveCurrentRequest() {
-        interactionController.approveCurrentRequest()
+    func approveCurrentRequest() async {
+        await interactionController.approveCurrentRequest()
     }
 
-    func denyCurrentRequest() {
-        interactionController.denyCurrentRequest()
+    func denyCurrentRequest() async {
+        await interactionController.denyCurrentRequest()
     }
 
     @discardableResult
-    func answerClarification(_ text: String) -> Bool {
-        interactionController.answerClarification(text)
+    func answerClarification(_ text: String) async -> Bool {
+        await interactionController.answerClarification(text)
     }
 
-    func cancelRun() {
+    func cancelRun() async {
         guard ensureConnectedForUserAction("stop the run") else { return }
         guard runStatus != .cancelling else { return }
         let requestID = UUID().uuidString
-        let sent = sendFrame([
+        let previousRunStatus = runStatus
+        // Apply the cancelling state *before* awaiting the send: the inline send/failure callback now
+        // resolves within `await sendFrame`, and the failure handler is gated on
+        // `runStatus == .cancelling && pendingCancelRequestID == requestID`, so that state must
+        // already be in place. A pre-send validation failure (`sent == false`) rolls it back below.
+        progressActivityManager.suppressCurrentRunRequestIDs()
+        requiresScopedLiveResponse = true
+        pendingCancelRequestID = requestID
+        runStatus = .cancelling
+        suspendStaleTimeout()
+        interactionController.clearInteractionStateForCancel()
+        clearAck()
+        let sent = await sendFrame([
             "type": "run_cancel",
             "request_id": requestID,
             "device_id": settings.deviceID,
@@ -375,19 +403,20 @@ final class LogosClient {
             self?.recordError(error.localizedDescription)
             self?.runStatus = .error
         }
-        if sent {
-            progressActivityManager.suppressCurrentRunRequestIDs()
-            requiresScopedLiveResponse = true
-            pendingCancelRequestID = requestID
-            runStatus = .cancelling
-            suspendStaleTimeout()
-            interactionController.clearInteractionStateForCancel()
-            clearAck()
+        if sent == false {
+            // Pre-send validation failed (the inline failure callback never ran): undo the
+            // cancelling state so the run is left as it was.
+            if pendingCancelRequestID == requestID {
+                pendingCancelRequestID = nil
+            }
+            if runStatus == .cancelling {
+                runStatus = previousRunStatus
+            }
         }
     }
 
-    func playback(message: LogosMessage) {
-        audioCoordinator.playback(message: message)
+    func playback(message: LogosMessage) async {
+        await audioCoordinator.playback(message: message)
     }
 
     func pausePlayback() {
@@ -492,11 +521,11 @@ final class LogosClient {
         _ frame: [String: Any],
         requiresAuthentication: Bool = true,
         onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)? = nil
-    ) -> Bool {
-        logosConnection.sendFrame(frame, requiresAuthentication: requiresAuthentication, onCompletion: onCompletion)
+    ) async -> Bool {
+        await logosConnection.sendFrame(frame, requiresAuthentication: requiresAuthentication, onCompletion: onCompletion)
     }
 
-    func handleFrameString(_ string: String) {
+    func handleFrameString(_ string: String) async {
         guard string.utf8.count <= Self.maxInboundFrameBytes else {
             LogosConnectionLog.logger.error("Inbound frame rejected because it exceeded size limit bytes=\(string.utf8.count, privacy: .public)")
             return
@@ -530,9 +559,9 @@ final class LogosClient {
         }
         switch type {
         case "hello":
-            logosConnection.handleHelloFrame(root)
+            await logosConnection.handleHelloFrame(root)
         case "registered":
-            logosConnection.handleRegisteredFrame(root)
+            await logosConnection.handleRegisteredFrame(root)
         case "projects_list":
             handleProjectsList(root)
         case "commands_list":
@@ -540,9 +569,9 @@ final class LogosClient {
         case "commands_complete_result":
             handleCommandsCompleteResult(root)
         case "messages_batch":
-            handleMessagesBatch(root)
+            await handleMessagesBatch(root)
         case "state_update":
-            handleStateUpdate(root)
+            await handleStateUpdate(root)
         case "run_status":
             handleRunStatus(root)
         case "approval_request":
@@ -622,7 +651,7 @@ final class LogosClient {
     }
 
 
-    private func handleMessagesBatch(_ root: [String: Any]) {
+    private func handleMessagesBatch(_ root: [String: Any]) async {
         guard let payload = root["payload"] as? [String: Any] else { return }
         let rawMessages = payload["messages"] as? [[String: Any]] ?? []
         let messageDecode = LogosWireDecoder.decodeList(rawMessages, LogosMessage.from(dictionary:))
@@ -703,7 +732,7 @@ final class LogosClient {
             }
         }
         messageManager.refreshMessages()
-        notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
+        await notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
     }
 
     private func handleReplayedRunStatus(
@@ -878,7 +907,7 @@ final class LogosClient {
         }
     }
 
-    private func handleStateUpdate(_ root: [String: Any]) {
+    private func handleStateUpdate(_ root: [String: Any]) async {
         guard let payload = root["payload"] as? [String: Any] else { return }
         let op = payload["op"] as? String
         if op == "fast_ack" {
@@ -920,11 +949,11 @@ final class LogosClient {
                 runStatus = .idle
             }
             messageManager.applyPersistedMessage(message)
-            notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
+            await notificationRouter.fulfillPendingFinishedNotificationRouteIfPossible()
             if message.projectKey == activeProjectKey && message.role != "user" && (op == "message_appended" || op == "message_updated") && progressActivityManager.isSuppressedRunRequestID(messageRequestID) == false {
                 clearAck()
             }
-            maybeAutoPlayLiveAssistantMessage(message, op: op, requestID: messageRequestID, matchedCurrentRun: didClearProgressActivity)
+            await maybeAutoPlayLiveAssistantMessage(message, op: op, requestID: messageRequestID, matchedCurrentRun: didClearProgressActivity)
         }
     }
 
@@ -1029,7 +1058,7 @@ final class LogosClient {
         }
     }
 
-    private func maybeAutoPlayLiveAssistantMessage(_ message: LogosMessage, op: String?, requestID: String?, matchedCurrentRun: Bool = false) {
+    private func maybeAutoPlayLiveAssistantMessage(_ message: LogosMessage, op: String?, requestID: String?, matchedCurrentRun: Bool = false) async {
         guard connectionState == .connected, logosConnection.hasOpenSocket else { return }
         guard message.projectKey == activeProjectKey else { return }
         guard runStatus != .cancelling else { return }
@@ -1059,7 +1088,7 @@ final class LogosClient {
             matchedActiveRun = true
         }
         if requiresScopedLiveResponse, matchedActiveRun == false { return }
-        notificationRouter.autoPlayLiveAssistantMessageIfNeeded(message)
+        await notificationRouter.autoPlayLiveAssistantMessageIfNeeded(message)
     }
 
     private func upsertProject(_ project: LogosProject) {
@@ -1137,8 +1166,8 @@ extension LogosClient: MessageManagerHost {
     var messageDeviceID: String { settings.deviceID }
 
     @discardableResult
-    func sendMessageFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
-        sendFrame(frame, onCompletion: onCompletion)
+    func sendMessageFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool {
+        await sendFrame(frame, onCompletion: onCompletion)
     }
 
     func messageAnchoredMessages(forProjectKey projectKey: String) -> [LogosMessage] {
@@ -1171,8 +1200,8 @@ extension LogosClient: AudioCoordinatorHost {
     }
 
     @discardableResult
-    func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
-        sendFrame(frame, onCompletion: onCompletion)
+    func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool {
+        await sendFrame(frame, onCompletion: onCompletion)
     }
 
     func audioFrameProjectKey(_ root: [String: Any]) -> String? {
@@ -1270,15 +1299,15 @@ extension LogosClient: ProgressActivityManagerHost {
     }
 
     @discardableResult
-    func sendProgressText(_ text: String) -> Bool {
-        sendText(text)
+    func sendProgressText(_ text: String) async -> Bool {
+        await sendText(text)
     }
 
     @discardableResult
-    func sendProgressSpeech(text: String) -> Bool {
+    func sendProgressSpeech(text: String) async -> Bool {
         let inputID = "voice-retry-\(UUID().uuidString)"
         let startedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1000)
-        return sendSpeech(text: text, isFinal: true, inputID: inputID, partialSeq: 0, startedAtMilliseconds: startedAtMilliseconds)
+        return await sendSpeech(text: text, isFinal: true, inputID: inputID, partialSeq: 0, startedAtMilliseconds: startedAtMilliseconds)
     }
 
     func reconnectForRetry() {
@@ -1333,8 +1362,8 @@ extension LogosClient: InteractionControllerHost {
     }
 
     @discardableResult
-    func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
-        sendFrame(frame, onCompletion: onCompletion)
+    func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool {
+        await sendFrame(frame, onCompletion: onCompletion)
     }
 
     func suspendInteractionStaleTimeout() {
@@ -1379,12 +1408,12 @@ extension LogosClient: NotificationRouterHost {
     }
 
     @discardableResult
-    func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool {
-        sendFrame(frame, onCompletion: onCompletion)
+    func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) async -> Bool {
+        await sendFrame(frame, onCompletion: onCompletion)
     }
 
-    func notificationRequestMessages(afterServerSeq: Int) {
-        requestMessages(afterServerSeq: afterServerSeq)
+    func notificationRequestMessages(afterServerSeq: Int) async {
+        await requestMessages(afterServerSeq: afterServerSeq)
     }
 
     func notificationLatestServerSeq(projectKey: String) -> Int {
@@ -1406,8 +1435,8 @@ extension LogosClient: NotificationRouterHost {
     var notificationVisibleMessages: [LogosMessage] { messages }
 
     @discardableResult
-    func requestAutoPlay(message: LogosMessage, autoPlayKey: String?, notificationRouteKey: String?) -> Bool {
-        audioCoordinator.requestPlayback(message: message, mode: "final_auto", autoPlayKey: autoPlayKey, notificationRouteKey: notificationRouteKey)
+    func requestAutoPlay(message: LogosMessage, autoPlayKey: String?, notificationRouteKey: String?) async -> Bool {
+        await audioCoordinator.requestPlayback(message: message, mode: "final_auto", autoPlayKey: autoPlayKey, notificationRouteKey: notificationRouteKey)
     }
 }
 
@@ -1443,8 +1472,8 @@ extension LogosClient: LogosConnectionHost {
 
     var connectionHasIncompleteProgressActivity: Bool { progressActivity?.isComplete == false }
 
-    func handleInboundFrameString(_ string: String) {
-        handleFrameString(string)
+    func handleInboundFrameString(_ string: String) async {
+        await handleFrameString(string)
     }
 
     func noteReconnectReplayRequestID(_ requestID: String) {
@@ -1455,17 +1484,17 @@ extension LogosClient: LogosConnectionHost {
         messageManager.latestServerSeq()
     }
 
-    func connectionDidCompleteHello() {
-        notificationRouter.registerDeviceWithPendingToken()
-        requestProjects()
-        notificationRouter.processPendingNotificationRouteIfReady()
-        notificationRouter.processPendingFinalAutoPlayIfReady()
+    func connectionDidCompleteHello() async {
+        await notificationRouter.registerDeviceWithPendingToken()
+        await requestProjects()
+        await notificationRouter.processPendingNotificationRouteIfReady()
+        await notificationRouter.processPendingFinalAutoPlayIfReady()
     }
 
-    func connectionDidRegister() {
+    func connectionDidRegister() async {
         notificationRouter.clearPendingAPNSToken()
-        notificationRouter.processPendingNotificationRouteIfReady()
-        notificationRouter.processPendingFinalAutoPlayIfReady()
+        await notificationRouter.processPendingNotificationRouteIfReady()
+        await notificationRouter.processPendingFinalAutoPlayIfReady()
     }
 
     func connectionApplyClientConfig(from root: [String: Any]) {
