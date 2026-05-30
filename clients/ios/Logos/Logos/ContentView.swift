@@ -248,7 +248,6 @@ struct ContentView: View {
 
     @State private var draft = ""
     @State private var clarifyAnswer = ""
-    @State private var threadBubbleWidthBasis: CGFloat = 0
     @State private var voiceInput = VoiceInputController()
     @State private var appCoordinator = AppCoordinator()
     @AppStorage("logos.slashCommandRecents") private var slashCommandRecentsStorage = ""
@@ -471,156 +470,36 @@ struct ContentView: View {
     }
 
     private var thread: some View {
-        @Bindable var threadFollow = threadFollow
-        return ZStack(alignment: .bottom) {
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    timePill
-
-                    if client.messages.isEmpty, client.approvalCard == nil, client.clarifyCard == nil, client.connectionRetryState == nil {
-                        EmptyThreadGreeting(connectionState: client.connectionState)
-                    }
-
-                    ForEach(threadMessagesBeforeProgress) { message in
-                        messageBubble(message)
-                            .id(message.id)
-                    }
-
-                    if let progress = client.progressActivity {
-                        ProgressActivityCard(
-                            activity: progress,
-                            isWorking: isProgressWorking,
-                            canStop: canStopProgressRun,
-                            canRetry: canRetryProgressRun,
-                            onToggleExpanded: { client.toggleProgressActivityExpanded() },
-                            onStop: { Task { @MainActor in await client.cancelRun() } },
-                            onRetry: { Task { @MainActor in _ = await client.retryProgressActivity() } }
-                        )
-                        .id("progress-activity")
-                    }
-
-                    ForEach(threadMessagesAfterProgress) { message in
-                        messageBubble(message)
-                            .id(message.id)
-                    }
-
-                    if let voiceDraftText {
-                        DraftUserBubble(text: voiceDraftText)
-                            .id("voice-draft")
-                    }
-
-                    interactionCards
-
-                    if let ackText = client.ackText, ackText.isEmpty == false {
-                        ThinkingBubble(text: ackText)
-                            .id("ack")
-                    }
-
-                    if let retry = client.connectionRetryState {
-                        ConnectionRetryCard(state: retry)
-                            .id(retry.id)
-                    }
-
-                    if client.connectionRetryState == nil, let error = client.lastError, error.isEmpty == false {
-                        ErrorStrip(text: error)
-                            .id("error")
-                    }
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id("thread-bottom")
+        ThreadView(
+            threadFollow: threadFollow,
+            composerMode: composerMode,
+            voiceDraftText: voiceDraftText,
+            slashCommandMenuStateRawValue: slashCommandMenuState.rawValue,
+            slashCommandMenuHeight: slashCommandMenuHeight,
+            clarifyAnswer: $clarifyAnswer,
+            clarifyFocus: $focusedField,
+            onApprove: {
+                Task { @MainActor in
+                    await client.approveCurrentRequest()
+                    forceFollowThreadContent()
                 }
-                .scrollTargetLayout()
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.width
-                } action: { width in
-                    threadBubbleWidthBasis = width
+            },
+            onDeny: {
+                Task { @MainActor in
+                    await client.denyCurrentRequest()
+                    forceFollowThreadContent()
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, composerMode == .text ? 16 : 28)
-                .animation(.timingCurve(0.2, 0.7, 0.2, 1, duration: 0.26), value: composerMode)
-            }
-            .scrollPosition($threadFollow.threadScrollPosition)
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            .scrollDismissesKeyboard(.interactively)
-            .accessibilityIdentifier("conversationThreadScrollView")
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 4)
-                    .onChanged { _ in
-                        threadFollow.userInitiatedThreadScrollObserved = true
-                        if threadFollow.isThreadNearBottom == false {
-                            threadFollow.detachThreadFromAutoFollow(client: client, threadContentFingerprint: threadContentFingerprint)
-                        }
+            },
+            onClarifyChoice: { choice in
+                Task { @MainActor in
+                    if await client.answerClarification(choice) {
+                        forceFollowThreadContent()
                     }
-            )
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                ThreadAutoFollowPolicy.isNearBottom(
-                    distanceFromBottom: geometry.contentSize.height - geometry.visibleRect.maxY,
-                    visibleHeight: geometry.visibleRect.height
-                )
-            } action: { _, newValue in
-                threadFollow.handleThreadBottomProximityChangedAfterLayout(newValue, client: client, threadContentFingerprint: threadContentFingerprint)
-            }
-            .onScrollPhaseChange { _, newPhase in
-                threadFollow.threadScrollPhase = newPhase
-                threadFollow.handleThreadScrollPhaseChanged(newPhase, client: client, threadContentFingerprint: threadContentFingerprint)
-            }
-            .onChange(of: threadFollow.threadScrollPosition) { _, newValue in
-                threadFollow.handleThreadScrollPositionChanged(newValue, client: client, threadContentFingerprint: threadContentFingerprint)
-            }
-            .onAppear {
-                threadFollow.initializeThreadScrollIfNeeded(client: client, threadContentFingerprint: threadContentFingerprint, threadMessageFingerprint: threadMessageFingerprint)
-            }
-            .onDisappear {
-                threadFollow.cancelOnDisappear()
-            }
-            .onChange(of: client.activeProjectKey) { _, _ in
-                threadFollow.resetThreadScrollForProjectChange(client: client, threadContentFingerprint: threadContentFingerprint, threadMessageFingerprint: threadMessageFingerprint)
-            }
-            .onChange(of: threadTimelineSnapshot) { oldValue, newValue in
-                handleThreadTimelineSnapshotChanged(from: oldValue, to: newValue)
-            }
-
-            if threadFollow.shouldShowThreadNewUpdatesButton(threadContentFingerprint: threadContentFingerprint, threadMessageFingerprint: threadMessageFingerprint) {
-                threadNewUpdatesButton
-                    .padding(.bottom, 12)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-    }
-
-    private var progressInsertionIndex: Int? {
-        ThreadProgressPlacement.insertionIndex(
-            messages: client.messages,
-            completedFinalMessageID: client.progressActivity?.completedFinalMessageID
+                }
+            },
+            onClarifySubmit: submitClarificationAnswer,
+            onForceFollow: { forceFollowThreadContent() }
         )
-    }
-
-    private func handleThreadTimelineSnapshotChanged(
-        from oldValue: ThreadTimelineSnapshot,
-        to newValue: ThreadTimelineSnapshot
-    ) {
-        guard oldValue.contentFingerprint != newValue.contentFingerprint else { return }
-        threadFollow.handleThreadContentChanged(client: client, threadContentFingerprint: threadContentFingerprint, threadMessageFingerprint: threadMessageFingerprint)
-    }
-
-    private var threadMessagesBeforeProgress: [LogosMessage] {
-        guard let progressInsertionIndex else { return client.messages }
-        return Array(client.messages[..<progressInsertionIndex])
-    }
-
-    private var threadMessagesAfterProgress: [LogosMessage] {
-        guard let progressInsertionIndex else { return [] }
-        return Array(client.messages[progressInsertionIndex...])
-    }
-
-    private var threadMessageFingerprint: String {
-        threadTimelineSnapshot.messageFingerprint
-    }
-
-    private var threadContentFingerprint: Int {
-        threadTimelineSnapshot.threadContentSignature
     }
 
     private var voiceDraftText: String? {
@@ -735,123 +614,12 @@ struct ContentView: View {
         )
     }
 
-    private var threadNewUpdatesButton: some View {
-        let unseenThreadUpdateCount = threadFollow.unseenThreadUpdateCount(client: client)
-        return Button {
-            threadFollow.scrollThreadToBottom(animated: true, threadContentFingerprint: threadContentFingerprint)
-        } label: {
-            Label(ThreadUnseenPolicy.label(unseenCount: unseenThreadUpdateCount), systemImage: "arrow.down.circle.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.logosAmberOn)
-                .padding(.horizontal, 13)
-                .padding(.vertical, 9)
-                .background(Color.logosAmber, in: Capsule())
-                .shadow(color: Color.black.opacity(0.28), radius: 12, x: 0, y: 4)
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("threadNewUpdatesButton")
-        .accessibilityLabel(unseenThreadUpdateCount > 0
-            ? "Jump to latest, \(unseenThreadUpdateCount) new messages"
-            : "Jump to latest")
+    private var threadMessageFingerprint: String {
+        threadTimelineSnapshot.messageFingerprint
     }
 
-    private var timePill: some View {
-        Text("Today \(Date().formatted(date: .omitted, time: .shortened))")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.logosLabel3)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color.logosBG2.opacity(0.72), in: Capsule())
-    }
-
-    @ViewBuilder
-    private var interactionCards: some View {
-        if let approval = client.approvalCard {
-            ApprovalCardView(
-                approval: approval,
-                isPending: client.pendingInteractionResponseID == approval.id,
-                isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
-                onApprove: {
-                    Task { @MainActor in
-                        await client.approveCurrentRequest()
-                        forceFollowThreadContent()
-                    }
-                },
-                onDeny: {
-                    Task { @MainActor in
-                        await client.denyCurrentRequest()
-                        forceFollowThreadContent()
-                    }
-                }
-            )
-            .id(approval.id)
-        }
-
-        if let clarify = client.clarifyCard {
-            ClarifyCardView(
-                clarify: clarify,
-                answer: $clarifyAnswer,
-                isPending: client.pendingInteractionResponseID == clarify.id,
-                isConnected: client.connectionState == .connected && client.runStatus != .cancelling,
-                focused: $focusedField,
-                onChoice: { choice in
-                    Task { @MainActor in
-                        if await client.answerClarification(choice) {
-                            forceFollowThreadContent()
-                        }
-                    }
-                },
-                onFreeText: submitClarificationAnswer
-            )
-            .id(clarify.id)
-        }
-    }
-
-    private func messageBubble(_ message: LogosMessage) -> some View {
-        HStack(alignment: .bottom) {
-            if message.role == "user" { Spacer(minLength: 48) }
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text(message.content)
-                    .font(.system(size: 16, weight: message.role == "user" ? .medium : .regular))
-                    .lineSpacing(1)
-                    .foregroundStyle(message.role == "user" ? Color.logosAmberOn : Color.logosLabel)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier(message.content)
-                    .accessibilityLabel(messageBubbleAccessibilityLabel(message))
-
-                HStack(spacing: 8) {
-                    if message.status != "persisted" {
-                        Text(message.status)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(message.role == "user" ? Color.logosAmberOn.opacity(0.55) : Color.logosLabel3)
-                    }
-
-                    if message.role != "user", message.status == "persisted", message.isProgressUpdate == false {
-                        Button {
-                            Task { @MainActor in await client.playback(message: message) }
-                        } label: {
-                            Label("Play", systemImage: "play.circle")
-                                .labelStyle(.titleAndIcon)
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Color.logosLabel2)
-                        .accessibilityIdentifier("playMessageButton")
-                        .disabled(client.connectionState != .connected)
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: (threadBubbleWidthBasis > 0 ? threadBubbleWidthBasis : 360) * 0.78, alignment: .leading)
-            .background(message.role == "user" ? Color.logosAmber : Color.logosBG2)
-            .clipShape(ChatBubbleShape(isUser: message.role == "user"))
-            .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
-
-            if message.role != "user" { Spacer(minLength: 48) }
-        }
-        .frame(maxWidth: .infinity)
+    private var threadContentFingerprint: Int {
+        threadTimelineSnapshot.threadContentSignature
     }
 
     private var composerBar: some View {
@@ -1324,11 +1092,6 @@ struct ContentView: View {
         return "Starts tap to record"
     }
 
-    private func messageBubbleAccessibilityLabel(_ message: LogosMessage) -> String {
-        let speaker = message.role == "user" ? "You" : "Hermes"
-        return "\(speaker): \(message.content)"
-    }
-
     private func submitDraft() {
         let pendingDraft = draft
         Task { @MainActor in
@@ -1438,6 +1201,9 @@ struct ContentView: View {
         }
     }
 
+    // `shouldShowRunControl` and `canRetryProgressRun` stay here: the timeline snapshot (still
+    // computed in ContentView for `forceFollowThreadContent`) reads them. `isProgressWorking` /
+    // `canStopProgressRun` moved to `ThreadView` with the `ProgressActivityCard` that used them.
     private var shouldShowRunControl: Bool {
         switch client.runStatus {
         case .running, .queued, .awaitingApproval, .awaitingClarification, .cancelling:
@@ -1445,20 +1211,6 @@ struct ContentView: View {
         case .idle, .error:
             return false
         }
-    }
-
-    private var isProgressWorking: Bool {
-        guard client.progressActivity?.isComplete == false else { return false }
-        switch client.runStatus {
-        case .running, .queued:
-            return true
-        case .idle, .awaitingApproval, .awaitingClarification, .cancelling, .error:
-            return false
-        }
-    }
-
-    private var canStopProgressRun: Bool {
-        shouldShowRunControl && client.connectionState == .connected && client.runStatus != .cancelling
     }
 
     private var canRetryProgressRun: Bool {
