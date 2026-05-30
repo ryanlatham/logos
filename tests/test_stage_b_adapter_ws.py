@@ -724,6 +724,32 @@ async def test_gateway_still_working_send_broadcasts_transient_status_progress_w
 
 
 @pytest.mark.asyncio
+async def test_working_heartbeat_send_broadcasts_transient_status_progress_without_idle(tmp_path):
+    # The "Working — N min — iteration X/Y, API call #Z completed" heartbeat phrasing must be
+    # folded into the working/progress card (transient tool_progress), not stored + delivered
+    # as a final assistant message bubble.
+    adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
+    fake_server = FakeServer()
+    adapter.ws_server = fake_server  # type: ignore[assignment]
+    content = "⏳ Working — 3 min — iteration 2/1000, API call #2 completed"
+
+    sent = await adapter.send("project:archwright", content, metadata={"session_id": "sess-progress"})
+
+    assert sent.success is True
+    assert str(sent.message_id).startswith("progress-")
+    assert adapter.store.messages_after_server_seq("archwright", 0) == []
+    frames = [item["frame"] for item in fake_server.frames]
+    assert [frame["type"] for frame in frames] == ["tool_progress"]
+    frame = frames[0]
+    assert frame["project_key"] == "archwright"
+    assert frame["session_id"] == "sess-progress"
+    assert frame["payload"]["kind"] == "gateway_status"
+    assert frame["payload"]["progress_kind"] == "gateway_status"
+    assert frame["payload"]["text"] == content
+    assert frame["payload"]["transient"] is True
+
+
+@pytest.mark.asyncio
 async def test_retry_status_send_broadcasts_transient_status_progress_without_idle(tmp_path):
     adapter = LogosAdapter(PlatformConfig(enabled=True, extra={"device_secret": "dev-secret", "store_path": str(tmp_path / "logos.db")}))
     fake_server = FakeServer()
