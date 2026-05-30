@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// Client-side dependencies the audio-playback subsystem needs from its owner (WS1 P5). The
 /// `AudioCoordinator` reaches back through this narrow seam instead of holding the whole
@@ -31,11 +32,12 @@ protocol AudioCoordinatorHost: AnyObject {
 /// `audioPlaybackOverlay`/`playbackStatus` via computed forwarding so views/tests are unchanged.
 /// All client-side dependencies are routed through `host` (held `weak`).
 @MainActor
-final class AudioCoordinator: ObservableObject {
-    @Published private(set) var audioPlaybackOverlay: AudioPlaybackOverlayState?
-    @Published var playbackStatus: String?
+@Observable
+final class AudioCoordinator {
+    private(set) var audioPlaybackOverlay: AudioPlaybackOverlayState?
+    var playbackStatus: String?
 
-    weak var host: AudioCoordinatorHost?
+    @ObservationIgnored weak var host: AudioCoordinatorHost?
 
     private let audioPlayback: AudioPlaybackController
     private var requestedAudioIDs = Set<String>()

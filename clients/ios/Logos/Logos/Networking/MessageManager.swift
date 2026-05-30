@@ -1,5 +1,5 @@
-import Combine
 import Foundation
+import Observation
 
 /// Client-side dependencies the message-DATA/LIST subsystem needs from its owner (WS1 P5, mirroring
 /// `AudioCoordinatorHost` + `ProgressActivityManagerHost` + `InteractionControllerHost` +
@@ -31,10 +31,11 @@ protocol MessageManagerHost: AnyObject {
 /// list mutation + store write — preserving the exact ordering/semantics. All client-side dependencies
 /// are routed through `host` (held `weak`).
 @MainActor
-final class MessageManager: ObservableObject {
-    @Published private(set) var messages: [LogosMessage] = []
+@Observable
+final class MessageManager {
+    private(set) var messages: [LogosMessage] = []
 
-    weak var host: MessageManagerHost?
+    @ObservationIgnored weak var host: MessageManagerHost?
 
     /// The persistence injected through `LogosClient.init(store:)` (the test seam stays via the
     /// client's initializer, which threads its `store:` parameter straight into this manager).

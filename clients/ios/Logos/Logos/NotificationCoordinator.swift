@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import UIKit
 import UserNotifications
 
@@ -62,12 +63,13 @@ enum LogosAPNSEnvironment {
 }
 
 @MainActor
-final class NotificationCoordinator: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+@Observable
+final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationCoordinator()
 
-    @Published private(set) var authorizationStatus: String = "Notifications not requested"
-    @Published private(set) var deviceToken: String?
-    @Published private(set) var lastRoute: LogosNotificationRoute?
+    private(set) var authorizationStatus: String = "Notifications not requested"
+    private(set) var deviceToken: String?
+    private(set) var lastRoute: LogosNotificationRoute?
 
     var onRoute: ((LogosNotificationRoute) -> Void)? {
         didSet {

@@ -1,5 +1,5 @@
-import Combine
 import Foundation
+import Observation
 import OSLog
 import UIKit
 
@@ -31,8 +31,9 @@ struct FastAckState: Equatable {
 }
 
 @MainActor
-final class LogosClient: ObservableObject {
-    @Published var settings = LogosSettings() {
+@Observable
+final class LogosClient {
+    var settings = LogosSettings() {
         didSet {
             settings.persist()
             if settings.urlString != oldValue.urlString
@@ -43,8 +44,8 @@ final class LogosClient: ObservableObject {
             }
         }
     }
-    @Published private(set) var projects: [LogosProject] = []
-    @Published var activeProjectKey: String = "default" {
+    private(set) var projects: [LogosProject] = []
+    var activeProjectKey: String = "default" {
         didSet {
             messageManager.refreshMessages()
             if oldValue != activeProjectKey {
@@ -54,28 +55,22 @@ final class LogosClient: ObservableObject {
             }
         }
     }
-    @Published private(set) var runStatus: LogosRunStatus = .idle
-    @Published var lastError: String?
+    private(set) var runStatus: LogosRunStatus = .idle
+    var lastError: String?
     /// Bounded, source-tagged history of client errors (WS1 P7). `lastError` remains the
     /// transient single-error banner; `errorLog` is the persistent, dismissible record.
-    @Published private(set) var errorLog = ErrorLogBuffer()
-    @Published private(set) var ackText: String?
-    @Published private(set) var undeliveredSpeechDraft: UndeliveredSpeechDraft?
-    @Published internal(set) var slashCommandCatalog: SlashCommandCatalog = .fallback
-    @Published internal(set) var slashCommandCompletion: SlashCommandCompletionResult = .empty
+    private(set) var errorLog = ErrorLogBuffer()
+    private(set) var ackText: String?
+    private(set) var undeliveredSpeechDraft: UndeliveredSpeechDraft?
+    var slashCommandCatalog: SlashCommandCatalog = .fallback
+    var slashCommandCompletion: SlashCommandCompletionResult = .empty
 
     let logosConnection: LogosConnection
-    private var connectionCancellable: AnyCancellable?
     let messageManager: MessageManager
-    private var messageCancellable: AnyCancellable?
     let audioCoordinator: AudioCoordinator
-    private var audioCancellable: AnyCancellable?
     let progressActivityManager: ProgressActivityManager
-    private var progressCancellable: AnyCancellable?
     let interactionController: InteractionController
-    private var interactionCancellable: AnyCancellable?
     let notificationRouter: NotificationRouter
-    private var notificationCancellable: AnyCancellable?
     private var staleTimeoutInterval: TimeInterval
     private let pairingExchanger: any PairingCredentialExchanging
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
@@ -122,37 +117,11 @@ final class LogosClient: ObservableObject {
         progressActivityManager.host = self
         interactionController.host = self
         notificationRouter.host = self
-        // Re-emit the connection's published `connectionState` changes as our own so SwiftUI views
-        // observing `LogosClient` refresh when the (forwarded) connection state changes (WS1 P5).
-        connectionCancellable = logosConnection.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-        // Re-emit the message manager's published `messages` changes as our own so SwiftUI views
-        // observing `LogosClient` refresh when the (forwarded) visible thread changes (WS1 P5,
-        // mirrors the audio/progress/interaction/notification wiring).
-        messageCancellable = messageManager.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-        // Re-emit the coordinator's published audio-state changes as our own so SwiftUI views
-        // observing `LogosClient` refresh when the (forwarded) overlay/status change.
-        audioCancellable = audioCoordinator.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-        // Re-emit the progress manager's published changes so views reading the forwarded
-        // `progressActivity`/`connectionRetryState` refresh (WS1 P5, mirrors the audio wiring).
-        progressCancellable = progressActivityManager.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-        // Re-emit the interaction controller's published changes so views reading the forwarded
-        // `approvalCard`/`clarifyCard`/`pendingInteractionResponseID` refresh (WS1 P5).
-        interactionCancellable = interactionController.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-        // Re-emit the notification router's published changes so views reading the forwarded
-        // `threadFocusRequest` refresh (WS1 P5, mirrors the audio/progress/interaction wiring).
-        notificationCancellable = notificationRouter.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
+        // WS1 P5 wired six Combine `objectWillChange` sinks here so views observing `LogosClient`
+        // refreshed when a collaborator's published state changed. The `@Observable` macro makes that
+        // forwarding automatic: reading a computed forwarder (e.g. `client.messages`) inside a view's
+        // `body` transitively registers the nested `@Observable` collaborator access, so the sinks are
+        // redundant and were removed (Phase 2 modernization).
     }
 
     func connectIfRequestedByEnvironment() {
