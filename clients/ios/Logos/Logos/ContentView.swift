@@ -513,6 +513,11 @@ struct ContentView: View {
                         .id("thread-bottom")
                 }
                 .scrollTargetLayout()
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width
+                } action: { width in
+                    threadBubbleWidthBasis = width
+                }
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
                 .padding(.bottom, composerMode == .text ? 16 : 28)
@@ -847,11 +852,6 @@ struct ContentView: View {
             if message.role != "user" { Spacer(minLength: 48) }
         }
         .frame(maxWidth: .infinity)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width
-        } action: { width in
-            threadBubbleWidthBasis = width
-        }
     }
 
     private var composerBar: some View {
@@ -1619,7 +1619,7 @@ struct ContentView: View {
                                     UIPasteboard.general.string = generatedDeviceKey
                                     copiedDeviceKey = true
                                     Task { @MainActor in
-                                        try? await Task.sleep(nanoseconds: 1_600_000_000)
+                                        try? await Task.sleep(for: .milliseconds(1600))
                                         copiedDeviceKey = false
                                     }
                                 }
@@ -2118,7 +2118,7 @@ struct ContentView: View {
                 recordFollowedSnapshot: recordFollowedSnapshot,
                 followedFingerprint: followedFingerprint
             )
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(for: .milliseconds(180))
             guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
             scrollThreadToBottom(
                 animated: false,
@@ -2127,7 +2127,7 @@ struct ContentView: View {
             )
             confirmPassiveThreadFollowIfStillAtBottom()
             if recordFollowedSnapshot == false {
-                try? await Task.sleep(nanoseconds: 600_000_000)
+                try? await Task.sleep(for: .milliseconds(600))
                 guard shouldApplyScheduledThreadFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, force: false, scheduledCanFollow: scheduledCanFollow) else { return }
                 refreshForceFollowedThreadSnapshotIfStillAtBottom()
             }
@@ -2161,12 +2161,12 @@ struct ContentView: View {
             scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: animated, followedFingerprint: followedFingerprint)
             ThreadFocusLog.logger.info("Thread focus applied pass=1 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
 
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(for: .milliseconds(180))
             guard shouldApplyScheduledThreadTargetFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, targetID: targetID, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
             scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: false, followedFingerprint: followedFingerprint)
             ThreadFocusLog.logger.info("Thread focus applied pass=2 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
 
-            try? await Task.sleep(nanoseconds: 420_000_000)
+            try? await Task.sleep(for: .milliseconds(420))
             guard shouldApplyScheduledThreadTargetFollow(epoch: scheduledEpoch, projectKey: scheduledProjectKey, targetID: targetID, force: force, scheduledCanFollow: scheduledCanFollow) else { return }
             scrollThreadToTarget(targetID: targetID, anchor: anchor, animated: false, followedFingerprint: followedFingerprint)
             ThreadFocusLog.logger.info("Thread focus applied pass=3 target_message_id=\(targetID, privacy: .public) project_key=\(scheduledProjectKey, privacy: .public)")
@@ -2405,7 +2405,7 @@ struct ContentView: View {
                 isCreatingProject = false
                 closeProjectSwitcher()
                 justCreatedProject = true
-                try? await Task.sleep(nanoseconds: 1_800_000_000)
+                try? await Task.sleep(for: .milliseconds(1800))
                 if justCreatedProject || activeProjectTitle == createdTitle {
                     justCreatedProject = false
                 }

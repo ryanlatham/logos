@@ -152,7 +152,7 @@ final class ProgressActivityManager {
         reconnectTask?.cancel()
         reconnectTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+                try await Task.sleep(for: .seconds(max(0, delay)))
             } catch {
                 return
             }

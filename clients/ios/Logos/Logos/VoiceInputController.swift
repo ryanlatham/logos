@@ -357,7 +357,7 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
         bestTranscriptFallbackTask?.cancel()
         bestTranscriptFallbackTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: Self.bestTranscriptGraceNanoseconds)
+                try await Task.sleep(for: .nanoseconds(Int(Self.bestTranscriptGraceNanoseconds)))
             } catch {
                 return
             }
@@ -375,7 +375,7 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
         finalizationTask?.cancel()
         finalizationTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: Self.finalizationTimeoutNanoseconds)
+                try await Task.sleep(for: .nanoseconds(Int(Self.finalizationTimeoutNanoseconds)))
             } catch {
                 return
             }

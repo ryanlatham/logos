@@ -25,7 +25,7 @@ final class PlaybackStreamTimeout {
         let interval = self.interval
         task = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                try await Task.sleep(for: .seconds(interval))
             } catch {
                 return
             }

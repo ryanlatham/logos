@@ -72,7 +72,7 @@ final class AudioCoordinator {
                     )
                     self.playbackStatus = "Audio finished"
                     Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        try? await Task.sleep(for: .seconds(3))
                         guard let self else { return }
                         if self.audioPlaybackOverlay?.audioID == audioID,
                            self.audioPlaybackOverlay?.phase == .finished {
@@ -297,7 +297,7 @@ final class AudioCoordinator {
     private func scheduleFailedAudioOverlayDismissal(audioID: String) {
         Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 6_000_000_000)
+                try await Task.sleep(for: .seconds(6))
             } catch {
                 return
             }

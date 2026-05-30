@@ -75,8 +75,8 @@ final class LogosClient {
     private let pairingExchanger: any PairingCredentialExchanging
     private var inFlightFinalSpeechDrafts: [String: UndeliveredSpeechDraft] = [:]
     private var ackState: FastAckState?
-    private let staleTimeoutScheduler: any StaleTimeoutScheduling
-    private let ackClearScheduler: any AckClearScheduling
+    private let staleTimeoutScheduler: any DelayedFireScheduling
+    private let ackClearScheduler: any DelayedFireScheduling
     private var pendingCancelRequestID: String?
     var pendingCommandCatalogRequestID: String?
     var pendingCommandCompletionRequestID: String?
@@ -97,8 +97,8 @@ final class LogosClient {
         pairingExchanger: any PairingCredentialExchanging = WebSocketPairingCredentialExchanger(),
         audioPlayback: AudioPlaybackController = AudioPlaybackController(),
         staleTimeoutInterval: TimeInterval = 900,
-        staleTimeoutScheduler: (any StaleTimeoutScheduling)? = nil,
-        ackClearScheduler: (any AckClearScheduling)? = nil
+        staleTimeoutScheduler: (any DelayedFireScheduling)? = nil,
+        ackClearScheduler: (any DelayedFireScheduling)? = nil
     ) {
         self.logosConnection = LogosConnection(socketFactory: socketFactory)
         self.pairingExchanger = pairingExchanger
@@ -108,8 +108,8 @@ final class LogosClient {
         self.interactionController = InteractionController()
         self.notificationRouter = NotificationRouter()
         self.staleTimeoutInterval = min(max(0.001, staleTimeoutInterval), Self.maxStaleTimeoutInterval)
-        self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskStaleTimeoutScheduler()
-        self.ackClearScheduler = ackClearScheduler ?? TaskAckClearScheduler()
+        self.staleTimeoutScheduler = staleTimeoutScheduler ?? TaskDelayedFireScheduler()
+        self.ackClearScheduler = ackClearScheduler ?? TaskDelayedFireScheduler()
         logosConnection.host = self
         messageManager.host = self
         messageManager.loadInitialMessages(projectKey: activeProjectKey)

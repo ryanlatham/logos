@@ -36,7 +36,7 @@ final class PlaybackStreamTimeoutTests: XCTestCase {
         var fired = false
         timeout.schedule(audioID: "a") { _ in fired = true }
         timeout.cancel()
-        try? await Task.sleep(nanoseconds: 200_000_000)  // well past the 50ms interval
+        try? await Task.sleep(for: .milliseconds(200))  // well past the 50ms interval
         XCTAssertFalse(fired)
     }
 

@@ -504,7 +504,7 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         let deadline = Date().addingTimeInterval(timeout)
         while spectrumDecodeTokensByAudioID[audioID] != nil {
             if Date() >= deadline { return false }
-            try? await Task.sleep(nanoseconds: 10_000_000)
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return true
     }
