@@ -54,7 +54,7 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
         refreshAvailability()
     }
 
-    deinit {
+    isolated deinit {
         NotificationCenter.default.removeObserver(self)
         finalizationTask?.cancel()
         bestTranscriptFallbackTask?.cancel()
@@ -536,14 +536,16 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
     }
 
     @objc private nonisolated func handleAudioSessionInterruptionNotification(_ notification: Notification) {
+        let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
         Task { @MainActor [weak self] in
-            self?.handleAudioSessionInterruption(notification)
+            self?.handleAudioSessionInterruption(rawType: rawType)
         }
     }
 
     @objc private nonisolated func handleAudioRouteChangeNotification(_ notification: Notification) {
+        let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
         Task { @MainActor [weak self] in
-            self?.handleAudioRouteChange(notification)
+            self?.handleAudioRouteChange(rawReason: rawReason)
         }
     }
 
@@ -553,9 +555,9 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
         }
     }
 
-    private func handleAudioSessionInterruption(_ notification: Notification) {
+    private func handleAudioSessionInterruption(rawType: UInt?) {
         guard
-            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let rawType,
             let type = AVAudioSession.InterruptionType(rawValue: rawType)
         else { return }
 
@@ -569,9 +571,9 @@ final class VoiceInputController: NSObject, SFSpeechRecognizerDelegate {
         }
     }
 
-    private func handleAudioRouteChange(_ notification: Notification) {
+    private func handleAudioRouteChange(rawReason: UInt?) {
         guard
-            let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+            let rawReason,
             let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason)
         else { return }
         if reason == .oldDeviceUnavailable {

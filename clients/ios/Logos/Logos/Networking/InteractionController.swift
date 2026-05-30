@@ -19,7 +19,7 @@ protocol InteractionControllerHost: AnyObject {
     /// `ensureConnectedForUserAction`, including its error side effect when not connected).
     @discardableResult func ensureInteractionConnected(_ action: String) -> Bool
     /// Send an interaction-response frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendInteractionFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendInteractionFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
     /// Cancel the stale-silence watchdog (mirrors `LogosClient.suspendStaleTimeout`).
     func suspendInteractionStaleTimeout()
     /// Show the transient fast-ack banner (mirrors `LogosClient.setTransientAck`).

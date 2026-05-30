@@ -23,7 +23,7 @@ protocol NotificationRouterHost: AnyObject {
     /// Kick a fresh connect attempt when a route arrives while disconnected (mirrors `LogosClient.connect()`).
     func notificationConnect()
     /// Send a notification-subsystem frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendNotificationFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendNotificationFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
     /// Request a message backfill window (mirrors `LogosClient.requestMessages(afterServerSeq:)`).
     func notificationRequestMessages(afterServerSeq: Int)
     /// The newest persisted `server_seq` for a project (mirrors `LogosClient.latestServerSeq(projectKey:)`).

@@ -15,7 +15,7 @@ protocol AudioCoordinatorHost: AnyObject {
     /// `ensureConnectedForUserAction`, including its error side effect when not connected).
     @discardableResult func ensureAudioConnected(_ action: String) -> Bool
     /// Send a playback frame over the socket (mirrors `LogosClient.sendFrame`'s default-auth path).
-    @discardableResult func sendAudioFrame(_ frame: [String: Any], onCompletion: ((Result<Void, Error>) -> Void)?) -> Bool
+    @discardableResult func sendAudioFrame(_ frame: [String: Any], onCompletion: (@MainActor @Sendable (Result<Void, Error>) -> Void)?) -> Bool
     /// Extract a non-empty `project_key` from an inbound frame root.
     func audioFrameProjectKey(_ root: [String: Any]) -> String?
     /// Surface a playback error: the client clears the transient ack and records it under `.audio`.

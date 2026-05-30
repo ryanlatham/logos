@@ -2,6 +2,7 @@ import XCTest
 import AVFoundation
 @testable import Logos
 
+@MainActor
 final class LogosModelTests: XCTestCase {
     func testThreadAutoFollowPolicyUsesViewportBasedDetachThreshold() {
         XCTAssertEqual(ThreadAutoFollowPolicy.detachThreshold(visibleHeight: 400), 160)
@@ -5612,7 +5613,7 @@ private final class RecordingAudioPlayerFactory: AudioPlayerMaking {
     }
 }
 
-private final class RecordingAudioSampleDecoder: AudioSampleDecoding {
+private final class RecordingAudioSampleDecoder: AudioSampleDecoding, @unchecked Sendable {
     let decodedSamples: DecodedAudioSamples?
     let error: Error?
     private let lock = NSLock()
@@ -5648,7 +5649,7 @@ private struct RecordingAudioSampleDecoderError: LocalizedError {
     }
 }
 
-private final class RecordingPairingCredentialExchanger: PairingCredentialExchanging {
+private final class RecordingPairingCredentialExchanger: PairingCredentialExchanging, @unchecked Sendable {
     var credential: LogosPairingCredential?
     var error: Error?
     private(set) var routes: [LogosPairingRoute] = []
