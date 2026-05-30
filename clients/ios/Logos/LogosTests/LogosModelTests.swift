@@ -4332,8 +4332,12 @@ final class LogosModelTests: XCTestCase {
         // completes (late) with a failure, which then clears the overlay.
         socket.holdNextSends()
         let playbackTask = Task { @MainActor in await client.playback(message: message) }
-        while client.audioPlaybackOverlay?.phase != .requesting {
-            await Task.yield()
+        // The overlay flips to `.requesting` before `await sendAudioFrame` records the (parked) frame,
+        // so gate on BOTH the phase and the recorded request frame — gating on the phase alone races
+        // the send on a loaded runner, where `sentMessages.last` would still be a stale connection frame.
+        await yieldUntil {
+            client.audioPlaybackOverlay?.phase == .requesting
+                && ((try? frameRoot(from: socket.sentMessages.last ?? .string("")))?["payload"] as? [String: Any])?["audio_id"] != nil
         }
         XCTAssertEqual(client.audioPlaybackOverlay?.phase, .requesting)
         let requestRoot = try frameRoot(from: try XCTUnwrap(socket.sentMessages.last))
