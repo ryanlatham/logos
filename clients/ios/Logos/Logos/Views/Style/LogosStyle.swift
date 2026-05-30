@@ -93,15 +93,10 @@ extension View {
                 }
                 .shadow(color: Color.logosRed.opacity(0.45), radius: 24, x: 0, y: 0)
                 .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 8)
-        } else if #available(iOS 26.0, *) {
-            self
-                .background(tint, in: Capsule())
-                .glassEffect(.regular.tint(tint).interactive(isInteractive), in: Capsule())
-                .liquidGlassPillChrome(isFocused: isFocused)
         } else {
             self
                 .background(tint, in: Capsule())
-                .background(.ultraThinMaterial, in: Capsule())
+                .glassEffect(.regular.tint(tint).interactive(isInteractive), in: Capsule())
                 .liquidGlassPillChrome(isFocused: isFocused)
         }
     }
