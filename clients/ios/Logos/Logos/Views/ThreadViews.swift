@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 import Foundation
 import OSLog
 
@@ -265,14 +264,25 @@ struct ProgressElapsedTimeLabel: View {
     let activity: ProgressActivityState
 
     var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { context in
-            Text(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(activity.isComplete ? Color.logosLabel3 : Color.logosAmber)
-                .lineLimit(1)
-                .monospacedDigit()
-                .accessibilityLabel(activity.isComplete ? "Completed in \(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))" : "Elapsed \(elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: context.date))")
+        if activity.isComplete {
+            // Completed: elapsed is measured to `completedAt`, so the value is frozen — no clock.
+            label(now: Date(timeIntervalSince1970: 0))
+        } else {
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                label(now: context.date)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func label(now: Date) -> some View {
+        let text = elapsedTimeText(startedAt: activity.startedAt, completedAt: activity.completedAt, now: now)
+        Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .foregroundStyle(activity.isComplete ? Color.logosLabel3 : Color.logosAmber)
+            .lineLimit(1)
+            .monospacedDigit()
+            .accessibilityLabel(activity.isComplete ? "Completed in \(text)" : "Elapsed \(text)")
     }
 }
 
@@ -292,45 +302,48 @@ struct ConnectionRetryCard: View {
     let state: ConnectionRetryState
 
     var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { context in
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .center, spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.logosAmber)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Reconnecting")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.logosLabel)
-                        Text("\(state.attemptCount) attempt\(state.attemptCount == 1 ? "" : "s")")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(Color.logosLabel3)
-                    }
-                    Spacer(minLength: 8)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.logosAmber)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reconnecting")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.logosLabel)
+                    Text("\(state.attemptCount) attempt\(state.attemptCount == 1 ? "" : "s")")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.logosLabel3)
+                }
+                Spacer(minLength: 8)
+                // Only the countdown needs the per-second clock; the rest of the card is static
+                // until `state` changes, so scope the TimelineView to just this label rather than
+                // rebuilding the whole card (icon + attempts + error + event list) every second.
+                TimelineView(.periodic(from: Date(), by: 1)) { context in
                     Text(retryCountdownText(now: context.date))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color.logosAmber)
                         .monospacedDigit()
                 }
-
-                Text(state.latestError)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.logosLabel2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                ForEach(state.events.suffix(3)) { event in
-                    Text(event.text)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundStyle(Color.logosLabel3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.24), lineWidth: 0.5))
-            .accessibilityIdentifier("connectionRetryCard")
+
+            Text(state.latestError)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.logosLabel2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(state.events.suffix(3)) { event in
+                Text(event.text)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.logosLabel3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.logosBG2.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.logosAmber.opacity(0.24), lineWidth: 0.5))
+        .accessibilityIdentifier("connectionRetryCard")
     }
 
     private func retryCountdownText(now: Date) -> String {
