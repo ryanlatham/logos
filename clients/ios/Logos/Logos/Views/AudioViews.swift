@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 import Foundation
 import OSLog
 
@@ -81,6 +80,32 @@ struct AudioPlaybackOverlayView: View {
             return "Audio finished"
         case .failed:
             return "Audio failed"
+        }
+    }
+}
+
+/// Hosts the audio-playback overlay as its own observation scope: it is the only view that reads
+/// `client.audioPlaybackOverlay`, so the ~20fps spectrum updates during playback invalidate just
+/// this layer instead of re-evaluating all of `ContentView`'s body.
+struct AudioOverlayLayer: View {
+    @Environment(LogosClient.self) private var client
+
+    var body: some View {
+        if let overlay = client.audioPlaybackOverlay {
+            AudioPlaybackOverlayView(
+                overlay: overlay,
+                onPauseResume: {
+                    if overlay.phase == .paused {
+                        client.resumePlayback()
+                    } else {
+                        client.pausePlayback()
+                    }
+                },
+                onStop: { client.stopPlayback() }
+            )
+            .padding(.horizontal, 14)
+            .padding(.top, 66)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 }

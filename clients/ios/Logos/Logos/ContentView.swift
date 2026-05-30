@@ -295,23 +295,8 @@ struct ContentView: View {
                 composerBar
             }
 
-            if let overlay = client.audioPlaybackOverlay {
-                AudioPlaybackOverlayView(
-                    overlay: overlay,
-                    onPauseResume: {
-                        if overlay.phase == .paused {
-                            client.resumePlayback()
-                        } else {
-                            client.pausePlayback()
-                        }
-                    },
-                    onStop: { client.stopPlayback() }
-                )
-                .padding(.horizontal, 14)
-                .padding(.top, 66)
-                .transition(.move(edge: .top).combined(with: .opacity))
+            AudioOverlayLayer()
                 .zIndex(6)
-            }
 
             if showProjectSwitcher {
                 projectSwitcherLayer
