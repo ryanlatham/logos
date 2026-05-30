@@ -2193,6 +2193,7 @@ final class LogosModelTests: XCTestCase {
             "Views/ListRowViews.swift",
             "Views/SettingsViews.swift",
             "Views/OverlayViews.swift",
+            "Views/ThreadFollowModel.swift",
         ].map { try String(contentsOf: logosDirectory.appendingPathComponent($0), encoding: .utf8) }
             .joined(separator: "\n")
         let messagesRange = try XCTUnwrap(contentViewSource.range(of: "ForEach(threadMessagesBeforeProgress)"))
